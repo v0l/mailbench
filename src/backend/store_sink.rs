@@ -80,6 +80,13 @@ impl<'a> StoreSink<'a> {
         Ok(out)
     }
 
+    pub fn summary(&self, folder: &str, uid: u32) -> Result<Option<MessageSummary>> {
+        match self.store.get(MESSAGE, &self.message_id(folder, uid)?)? {
+            Some(raw) => Ok(Some(decode(&raw)?)),
+            None => Ok(None),
+        }
+    }
+
     pub fn folders(&self) -> Result<Vec<Folder>> {
         match self.store.get(FOLDERS, &self.account)? {
             Some(raw) => decode(&raw),

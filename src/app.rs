@@ -386,7 +386,14 @@ impl App {
                         let text = if n == 1 { "1 account needs you".to_string() } else { format!("{n} accounts need you") };
                         chip(ui, &text, FAULT, true);
                     } else {
-                        chip(ui, &format!("idle on {} of {}", accounts.len(), accounts.len()), TRACE, true);
+                        let idle = accounts.iter().filter(|a| a.sync == SyncState::Idle).count();
+                        let syncing = accounts.iter().any(|a| a.sync == SyncState::Syncing);
+                        let text = if syncing && idle < accounts.len() {
+                            format!("syncing, idle on {} of {}", idle, accounts.len())
+                        } else {
+                            format!("idle on {} of {}", idle, accounts.len())
+                        };
+                        chip(ui, &text, TRACE, true);
                     }
                 });
             });
