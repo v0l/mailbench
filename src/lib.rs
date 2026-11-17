@@ -4,6 +4,7 @@ pub mod concept_b;
 pub mod concept_c;
 pub mod data;
 pub mod kit;
+pub mod store;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Concept {
