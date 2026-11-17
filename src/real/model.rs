@@ -58,7 +58,7 @@ pub fn server_folder(folders: &[Remote], target: Folder) -> Option<String> {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Op {
-    Flags { account: String, folder: String, uid: u32, uid_validity: u32, seen: Option<bool>, flagged: Option<bool> },
+    Flags { account: String, folder: String, uid: u32, uid_validity: u32, seen: Option<bool>, flagged: Option<bool>, base_seen: bool, base_flagged: bool },
     Move { account: String, folder: String, uid: u32, uid_validity: u32, to: String },
     Send { account: String, local: String },
 }

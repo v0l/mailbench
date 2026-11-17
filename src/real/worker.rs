@@ -59,13 +59,18 @@ fn retryable(e: &BackendError) -> bool {
 
 fn push(shared: &Shared, backend: &mut dyn Backend, op: &Op, account: &str) -> Result<()> {
     match op {
-        Op::Flags { folder, uid, uid_validity, seen, flagged, .. } => {
+        Op::Flags { folder, uid, uid_validity, seen, flagged, base_seen, base_flagged, .. } => {
             if shared.validity(account, folder) != Some(*uid_validity) {
                 return Ok(());
             }
+            let Some(current) = shared.stored_flags(account, folder, *uid) else {
+                return Ok(());
+            };
+            let seen = seen.filter(|_| current.seen == *base_seen);
+            let flagged = flagged.filter(|_| current.flagged == *base_flagged);
             let mut add = Flags::default();
             let mut remove = Flags::default();
-            for (value, on_set) in [(seen, 0), (flagged, 1)] {
+            for (value, on_set) in [(&seen, 0), (&flagged, 1)] {
                 let Some(value) = value else { continue };
                 let target = if *value { &mut add } else { &mut remove };
                 if on_set == 0 {
@@ -80,6 +85,7 @@ fn push(shared: &Shared, backend: &mut dyn Backend, op: &Op, account: &str) -> R
             if remove != Flags::default() {
                 backend.set_flags(folder, &[*uid], &FlagUpdate::Remove(remove))?;
             }
+            shared.apply_flags(account, folder, *uid, seen, flagged);
             Ok(())
         }
         Op::Move { folder, uid, uid_validity, to, .. } => {
@@ -119,17 +125,16 @@ fn push_outbox(shared: &Shared, account: &str, backend: &mut dyn Backend, done: 
 }
 
 fn cycle(shared: &Shared, account: &str, backend: &mut dyn Backend) -> Result<()> {
+    let mut sink = LockedSink { shared, account: account.to_string() };
+    sync_account(backend, &mut sink)?;
     let mut done = Vec::new();
     let pushed = push_outbox(shared, account, backend, &mut done);
-    let synced = match &pushed {
-        Ok(()) => {
-            let mut sink = LockedSink { shared, account: account.to_string() };
-            sync_account(backend, &mut sink).map(|_| ())
-        }
-        Err(_) => Ok(()),
-    };
     shared.remove_ops(&done);
-    pushed.and(synced)
+    pushed?;
+    if !done.is_empty() {
+        sync_account(backend, &mut sink)?;
+    }
+    Ok(())
 }
 
 fn inbox_name(shared: &Shared, account: &str) -> String {

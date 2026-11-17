@@ -145,6 +145,25 @@ impl Shared {
         StoreSink::new(&store, account, true).sync_token(folder).ok().flatten().map(|t| t.uid_validity)
     }
 
+    pub fn stored_flags(&self, account: &str, folder: &str, uid: u32) -> Option<Flags> {
+        let store = self.lock_store();
+        StoreSink::new(&store, account, true).summary(folder, uid).ok().flatten().map(|m| m.flags)
+    }
+
+    pub fn apply_flags(&self, account: &str, folder: &str, uid: u32, seen: Option<bool>, flagged: Option<bool>) {
+        let store = self.lock_store();
+        let mut sink = StoreSink::new(&store, account, true);
+        let Ok(Some(m)) = sink.summary(folder, uid) else { return };
+        let mut flags = m.flags;
+        if let Some(s) = seen {
+            flags.seen = s;
+        }
+        if let Some(f) = flagged {
+            flags.flagged = f;
+        }
+        let _ = sink.put_flags(folder, &[(uid, flags)]);
+    }
+
     pub fn folders_of(&self, account: &str) -> Vec<crate::backend::Folder> {
         let store = self.lock_store();
         StoreSink::new(&store, account, true).folders().unwrap_or_default()
@@ -214,6 +233,16 @@ impl Shared {
             let mut sink = StoreSink::new(&store, &account.id, true);
             let folders = sink.folders().unwrap_or_default();
             let mut pending: HashMap<(String, u32), String> = HashMap::new();
+            let mut flag_ops: HashMap<(String, u32), (Option<bool>, Option<bool>)> = HashMap::new();
+            for (_, op) in &ops {
+                if let Op::Flags { account: a, folder, uid, seen, flagged, .. } = op {
+                    if *a == account.id {
+                        let e = flag_ops.entry((folder.clone(), *uid)).or_default();
+                        e.0 = seen.or(e.0);
+                        e.1 = flagged.or(e.1);
+                    }
+                }
+            }
             for (_, op) in &ops {
                 if let Op::Move { account: a, folder, uid, to, .. } = op {
                     if *a == account.id {
@@ -260,8 +289,8 @@ impl Shared {
                         cc: display::people(&m.cc),
                         subject: m.subject.clone().unwrap_or_default(),
                         date: m.date.unwrap_or(0),
-                        unread: !m.flags.seen,
-                        flagged: m.flags.flagged,
+                        unread: flag_ops.get(&(folder.name.clone(), m.uid)).and_then(|f| f.0).map(|s| !s).unwrap_or(!m.flags.seen),
+                        flagged: flag_ops.get(&(folder.name.clone(), m.uid)).and_then(|f| f.1).unwrap_or(m.flags.flagged),
                         attachments,
                     });
                 }
@@ -379,6 +408,10 @@ impl RealStore {
 
     pub fn attach(&self, ctx: &egui::Context) {
         *lock(&self.shared.ctx) = Some(ctx.clone());
+    }
+
+    pub fn pending(&self) -> usize {
+        Shared::outbox_in(&self.shared.lock_store()).len()
     }
 
     pub fn sync_now(&self) {
@@ -516,19 +549,12 @@ impl MailStore for RealStore {
         let account = self.shared.accounts[e.account].id.clone();
         {
             let store = self.shared.lock_store();
-            let mut sink = StoreSink::new(&store, &account, true);
-            let mut flags = sink
+            let sink = StoreSink::new(&store, &account, true);
+            let base = sink
                 .summary(&e.server_folder, e.uid)
                 .map_err(backend_err)?
                 .ok_or(StoreError::NotFound)?
                 .flags;
-            if let Some(s) = seen {
-                flags.seen = s;
-            }
-            if let Some(f) = flagged {
-                flags.flagged = f;
-            }
-            sink.put_flags(&e.server_folder, &[(e.uid, flags)]).map_err(backend_err)?;
             self.shared.enqueue(
                 &store,
                 &Op::Flags {
@@ -538,6 +564,8 @@ impl MailStore for RealStore {
                     uid_validity: e.validity,
                     seen,
                     flagged,
+                    base_seen: base.seen,
+                    base_flagged: base.flagged,
                 },
             )?;
         }
