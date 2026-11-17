@@ -175,6 +175,8 @@ pub fn quoted_fold(ui: &mut Ui, lines: usize, open: bool) -> bool {
     let g = ui.fonts_mut(|f| f.layout_no_wrap(text, body(11.5), LEGEND));
     let (rect, resp) = ui.allocate_exact_size(g.size() + Vec2::new(0.0, 6.0), Sense::click());
     ui.painter().galley(rect.left_top() + Vec2::new(0.0, 3.0), g, if resp.hovered() { VALUE } else { LEGEND });
+    let label = if open { format!("{lines} quoted lines shown") } else { format!("{lines} quoted lines hidden") };
+    ui.ctx().accesskit_node_builder(resp.id, |node| node.set_label(label));
     resp.clicked()
 }
 

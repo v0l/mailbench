@@ -190,9 +190,17 @@ fn render_every_screen() {
     let mut h = harness(FakeStore::concept());
     save(&mut h, "inbox");
 
-    h.state_mut().1.reader_focus = true;
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.get_by_label_contains("quoted lines hidden").click();
+    h.run();
+    h.run();
+    assert!(h.state().1.quotes_open && h.state().1.reader_focus);
+    h.get_by_label_contains("quoted lines shown").click();
+    h.run();
+    h.run();
+    assert!(!h.state().1.quotes_open);
     save(&mut h, "reader");
-
     h.key_press(egui::Key::R);
     h.run();
     h.run();
