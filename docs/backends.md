@@ -11,6 +11,7 @@ Code lives in `src/backend/`.
 | `imap.rs` | `ImapBackend` |
 | `smtp.rs` | `SmtpBackend` |
 | `sync.rs` | `SyncSink` and `sync_account` |
+| `store_sink.rs` | `StoreSink`, a `SyncSink` over the encrypted `Store` (summaries, flags, tokens, optional bodies and search index) |
 | `memory.rs` | `MemorySink`, an in memory sink for tests |
 
 ## The trait
@@ -56,4 +57,4 @@ docker run -d --rm --name mailbench-greenmail \
 cargo test --test backend_greenmail
 ```
 
-Greenmail has no STARTTLS and no CONDSTORE, so those paths are not covered by the suite.
+`tests/backend_dovecot.rs` runs Dovecot 2.3 (`tests/fixtures/dovecot/dovecot.conf`, self signed cert, static passdb) on ports 3144 and 3994 for STARTTLS, CONDSTORE `CHANGEDSINCE` flag sync and UIDVALIDITY resets. `tests/backend_store.rs` syncs into an encrypted store and checks the files hold no plaintext. `tests/backend_xoauth2.rs` checks the XOAUTH2 string against mock servers. Docker tests skip when docker is missing.

@@ -42,3 +42,9 @@ impl From<std::io::Error> for BackendError {
         BackendError::Connection(e.to_string())
     }
 }
+
+impl From<crate::store::StoreError> for BackendError {
+    fn from(e: crate::store::StoreError) -> Self {
+        BackendError::Store(e.to_string())
+    }
+}

@@ -85,7 +85,11 @@ impl ImapBackend {
 
     fn session(&mut self) -> Result<&mut Session<Connection>> {
         if self.session.is_none() {
-            self.session = Some(connect(&self.cfg)?);
+            let mut session = connect(&self.cfg)?;
+            if session.capabilities()?.has_str("CONDSTORE") {
+                session.run_command_and_check_ok("ENABLE CONDSTORE")?;
+            }
+            self.session = Some(session);
         }
         Ok(self.session.as_mut().unwrap())
     }

@@ -10,6 +10,14 @@ pub trait SyncSink {
     fn put_flags(&mut self, folder: &str, changes: &[(u32, Flags)]) -> Result<usize>;
     fn retain_uids(&mut self, folder: &str, uids: &[u32]) -> Result<()>;
     fn put_token(&mut self, folder: &str, token: &SyncToken) -> Result<()>;
+
+    fn wants_bodies(&self) -> bool {
+        false
+    }
+
+    fn put_body(&mut self, _folder: &str, _uid: u32, _raw: &[u8]) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -35,6 +43,12 @@ pub fn sync_account(backend: &mut dyn Backend, sink: &mut dyn SyncSink) -> Resul
             report.resets += 1;
         }
         sink.put_summaries(&folder.name, &delta.added)?;
+        if sink.wants_bodies() {
+            for m in &delta.added {
+                let raw = backend.fetch(&folder.name, m.uid)?;
+                sink.put_body(&folder.name, m.uid, &raw)?;
+            }
+        }
         report.flag_changes += sink.put_flags(&folder.name, &delta.flag_changes)?;
         sink.retain_uids(&folder.name, &delta.uids)?;
         sink.put_token(&folder.name, &delta.token)?;
