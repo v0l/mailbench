@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>mailbench concepts</title>
+<style>
+body{margin:0;background:#17191d;color:#d5dbe3;font:15px/1.55 "IBM Plex Sans",system-ui,sans-serif}
+main{max-width:1320px;margin:0 auto;padding:24px}
+h1{font-size:20px;letter-spacing:.2em;text-transform:uppercase;margin:0 0 4px}
+h2{font-size:15px;letter-spacing:.14em;text-transform:uppercase;color:#8b929c;border-bottom:1px solid #333841;padding-bottom:6px;margin-top:40px}
+p{max-width:70ch;color:#8b929c}
+nav a{color:#5cd0e8;margin-right:16px}
+figure{margin:16px 0}
+figcaption{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#8b929c;margin-bottom:6px}
+img{width:100%;display:block;border:1px solid #333841;border-radius:2px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+</style></head><body><main>
+<h1>mailbench concepts</h1>
+<p>Three layouts, each with an inbox, a reader, a composer, an empty state and an error state. Recommendation: A as the shell, with B's conversation view as its reader and C's triage queue as a mode.</p>
+<nav><a href="#a">A three pane</a><a href="#b">B conversations</a><a href="#c">C triage</a></nav>
+<h2 id="a">A three pane: best for scanning many accounts</h2>
+<figure><figcaption>inbox</figcaption><img src="a-three-pane-inbox.png"></figure>
+<figure><figcaption>reader, remote images blocked</figcaption><img src="a-three-pane-reader.png"></figure>
+<div class="grid"><figure><figcaption>composer</figcaption><img src="a-three-pane-composer.png"></figure>
+<figure><figcaption>empty</figcaption><img src="a-three-pane-empty.png"></figure>
+<figure><figcaption>error: sign in failed</figcaption><img src="a-three-pane-error.png"></figure></div>
+<h2 id="b">B conversations: best for long threads, reply in place</h2>
+<figure><figcaption>inbox</figcaption><img src="b-conversations-inbox.png"></figure>
+<figure><figcaption>reader, remote images blocked</figcaption><img src="b-conversations-reader.png"></figure>
+<div class="grid"><figure><figcaption>composer</figcaption><img src="b-conversations-composer.png"></figure>
+<figure><figcaption>empty</figcaption><img src="b-conversations-empty.png"></figure>
+<figure><figcaption>error: sign in failed</figcaption><img src="b-conversations-error.png"></figure></div>
+<h2 id="c">C triage: best for getting to zero by keyboard</h2>
+<figure><figcaption>inbox</figcaption><img src="c-triage-inbox.png"></figure>
+<figure><figcaption>reader, remote images blocked</figcaption><img src="c-triage-reader.png"></figure>
+<div class="grid"><figure><figcaption>composer</figcaption><img src="c-triage-composer.png"></figure>
+<figure><figcaption>empty</figcaption><img src="c-triage-empty.png"></figure>
+<figure><figcaption>error: sign in failed</figcaption><img src="c-triage-error.png"></figure></div>
+</main></body></html>
