@@ -23,6 +23,10 @@ pub trait Backend: Send {
         Ok(Capabilities::default())
     }
 
+    fn check(&mut self) -> Result<()> {
+        self.capabilities().map(|_| ())
+    }
+
     fn list_folders(&mut self) -> Result<Vec<Folder>> {
         Err(BackendError::Unsupported("list_folders"))
     }
@@ -78,6 +82,11 @@ impl Backend for Account {
         let mut caps = self.mail.capabilities()?;
         caps.send = self.outbound.capabilities()?.send;
         Ok(caps)
+    }
+
+    fn check(&mut self) -> Result<()> {
+        self.mail.check()?;
+        self.outbound.check()
     }
 
     fn list_folders(&mut self) -> Result<Vec<Folder>> {

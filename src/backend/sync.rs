@@ -1,4 +1,4 @@
-use super::error::Result;
+use super::error::{BackendError, Result};
 use super::types::*;
 use super::Backend;
 
@@ -10,6 +10,12 @@ pub trait SyncSink {
     fn put_flags(&mut self, folder: &str, changes: &[(u32, Flags)]) -> Result<usize>;
     fn retain_uids(&mut self, folder: &str, uids: &[u32]) -> Result<()>;
     fn put_token(&mut self, folder: &str, token: &SyncToken) -> Result<()>;
+
+    fn progress(&mut self, _done: usize, _total: usize) {}
+
+    fn cancelled(&self) -> bool {
+        false
+    }
 
     fn wants_bodies(&self) -> bool {
         false
@@ -35,7 +41,11 @@ pub fn sync_account(backend: &mut dyn Backend, sink: &mut dyn SyncSink) -> Resul
         folders: folders.len(),
         ..Default::default()
     };
+    let (mut done, mut total) = (0usize, 0usize);
     for folder in folders.iter().filter(|f| f.selectable) {
+        if sink.cancelled() {
+            return Err(BackendError::Connection("sync stopped".into()));
+        }
         let since = sink.sync_token(&folder.name)?;
         let delta = backend.sync_folder(&folder.name, since.as_ref())?;
         if delta.reset {
@@ -43,10 +53,16 @@ pub fn sync_account(backend: &mut dyn Backend, sink: &mut dyn SyncSink) -> Resul
             report.resets += 1;
         }
         sink.put_summaries(&folder.name, &delta.added)?;
+        total += delta.added.len();
         if sink.wants_bodies() {
             for m in &delta.added {
                 let raw = backend.fetch(&folder.name, m.uid)?;
                 sink.put_body(&folder.name, m.uid, &raw)?;
+                done += 1;
+                sink.progress(done, total);
+                if sink.cancelled() {
+                    return Err(BackendError::Connection("sync stopped".into()));
+                }
             }
         }
         report.flag_changes += sink.put_flags(&folder.name, &delta.flag_changes)?;

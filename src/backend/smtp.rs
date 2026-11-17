@@ -116,6 +116,17 @@ fn new_message_id(from: &str) -> String {
     )
 }
 
+fn smtp_error(e: lettre::transport::smtp::Error) -> BackendError {
+    let text = e.to_string();
+    if e.is_permanent() && (text.contains("uthentication") || text.contains("535") || text.contains("534")) {
+        BackendError::Auth(text)
+    } else if e.is_permanent() || e.is_transient() {
+        BackendError::Protocol(text)
+    } else {
+        BackendError::Connection(text)
+    }
+}
+
 impl Backend for SmtpBackend {
     fn kind(&self) -> &'static str {
         "smtp"
@@ -133,16 +144,15 @@ impl Backend for SmtpBackend {
             return Err(BackendError::Protocol("no recipients".into()));
         }
         let email = build_message(message)?;
-        self.transport()?.send(&email).map_err(|e| {
-            let text = e.to_string();
-            if e.is_permanent() && text.contains("uthentication") {
-                BackendError::Auth(text)
-            } else if e.is_permanent() || e.is_transient() {
-                BackendError::Protocol(text)
-            } else {
-                BackendError::Connection(text)
-            }
-        })?;
+        self.transport()?.send(&email).map_err(smtp_error)?;
         Ok(())
+    }
+
+    fn check(&mut self) -> Result<()> {
+        match self.transport()?.test_connection() {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(BackendError::Connection("the server closed the connection".into())),
+            Err(e) => Err(smtp_error(e)),
+        }
     }
 }

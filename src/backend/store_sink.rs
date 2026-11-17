@@ -35,6 +35,18 @@ impl<'a> StoreSink<'a> {
         }
     }
 
+    pub fn purge(store: &Store, account: &str) -> Result<()> {
+        let prefix = format!("{account}\0");
+        for kind in [FOLDERS, FOLDER_IDS, MESSAGE, BODY, TOKEN] {
+            for id in store.list(kind)? {
+                if id == account || id.starts_with(&prefix) {
+                    store.delete(kind, &id)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn folder_prefix(&self, folder: &str) -> Result<String> {
         let mut map: BTreeMap<String, u32> = match self.store.get(FOLDER_IDS, &self.account)? {
             Some(raw) => decode(&raw)?,

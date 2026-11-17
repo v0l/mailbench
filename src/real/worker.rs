@@ -13,6 +13,7 @@ const RETRY: Duration = Duration::from_secs(5);
 struct LockedSink<'a> {
     shared: &'a Shared,
     account: String,
+    index: usize,
 }
 
 impl LockedSink<'_> {
@@ -44,6 +45,15 @@ impl SyncSink for LockedSink<'_> {
     }
     fn put_token(&mut self, folder: &str, token: &SyncToken) -> Result<()> {
         self.with(|s| s.put_token(folder, token))
+    }
+    fn progress(&mut self, done: usize, total: usize) {
+        self.shared.set_state(self.index, SyncState::Syncing, Some(format!("{done} of {total} messages")));
+        if done % 10 == 0 || done == total {
+            self.shared.repaint();
+        }
+    }
+    fn cancelled(&self) -> bool {
+        self.shared.stop.load(Ordering::Relaxed)
     }
     fn wants_bodies(&self) -> bool {
         true
@@ -124,8 +134,8 @@ fn push_outbox(shared: &Shared, account: &str, backend: &mut dyn Backend, done: 
     Ok(())
 }
 
-fn cycle(shared: &Shared, account: &str, backend: &mut dyn Backend) -> Result<()> {
-    let mut sink = LockedSink { shared, account: account.to_string() };
+fn cycle(shared: &Shared, index: usize, account: &str, backend: &mut dyn Backend) -> Result<()> {
+    let mut sink = LockedSink { shared, account: account.to_string(), index };
     sync_account(backend, &mut sink)?;
     let mut done = Vec::new();
     let pushed = push_outbox(shared, account, backend, &mut done);
@@ -150,7 +160,7 @@ pub(super) fn run(shared: Arc<Shared>, index: usize, mut backend: Box<dyn Backen
     let account = shared.accounts[index].id.clone();
     while !shared.stop.load(Ordering::Relaxed) {
         shared.set_state(index, SyncState::Syncing, None);
-        let result = cycle(&shared, &account, backend.as_mut());
+        let result = cycle(&shared, index, &account, backend.as_mut());
         let mut watch = None;
         match &result {
             Ok(()) => {

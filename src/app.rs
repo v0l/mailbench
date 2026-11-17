@@ -117,6 +117,7 @@ pub struct App {
     scroll_to_selected: bool,
     go_pending: bool,
     last_shown: Option<MessageId>,
+    pub settings_requested: bool,
 }
 
 impl App {
@@ -143,6 +144,7 @@ impl App {
             scroll_to_selected: false,
             go_pending: false,
             last_shown: None,
+            settings_requested: false,
         }
     }
 
@@ -379,6 +381,10 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.add(Key::new("compose").solid(READOUT).min_width(100.0)).clicked() {
                         actions.push(Action::Compose);
+                    }
+                    ui.add_space(8.0);
+                    if ui.add(Key::new("settings").outline(VALUE).min_width(90.0)).clicked() {
+                        self.settings_requested = true;
                     }
                     ui.add_space(8.0);
                     if failed {

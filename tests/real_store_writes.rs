@@ -20,6 +20,7 @@ fn setup(name: &str, port: u16) -> AccountSetup {
         id: "acct".into(),
         name: "test".into(),
         address: format!("{name}@localhost"),
+        sender: String::new(),
         backend: Box::new(imap_at(name, port)),
     }
 }

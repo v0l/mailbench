@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -172,6 +172,13 @@ pub struct Store {
     conn: Connection,
     key: DataKey,
     store_id: String,
+    path: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UnlockMethods {
+    pub keychain: bool,
+    pub password: bool,
 }
 
 pub enum Unlock<'a> {
@@ -188,7 +195,7 @@ impl Store {
         init_schema(&conn)?;
         let store_id = hex(&random::<16>());
         conn.execute("INSERT INTO meta (k, v) VALUES ('store_id', ?1)", params![store_id.as_bytes()])?;
-        let store = Store { conn, key: DataKey(random::<32>()), store_id };
+        let store = Store { conn, key: DataKey(random::<32>()), store_id, path: path.to_path_buf() };
         if let Some(kc) = keychain {
             store.enroll_keychain(kc)?;
         }
@@ -212,11 +219,31 @@ impl Store {
                 Unlock::Password(pw) => unwrap_with_password(&conn, pw),
             };
             match attempt {
-                Ok(key) => return Ok(Store { conn, key, store_id }),
+                Ok(key) => return Ok(Store { conn, key, store_id, path: path.to_path_buf() }),
                 Err(e) => last = e,
             }
         }
         Err(last)
+    }
+
+    pub fn methods(path: &Path) -> Result<UnlockMethods> {
+        let conn = Connection::open(path)?;
+        let count = |name: &str| -> Result<bool> {
+            let n: i64 = conn
+                .query_row("SELECT COUNT(*) FROM wraps WHERE name = ?1", params![name], |r| r.get(0))
+                .unwrap_or(0);
+            Ok(n > 0)
+        };
+        Ok(UnlockMethods { keychain: count(WRAP_KEYCHAIN)?, password: count(WRAP_PASSWORD)? })
+    }
+
+    pub fn try_clone(&self) -> Result<Store> {
+        Ok(Store {
+            conn: Connection::open(&self.path)?,
+            key: DataKey(self.key.0),
+            store_id: self.store_id.clone(),
+            path: self.path.clone(),
+        })
     }
 
     pub fn enroll_keychain(&self, kc: &dyn Keychain) -> Result<()> {

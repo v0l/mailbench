@@ -1,4 +1,9 @@
+use mailbench::shell::{Env, Shell, default_data_dir};
+use mailbench::store::OsKeychain;
+use std::rc::Rc;
+
 fn main() -> eframe::Result {
+    let demo = std::env::args().any(|a| a == "--demo");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]).with_title("mailbench"),
         ..Default::default()
@@ -6,6 +11,12 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "mailbench",
         options,
-        Box::new(|cc| Ok(Box::new(mailbench::app::App::new(&cc.egui_ctx)))),
+        Box::new(move |cc| {
+            if demo {
+                return Ok(Box::new(mailbench::app::App::new(&cc.egui_ctx)) as Box<dyn eframe::App>);
+            }
+            mailbench::kit::setup(&cc.egui_ctx);
+            Ok(Box::new(Shell::new(default_data_dir(), Rc::new(OsKeychain), Env::live(), None)))
+        }),
     )
 }

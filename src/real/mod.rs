@@ -24,6 +24,7 @@ pub struct AccountSetup {
     pub id: String,
     pub name: String,
     pub address: String,
+    pub sender: String,
     pub backend: Box<dyn Backend>,
 }
 
@@ -31,6 +32,7 @@ pub(crate) struct AccountMeta {
     pub id: String,
     pub name: String,
     pub address: String,
+    pub sender: String,
 }
 
 #[derive(Clone)]
@@ -121,6 +123,12 @@ impl Shared {
 
     pub fn set_state(&self, index: usize, state: SyncState, detail: Option<String>) {
         lock(&self.states)[index] = (state, detail);
+    }
+
+    pub fn repaint(&self) {
+        if let Some(ctx) = lock(&self.ctx).as_ref() {
+            ctx.request_repaint();
+        }
     }
 
     pub fn refresh(&self) {
@@ -215,7 +223,10 @@ impl Shared {
                 .collect::<Vec<_>>()
         };
         Some(OutgoingMessage {
-            from: Address { name: Some(account.name.clone()), address: account.address.clone() },
+            from: Address {
+                name: Some(if account.sender.is_empty() { account.name.clone() } else { account.sender.clone() }),
+                address: account.address.clone(),
+            },
             to: list(&msg.to),
             cc: list(&msg.cc),
             subject: msg.subject,
@@ -340,6 +351,24 @@ impl Shared {
     }
 }
 
+pub fn purge_account(store: &Store, account: &str) -> Result<(), StoreError> {
+    StoreSink::purge(store, account).map_err(backend_err)?;
+    for (key, op) in Shared::outbox_in(store) {
+        if op.account() == account {
+            let _ = store.delete(OUTBOX, &key);
+        }
+    }
+    for key in store.list(LOCAL).unwrap_or_default() {
+        let raw = store.get(LOCAL, &key).ok().flatten();
+        if let Some(msg) = raw.and_then(|r| serde_json::from_slice::<LocalMsg>(&r).ok()) {
+            if msg.account == account {
+                let _ = store.delete(LOCAL, &key);
+            }
+        }
+    }
+    Ok(())
+}
+
 pub struct RealStore {
     shared: Arc<Shared>,
     threads: Vec<JoinHandle<()>>,
@@ -383,7 +412,7 @@ impl RealStore {
     pub fn open(store: Store, accounts: Vec<AccountSetup>) -> RealStore {
         let metas = accounts
             .iter()
-            .map(|a| AccountMeta { id: a.id.clone(), name: a.name.clone(), address: a.address.clone() })
+            .map(|a| AccountMeta { id: a.id.clone(), name: a.name.clone(), address: a.address.clone(), sender: a.sender.clone() })
             .collect::<Vec<_>>();
         let shared = Arc::new(Shared {
             store: Mutex::new(store),

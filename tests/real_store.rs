@@ -28,6 +28,7 @@ fn setup(name: &str) -> AccountSetup {
         id: "acct".into(),
         name: "test".into(),
         address: format!("{name}@localhost"),
+        sender: String::new(),
         backend: Box::new(Account { mail: Box::new(imap(name)), outbound: Box::new(smtp(name)) }),
     }
 }
@@ -131,6 +132,7 @@ fn synced_mail_shows_archives_flags_and_survives_restart() {
         id: "acct".into(),
         name: "test".into(),
         address: format!("{name}@localhost"),
+        sender: String::new(),
         backend: Box::new(ImapBackend::new(ImapConfig::new("127.0.0.1", 1, Security::Plain, auth(&name)))),
     };
     let real = RealStore::open(store, vec![offline]);
