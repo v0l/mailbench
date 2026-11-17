@@ -1,58 +1,15 @@
 use mailbench::backend::*;
-use std::net::TcpStream;
-use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-const IMAP: u16 = 3143;
-const IMAPS: u16 = 3993;
-const SMTP: u16 = 3025;
-const SMTPS: u16 = 3465;
-const API: u16 = 8080;
-
-fn up(port: u16) -> bool {
-    TcpStream::connect(("127.0.0.1", port)).is_ok()
-}
-
-fn server() {
-    static START: OnceLock<Mutex<()>> = OnceLock::new();
-    let _guard = START.get_or_init(|| Mutex::new(())).lock().unwrap();
-    if up(API) {
-        return;
-    }
-    let status = Command::new("docker")
-        .args([
-            "run", "-d", "--rm", "--name", "mailbench-greenmail",
-            "-p", "127.0.0.1:3025:3025", "-p", "127.0.0.1:3143:3143",
-            "-p", "127.0.0.1:3465:3465", "-p", "127.0.0.1:3993:3993",
-            "-p", "127.0.0.1:8080:8080",
-            "-e", "GREENMAIL_OPTS=-Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0",
-            "greenmail/standalone:2.1.3",
-        ])
-        .output()
-        .expect("docker is required for backend tests");
-    let _ = status;
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !(up(API) && up(IMAP) && up(SMTP)) {
-        assert!(Instant::now() < deadline, "greenmail did not start");
-        std::thread::sleep(Duration::from_millis(300));
-    }
-}
+mod common;
+use common::{GM_IMAP as IMAP, GM_IMAPS as IMAPS, GM_SMTP as SMTP, GM_SMTPS as SMTPS};
 
 fn user() -> String {
     static N: AtomicU32 = AtomicU32::new(0);
-    server();
+    assert!(common::greenmail(), "docker is required for greenmail tests");
     let name = format!("u{}x{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed));
-    let out = Command::new("curl")
-        .args([
-            "-s", "-XPOST", &format!("localhost:{API}/api/user"),
-            "-H", "content-type: application/json",
-            "-d", &format!(r#"{{"login":"{name}","email":"{name}@localhost","password":"secret"}}"#),
-        ])
-        .output()
-        .unwrap();
-    assert!(String::from_utf8_lossy(&out.stdout).contains(&name));
+    common::create_greenmail_user(&name);
     name
 }
 

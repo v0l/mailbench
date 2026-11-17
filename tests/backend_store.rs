@@ -1,41 +1,11 @@
 use mailbench::backend::*;
 use mailbench::store::{KdfParams, Store, Unlock};
-use std::net::TcpStream;
-use std::process::Command;
 use std::time::{Duration, Instant};
+
+mod common;
 
 const SUBJECT: &str = "Quarterly zebracorn budget";
 const BODY_WORD: &str = "marmalade-hovercraft-payload";
-
-fn up(port: u16) -> bool {
-    TcpStream::connect(("127.0.0.1", port)).is_ok()
-}
-
-fn server() -> bool {
-    if up(8080) {
-        return true;
-    }
-    if !Command::new("docker").arg("info").output().map(|o| o.status.success()).unwrap_or(false) {
-        eprintln!("docker missing, skipping greenmail test");
-        return false;
-    }
-    let _ = Command::new("docker")
-        .args([
-            "run", "-d", "--rm", "--name", "mailbench-greenmail",
-            "-p", "127.0.0.1:3025:3025", "-p", "127.0.0.1:3143:3143",
-            "-p", "127.0.0.1:3465:3465", "-p", "127.0.0.1:3993:3993",
-            "-p", "127.0.0.1:8080:8080",
-            "-e", "GREENMAIL_OPTS=-Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0",
-            "greenmail/standalone:2.1.3",
-        ])
-        .output();
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !(up(8080) && up(3143) && up(3025)) {
-        assert!(Instant::now() < deadline, "greenmail did not start");
-        std::thread::sleep(Duration::from_millis(300));
-    }
-    true
-}
 
 fn all_bytes(dir: &std::path::Path) -> Vec<u8> {
     let mut out = Vec::new();
@@ -51,18 +21,11 @@ fn contains(haystack: &[u8], needle: &str) -> bool {
 
 #[test]
 fn sync_into_encrypted_store_leaves_no_plaintext_on_disk() {
-    if !server() {
+    if !common::greenmail() {
         return;
     }
     let name = format!("st{}", std::process::id());
-    let out = Command::new("curl")
-        .args([
-            "-s", "-XPOST", "localhost:8080/api/user", "-H", "content-type: application/json",
-            "-d", &format!(r#"{{"login":"{name}","email":"{name}@localhost","password":"secret"}}"#),
-        ])
-        .output()
-        .unwrap();
-    assert!(String::from_utf8_lossy(&out.stdout).contains(&name));
+    common::create_greenmail_user(&name);
 
     let auth = Auth::Password { user: name.clone(), password: "secret".into() };
     let mut smtp = SmtpBackend::new(SmtpConfig::new("127.0.0.1", 3025, Security::Plain, auth.clone()));

@@ -1,51 +1,11 @@
 use mailbench::backend::*;
-use std::net::TcpStream;
-use std::process::Command;
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-const IMAP: u16 = 3144;
-const IMAPS: u16 = 3994;
-
-fn docker_available() -> bool {
-    Command::new("docker")
-        .arg("info")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn up(port: u16) -> bool {
-    TcpStream::connect(("127.0.0.1", port)).is_ok()
-}
+mod common;
+use common::{DC_IMAP as IMAP, DC_IMAPS as IMAPS};
 
 fn server() -> bool {
-    static START: OnceLock<Mutex<bool>> = OnceLock::new();
-    let mut ready = START.get_or_init(|| Mutex::new(false)).lock().unwrap_or_else(|e| e.into_inner());
-    if *ready || up(IMAP) {
-        *ready = true;
-        return true;
-    }
-    if !docker_available() {
-        eprintln!("docker missing, skipping dovecot test");
-        return false;
-    }
-    let conf = format!("{}/tests/fixtures/dovecot/dovecot.conf:/etc/dovecot/dovecot.conf:ro", env!("CARGO_MANIFEST_DIR"));
-    let _ = Command::new("docker")
-        .args([
-            "run", "-d", "--rm", "--name", "mailbench-dovecot",
-            "-p", "127.0.0.1:3144:143", "-p", "127.0.0.1:3994:993",
-            "-v", &conf, "dovecot/dovecot:2.3-latest",
-        ])
-        .output();
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !up(IMAP) {
-        assert!(Instant::now() < deadline, "dovecot did not start");
-        std::thread::sleep(Duration::from_millis(300));
-    }
-    std::thread::sleep(Duration::from_secs(1));
-    *ready = true;
-    true
+    common::dovecot()
 }
 
 macro_rules! need_server {
