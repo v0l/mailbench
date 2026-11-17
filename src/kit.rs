@@ -1,4 +1,3 @@
-use crate::data::Msg;
 use egui::{Align2, Color32, FontFamily, FontId, Pos2, Rect, Sense, Stroke, Ui, Vec2, epaint::PathShape};
 use egui_bench::prelude::*;
 
@@ -117,105 +116,6 @@ pub fn selection(p: &egui::Painter, r: Rect) {
     p.rect_filled(Rect::from_min_size(r.left_top(), Vec2::new(3.0, r.height())), 0.0, READOUT);
 }
 
-pub fn marker(p: &egui::Painter, m: &Msg, c: Pos2) {
-    if m.new {
-        dot(p, c, TRACE);
-    } else if m.unread {
-        dot(p, c, READOUT);
-    }
-}
-
-pub fn dense_row(ui: &mut Ui, m: &Msg, selected: bool, account: Option<&str>) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 25.0), Sense::click());
-    if !ui.is_rect_visible(rect) {
-        return resp;
-    }
-    let p = ui.painter_at(rect);
-    if selected {
-        selection(&p, rect);
-    } else if resp.hovered() {
-        p.rect_filled(rect, 0.0, BAND.gamma_multiply(0.6));
-    }
-    let cy = rect.center().y;
-    marker(&p, m, Pos2::new(rect.left() + 13.0, cy));
-    let (name_font, name_col, subj_col) = if m.unread {
-        (body_strong(13.0), VALUE, VALUE)
-    } else {
-        (body(13.0), LEGEND, LEGEND)
-    };
-    let mut x = rect.left() + 26.0;
-    put(&p, x, 140.0, cy, m.from, name_font, name_col);
-    x += 150.0;
-    let right = rect.right() - 10.0;
-    put_right(&p, right, cy, m.when, figure(11.0), if m.new { TRACE } else { LEGEND });
-    let mut tail = right - 56.0;
-    if m.count > 1 {
-        put_right(&p, tail, cy, &m.count.to_string(), figure(10.5), LEGEND);
-        tail -= 22.0;
-    }
-    if m.attach {
-        clip_glyph(&p, Pos2::new(tail - 6.0, cy), LEGEND);
-        tail -= 18.0;
-    }
-    if m.flagged {
-        flag(&p, Pos2::new(tail - 8.0, cy), READOUT);
-        tail -= 18.0;
-    }
-    if let Some(name) = account {
-        let g = p.layout_no_wrap(name.to_uppercase(), legend_font(9.5), LEGEND.gamma_multiply(0.8));
-        let w = g.size().x;
-        p.galley(Pos2::new(tail - w, cy - g.size().y / 2.0), g, LEGEND);
-        tail -= w + 14.0;
-    }
-    put(&p, x, (tail - x).max(10.0), cy, m.subject, body(13.0).clone(), subj_col);
-    resp
-}
-
-pub fn roomy_row(ui: &mut Ui, m: &Msg, selected: bool, account: Option<&str>) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 62.0), Sense::click());
-    if !ui.is_rect_visible(rect) {
-        return resp;
-    }
-    let p = ui.painter_at(rect);
-    if selected {
-        selection(&p, rect);
-    } else if resp.hovered() {
-        p.rect_filled(rect, 0.0, BAND.gamma_multiply(0.6));
-    }
-    p.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, ETCH.gamma_multiply(0.7)));
-    let x = rect.left() + 26.0;
-    let right = rect.right() - 12.0;
-    marker(&p, m, Pos2::new(rect.left() + 13.0, rect.top() + 16.0));
-    let strong = m.unread;
-    let (name_font, name_col, subj_col) = if strong {
-        (body_strong(13.5), VALUE, VALUE)
-    } else {
-        (body(13.5), LEGEND, LEGEND)
-    };
-    put_right(&p, right, rect.top() + 16.0, m.when, figure(11.0), if m.new { TRACE } else { LEGEND });
-    let mut tail = right - 50.0;
-    if m.count > 1 {
-        put_right(&p, tail, rect.top() + 16.0, &format!("{}", m.count), figure(10.5), LEGEND);
-        tail -= 24.0;
-    }
-    if m.flagged {
-        flag(&p, Pos2::new(tail - 8.0, rect.top() + 16.0), READOUT);
-        tail -= 18.0;
-    }
-    put(&p, x, tail - x, rect.top() + 16.0, m.from, name_font, name_col);
-    put(&p, x, right - x - 20.0, rect.top() + 33.0, m.subject, body(13.0), subj_col);
-    let snippet_w = right - x - if m.attach { 36.0 } else { 0.0 } - if account.is_some() { 64.0 } else { 0.0 };
-    put(&p, x, snippet_w, rect.top() + 49.0, m.snippet, body(12.0), LEGEND.gamma_multiply(0.85));
-    if m.attach {
-        clip_glyph(&p, Pos2::new(right - 6.0, rect.top() + 49.0), LEGEND);
-    }
-    if let Some(name) = account {
-        let g = p.layout_no_wrap(name.to_uppercase(), legend_font(9.5), LEGEND.gamma_multiply(0.8));
-        p.galley(Pos2::new(right - g.size().x - 20.0, rect.top() + 43.0), g, LEGEND);
-    }
-    resp
-}
-
 pub fn body_text(ui: &mut Ui, text: &str) {
     ui.add(
         egui::Label::new(
@@ -225,12 +125,12 @@ pub fn body_text(ui: &mut Ui, text: &str) {
     );
 }
 
-pub fn sender_line(ui: &mut Ui, name: &str, to: &str, when: &str, new: bool) {
+pub fn sender_line(ui: &mut Ui, name: &str, to: &str, when: &str) {
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(name).font(body_strong(14.0)).color(VALUE));
         ui.label(egui::RichText::new(format!("to {to}")).font(body(12.5)).color(LEGEND));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            Line::new().value(when).tint(if new { TRACE } else { LEGEND }).size(11.0).show(ui);
+            Line::new().measured(when).size(11.0).show(ui);
         });
     });
 }
@@ -239,19 +139,21 @@ pub fn subject_line(ui: &mut Ui, text: &str) {
     ui.add(egui::Label::new(egui::RichText::new(text).font(body_strong(18.0)).color(VALUE)).wrap());
 }
 
-pub fn blocked_images(ui: &mut Ui, host: &str) {
+pub fn blocked_images(ui: &mut Ui, host: &str) -> bool {
+    let mut load = false;
     rail_block(ui, WARN, WARN.gamma_multiply(0.12), |ui| {
         ui.horizontal(|ui| {
             ui.label(legend("remote images blocked").color(WARN));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add(Key::new("load once").outline(WARN));
+                load = ui.add(Key::new("load once").outline(WARN)).clicked();
             });
         });
         Line::new().note(format!("This message wants to load pictures from {host}, which tells the sender you opened it.")).size(12.0).wrapped(ui);
     });
+    load
 }
 
-pub fn attachment(ui: &mut Ui, name: &str, size: &str) {
+pub fn attachment(ui: &mut Ui, name: &str, size: &str) -> egui::Response {
     let g = ui.fonts_mut(|f| f.layout_no_wrap(name.to_string(), body(12.5), VALUE));
     let s = ui.fonts_mut(|f| f.layout_no_wrap(size.to_string(), figure(10.5), LEGEND));
     let w = 26.0 + g.size().x + 12.0 + s.size().x + 10.0;
@@ -262,12 +164,18 @@ pub fn attachment(ui: &mut Ui, name: &str, size: &str) {
     clip_glyph(p, rect.left_center() + Vec2::new(13.0, 0.0), LEGEND);
     p.galley(Pos2::new(rect.left() + 26.0, rect.center().y - g.size().y / 2.0), g.clone(), VALUE);
     p.galley(Pos2::new(rect.left() + 26.0 + g.size().x + 12.0, rect.center().y - s.size().y / 2.0), s, LEGEND);
+    resp
 }
 
-pub fn quoted_fold(ui: &mut Ui, lines: u32) {
-    if lines > 0 {
-        Line::new().note(format!("{lines} quoted lines hidden")).size(11.5).show(ui);
+pub fn quoted_fold(ui: &mut Ui, lines: usize, open: bool) -> bool {
+    if lines == 0 {
+        return false;
     }
+    let text = if open { format!("{lines} quoted lines shown, click to hide") } else { format!("{lines} quoted lines hidden") };
+    let g = ui.fonts_mut(|f| f.layout_no_wrap(text, body(11.5), LEGEND));
+    let (rect, resp) = ui.allocate_exact_size(g.size() + Vec2::new(0.0, 6.0), Sense::click());
+    ui.painter().galley(rect.left_top() + Vec2::new(0.0, 3.0), g, if resp.hovered() { VALUE } else { LEGEND });
+    resp.clicked()
 }
 
 pub fn body_editor(ui: &mut Ui, text: &mut String, rows: usize) {
@@ -288,47 +196,6 @@ pub fn body_editor(ui: &mut Ui, text: &mut String, rows: usize) {
             );
             ui.ctx().accesskit_node_builder(r.id, |node| node.set_label("message body"));
         });
-}
-
-pub struct Draft {
-    pub to: String,
-    pub cc: String,
-    pub subject: String,
-    pub body: String,
-}
-
-impl Draft {
-    pub fn sample() -> Draft {
-        Draft {
-            to: "Tomás Rivera".into(),
-            cc: "Wren Okafor".into(),
-            subject: "Re: Rev C stencil quote and lead time".into(),
-            body: "Thanks Tomás. Leave the panel edge unpopulated, Wren wants the test coupon there.\n\nI will pay the invoice this afternoon so it ships next Friday. Please send the tracking number when it goes out.\n\nMara".into(),
-        }
-    }
-}
-
-pub fn address_rows(ui: &mut Ui, d: &mut Draft, with_subject: bool) {
-    row(ui, "to", |ui| {
-        field(ui, &mut d.to, "name or address");
-    });
-    row(ui, "cc", |ui| {
-        field(ui, &mut d.cc, "copy to");
-    });
-    if with_subject {
-        row(ui, "subject", |ui| {
-            field(ui, &mut d.subject, "subject");
-        });
-    }
-}
-
-pub fn send_keys(ui: &mut Ui) {
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        ui.add(Key::new("send").solid(READOUT).min_width(100.0));
-        ui.add(Key::new("save draft").outline(VALUE).min_width(100.0));
-        ui.add(Key::new("discard").outline(FAULT).min_width(90.0));
-        ui.add(Key::new("attach").outline(VALUE).min_width(80.0));
-    });
 }
 
 pub fn fault_card(ui: &mut Ui, account: &str, address: &str) {

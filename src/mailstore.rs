@@ -1,0 +1,160 @@
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub struct MessageId(pub u64);
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum Folder {
+    Inbox,
+    Drafts,
+    Sent,
+    Archive,
+    Junk,
+    Trash,
+    Snoozed,
+}
+
+impl Folder {
+    pub const UNIFIED: [Folder; 6] =
+        [Folder::Inbox, Folder::Drafts, Folder::Sent, Folder::Archive, Folder::Junk, Folder::Trash];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Folder::Inbox => "inbox",
+            Folder::Drafts => "drafts",
+            Folder::Sent => "sent",
+            Folder::Archive => "archive",
+            Folder::Junk => "junk",
+            Folder::Trash => "trash",
+            Folder::Snoozed => "snoozed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Filter {
+    All,
+    Unread,
+    Flagged,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SyncState {
+    Idle,
+    Syncing,
+    Failed,
+}
+
+#[derive(Clone, Debug)]
+pub struct AccountInfo {
+    pub name: String,
+    pub address: String,
+    pub unread: usize,
+    pub sync: SyncState,
+    pub detail: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FolderInfo {
+    pub folder: Folder,
+    pub unread: usize,
+    pub total: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct LabelInfo {
+    pub name: String,
+    pub unread: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct Query {
+    pub folder: Folder,
+    pub filter: Filter,
+    pub text: String,
+}
+
+impl Query {
+    pub fn new(folder: Folder) -> Query {
+        Query { folder, filter: Filter::All, text: String::new() }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Counts {
+    pub all: usize,
+    pub unread: usize,
+    pub flagged: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct Summary {
+    pub id: MessageId,
+    pub from: String,
+    pub subject: String,
+    pub when: String,
+    pub unread: bool,
+    pub flagged: bool,
+    pub new: bool,
+    pub attachments: bool,
+    pub account: usize,
+    pub thread: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct Page {
+    pub offset: usize,
+    pub total: usize,
+    pub items: Vec<Summary>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AttachmentInfo {
+    pub name: String,
+    pub size: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct Message {
+    pub summary: Summary,
+    pub folder: Folder,
+    pub from_address: String,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub sent: String,
+    pub paragraphs: Vec<String>,
+    pub quoted: Vec<String>,
+    pub attachments: Vec<AttachmentInfo>,
+    pub remote_images: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FlagChange {
+    pub unread: Option<bool>,
+    pub flagged: Option<bool>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Outgoing {
+    pub account: usize,
+    pub to: String,
+    pub cc: String,
+    pub subject: String,
+    pub body: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StoreError {
+    NotFound,
+    Backend(String),
+}
+
+pub trait MailStore {
+    fn accounts(&self) -> Vec<AccountInfo>;
+    fn folders(&self) -> Vec<FolderInfo>;
+    fn labels(&self) -> Vec<LabelInfo>;
+    fn counts(&self, query: &Query) -> Counts;
+    fn list(&self, query: &Query, offset: usize, limit: usize) -> Page;
+    fn get(&self, id: MessageId) -> Result<Message, StoreError>;
+    fn set_flags(&mut self, id: MessageId, change: FlagChange) -> Result<(), StoreError>;
+    fn move_to(&mut self, id: MessageId, folder: Folder) -> Result<(), StoreError>;
+    fn append(&mut self, folder: Folder, message: Outgoing) -> Result<MessageId, StoreError>;
+}
