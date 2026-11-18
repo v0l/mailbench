@@ -31,6 +31,62 @@ fn open(path: &Path, name: &str, port: u16) -> RealStore {
     RealStore::open(store, vec![setup(name, port)])
 }
 
+struct Flaky {
+    inner: ImapBackend,
+    down: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl Backend for Flaky {
+    fn kind(&self) -> &'static str {
+        "flaky"
+    }
+
+    fn fork(&self) -> Option<Box<dyn Backend>> {
+        let inner = self.inner.fork()?;
+        Some(Box::new(Forked { inner, down: self.down.clone() }))
+    }
+
+    async fn capabilities(&mut self) -> mailbench::backend::Result<Capabilities> {
+        self.inner.capabilities().await
+    }
+
+    async fn list_folders(&mut self) -> mailbench::backend::Result<Vec<Folder>> {
+        self.inner.list_folders().await
+    }
+
+    async fn open_folder(&mut self, folder: &str) -> mailbench::backend::Result<FolderState> {
+        self.inner.open_folder(folder).await
+    }
+
+    async fn fetch_summaries(&mut self, folder: &str, uids: &[u32]) -> mailbench::backend::Result<Vec<MessageSummary>> {
+        self.inner.fetch_summaries(folder, uids).await
+    }
+
+    async fn changed_flags(&mut self, folder: &str, below: u32, since: Option<u64>) -> mailbench::backend::Result<Vec<(u32, Flags)>> {
+        self.inner.changed_flags(folder, below, since).await
+    }
+}
+
+struct Forked {
+    inner: Box<dyn Backend>,
+    down: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl Backend for Forked {
+    fn kind(&self) -> &'static str {
+        "flaky reader"
+    }
+
+    async fn fetch(&mut self, folder: &str, uid: u32) -> mailbench::backend::Result<Vec<u8>> {
+        if self.down.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(BackendError::Connection("down".into()));
+        }
+        self.inner.fetch(folder, uid).await
+    }
+}
+
 fn until(what: &str, cond: impl Fn() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while !cond() {
@@ -106,6 +162,30 @@ fn queued_writes_show_at_once_survive_restart_and_drain_when_the_server_returns(
     });
     assert_eq!(flagged_on_server(&name, "Archive"), Some(true));
     assert_eq!(flagged_on_server(&name, "INBOX"), None);
+}
+
+#[test]
+fn a_failed_body_fetch_is_retried_when_the_message_is_opened_again() {
+    if !common::greenmail() {
+        return;
+    }
+    let (name, _dir, path) = seeded("rr");
+    let down = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let store = Store::open(&path, &[Unlock::Password("pw")]).unwrap();
+    let setup = AccountSetup {
+        id: "acct".into(),
+        name: "test".into(),
+        address: format!("{name}@localhost"),
+        sender: String::new(),
+        backend: Box::new(Flaky { inner: imap_at(&name, 3143), down: down.clone() }),
+    };
+    let online = RealStore::open(store, vec![setup]);
+    until("synced", || count(&online, ms::Folder::Inbox) == 1);
+    let id = online.list(&Query::new(ms::Folder::Inbox), 0, 1).items[0].id;
+    online.get(id).unwrap();
+    until("fetch failed", || online.get(id).unwrap().body_state == ms::BodyState::Failed);
+    down.store(false, std::sync::atomic::Ordering::SeqCst);
+    until("body fetched on a later open", || online.get(id).unwrap().body_state == ms::BodyState::Ready);
 }
 
 #[test]

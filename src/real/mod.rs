@@ -17,6 +17,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const OUTBOX: &str = "outbox";
 const QUICK_PAGE: usize = 500;
+const FETCH_RETRY: Duration = Duration::from_secs(5);
 const LOCAL: &str = "local";
 
 pub struct AccountSetup {
@@ -76,7 +77,7 @@ pub(crate) struct Shared {
     user_gen: AtomicU64,
     cache: Mutex<Arc<Cache>>,
     known_attachments: Mutex<HashMap<u64, bool>>,
-    fetch_state: Mutex<HashMap<u64, bool>>,
+    fetch_state: Mutex<HashMap<u64, Option<std::time::Instant>>>,
     opened: Mutex<Vec<(u64, Message)>>,
     parse_pending: Mutex<std::collections::HashSet<u64>>,
     parser: Mutex<Option<std::sync::mpsc::Sender<Entry>>>,
@@ -149,19 +150,23 @@ impl Shared {
     fn request_body(&self, e: &Entry) -> BodyState {
         let mut state = lock(&self.fetch_state);
         match state.get(&e.id) {
-            Some(false) => return BodyState::Loading,
-            Some(true) => return BodyState::Failed,
-            None => {}
+            Some(None) => return BodyState::Loading,
+            Some(Some(at)) if at.elapsed() < FETCH_RETRY => return BodyState::Failed,
+            _ => {}
         }
         let sent = lock(&self.fetchers)
             .get(e.account)
             .is_some_and(|tx| tx.send(worker::FetchRequest { id: e.id, folder: e.server_folder.clone(), uid: e.uid }).is_ok());
         if sent {
-            state.insert(e.id, false);
+            state.insert(e.id, None);
             BodyState::Loading
         } else {
             BodyState::Failed
         }
+    }
+
+    fn body_failed(&self, id: u64) -> bool {
+        lock(&self.fetch_state).get(&id).is_some_and(|s| s.is_some_and(|at| at.elapsed() < FETCH_RETRY))
     }
 
     pub fn finish_fetch(&self, id: u64, has_attachments: Option<bool>) {
@@ -172,7 +177,7 @@ impl Shared {
                     state.remove(&id);
                 }
                 None => {
-                    state.insert(id, true);
+                    state.insert(id, Some(std::time::Instant::now()));
                 }
             }
         }
@@ -740,7 +745,7 @@ impl MailStore for RealStore {
                 m.folder = e.folder;
                 return Ok(m);
             }
-            let state = if lock(&self.shared.fetch_state).get(&id.0) == Some(&true) {
+            let state = if self.shared.body_failed(id.0) {
                 BodyState::Failed
             } else {
                 self.shared.queue_parse(&e);
