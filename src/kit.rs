@@ -235,17 +235,35 @@ pub fn header_notes(ui: &mut Ui, h: &crate::mailstore::Headers, open: bool) -> H
         if let Some(r) = &h.reply_to_differs {
             chip(ui, &format!("replies go to {r}"), WARN, true);
         }
-        if h.unsubscribe.is_some() && ui.add(Key::new("unsubscribe").outline(WARN)).clicked() {
+        if h.unsubscribe.is_some() && chip_button(ui, "unsubscribe", WARN).clicked() {
             click = HeaderClick::Unsubscribe;
         }
         if !h.all.is_empty() {
             let label = if open { "hide headers" } else { "all headers" };
-            if ui.add(Key::new(label).outline(VALUE)).clicked() {
+            if chip_button(ui, label, VALUE).clicked() {
                 click = HeaderClick::Toggle;
             }
         }
     });
     click
+}
+
+pub fn chip_button(ui: &mut Ui, text: &str, tint: Color32) -> egui::Response {
+    let galley = egui_bench::text::lay(ui, egui_bench::text::caps(text, egui_bench::theme::legend_font(10.5), tint, 1.4), egui_bench::text::room(ui) - 14.0);
+    let (rect, resp) = ui.allocate_exact_size(galley.size() + Vec2::new(14.0, 6.0), Sense::click());
+    let hot = resp.hovered() || resp.has_focus();
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        p.rect_filled(rect, 2.0, if hot { BAND } else { WELL });
+        p.rect_stroke(rect, 2.0, Stroke::new(1.0, if hot { tint } else { ETCH }), egui::StrokeKind::Inside);
+        p.galley(rect.center() - galley.size() / 2.0, galley, tint);
+    }
+    if hot {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let label = text.to_string();
+    resp.widget_info(move || egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label.clone()));
+    resp
 }
 
 pub fn all_headers(ui: &mut Ui, h: &crate::mailstore::Headers) {

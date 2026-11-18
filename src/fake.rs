@@ -56,8 +56,18 @@ fn concept_message(id: u64, i: usize, m: &crate::data::Msg, suffix: &str) -> Mes
         quoted,
         attachments,
         remote_images: if first { Some(BLOCKED_HOST.to_string()) } else { None },
-        headers: Default::default(),
+        headers: if first { sample_headers() } else { Default::default() },
         body_state: Default::default(),
+    }
+}
+
+fn sample_headers() -> Headers {
+    Headers {
+        all: vec![("List-Id".into(), "<boards.kestrel-instruments.example>".into())],
+        list_id: Some("boards.kestrel-instruments.example".into()),
+        unsubscribe: Some(Unsubscribe { target: "https://kestrel-instruments.example/u".into(), one_click: true }),
+        auth: AuthResult { spf: Some("pass".into()), dkim: Some("pass".into()), dmarc: Some("pass".into()) },
+        ..Default::default()
     }
 }
 
