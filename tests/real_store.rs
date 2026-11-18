@@ -155,3 +155,47 @@ fn synced_mail_shows_archives_flags_and_survives_restart() {
         a.store.get(item.id).unwrap().paragraphs == vec!["plain body line"]
     });
 }
+
+const DPD_LOGO_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAFAAAAAoCAIAAADmAupWAAAASklEQVR4nO3PAREAEADAQPQPJpYW3L19gm2OPb6yXgfc1rCuYV3DuoZ1Desa1jWsa1jXsK5hXcO6hnUN6xrWNaxrWNewrmFdw7oDc6UBGKimdEUAAAAASUVORK5CYII=";
+
+fn dpd_mail(name: &str) -> String {
+    format!(
+        "From: DPD Ireland <noreply@dpd.ie>\r\nTo: {name}@localhost\r\nSubject: Your DPD order will be delivered today\r\nDate: Wed, 18 Nov 2026 10:31:00 +0000\r\nMessage-ID: <dpd1@dpd.ie>\r\nMIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=\"rel\"\r\n\r\n--rel\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><body style=\"margin:0;background:#f2f2f2\"><table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\"><tr><td align=\"center\"><table width=\"600\" style=\"background:#ffffff\"><tr><td style=\"background:#dc0032;padding:16px\"><img src=\"cid:dpdlogo\" alt=\"dpdlogo\" width=\"80\" height=\"40\"></td></tr><tr><td style=\"padding:24px;font-family:Arial\"><h2 style=\"color:#414042\">We're delivering your DPD parcel</h2><p style=\"font-size:28px;color:#dc0032;font-weight:bold\">TODAY</p><p>Your parcel will be delivered between 13:33 - 14:33.</p><p><a href=\"https://track.dpd.example/manage\" style=\"display:inline-block;background:#dc0032;color:#fff;padding:10px 18px;text-decoration:none\">Manage Your Delivery</a></p></td></tr></table></td></tr></table></body></html>\r\n--rel\r\nContent-Type: image/png\r\nContent-ID: <dpdlogo>\r\nContent-Disposition: inline\r\nContent-Transfer-Encoding: base64\r\n\r\n{DPD_LOGO_PNG}\r\n--rel--\r\n"
+    )
+}
+
+#[test]
+fn html_mail_renders_with_its_inline_logo_and_no_fake_attachments() {
+    if !common::greenmail() {
+        return;
+    }
+    let name = format!("rh{}", std::process::id());
+    common::create_greenmail_user(&name);
+    let mut b = imap(&name);
+    block_on(b.append("INBOX", dpd_mail(&name).as_bytes())).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::create(&dir.path().join("mail.db"), None, Some(("pw", KdfParams::fast()))).unwrap();
+    let mut h = harness(RealStore::open(store, vec![setup(&name)]));
+    until(&mut h, "mail in the inbox", |a| inbox(a) == 1);
+    let id = h.state().1.store.list(&Query::new(ms::Folder::Inbox), 0, 1).items[0].id;
+    until(&mut h, "html body fetched", |a| !a.store.get(id).unwrap().html.is_empty());
+    let msg = h.state().1.store.get(id).unwrap();
+    assert!(msg.attachments.is_empty(), "inline logo listed as attachment: {:?}", msg.attachments);
+    assert_eq!(msg.html.inline.len(), 1);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let red = |img: &image::RgbaImage| img.pixels().filter(|p| p[0] > 200 && p[1] < 40 && p[2] > 30 && p[2] < 80).count();
+    let green = |img: &image::RgbaImage| img.pixels().filter(|p| p[0] < 30 && p[1] > 180 && p[2] < 30).count();
+    let img = loop {
+        h.run();
+        let img = h.render().expect("render");
+        if (red(&img) > 2000 && green(&img) > 1000) || Instant::now() > deadline {
+            break img;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/screens");
+    img.save(dir.join("reader-html.png")).unwrap();
+    assert!(red(&img) > 2000, "the DPD red header and button were not painted");
+    assert!(green(&img) > 1000, "the inline cid logo was not painted");
+}

@@ -78,6 +78,12 @@ impl<'a> StoreSink<'a> {
         rows.iter().map(|(id, raw)| Ok((id.clone(), decode(raw)?))).collect()
     }
 
+    pub fn newest_page(&self, folder: &str, before: Option<&str>, limit: usize) -> Result<Vec<(String, MessageSummary)>> {
+        let prefix = self.folder_prefix(folder)?;
+        let rows = self.store.scan_prefix_page_desc(MESSAGE, &prefix, before, limit)?;
+        rows.iter().map(|(id, raw)| Ok((id.clone(), decode(raw)?))).collect()
+    }
+
     pub fn summary(&self, folder: &str, uid: u32) -> Result<Option<MessageSummary>> {
         match self.store.get(MESSAGE, &self.message_id(folder, uid)?)? {
             Some(raw) => Ok(Some(decode(&raw)?)),

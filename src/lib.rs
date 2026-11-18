@@ -5,6 +5,7 @@ pub mod backend;
 pub mod data;
 pub mod dns;
 pub mod fake;
+pub mod htmlview;
 pub mod kit;
 pub mod mailstore;
 pub mod oauth;

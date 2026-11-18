@@ -1,11 +1,13 @@
 use crate::backend::Address;
-use crate::mailstore::{AttachmentInfo, Block};
+use crate::htmlview::HtmlBody;
+use crate::mailstore::AttachmentInfo;
 use mail_parser::{MessageParser, PartKind};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Default)]
 pub struct Body {
     pub paragraphs: Vec<String>,
-    pub blocks: Vec<Block>,
+    pub html: HtmlBody,
     pub quoted: Vec<String>,
     pub attachments: Vec<AttachmentInfo>,
     pub remote_images: Option<String>,
@@ -72,7 +74,20 @@ pub fn size(bytes: usize) -> String {
 }
 
 pub fn has_attachments(raw: &[u8]) -> bool {
-    MessageParser::default().parse(raw).is_some_and(|m| m.attachments().len() > 0)
+    MessageParser::default().parse(raw).is_some_and(|m| m.attachments().any(|p| !is_inline_image(&p, &html_of(&m))))
+}
+
+fn html_of(msg: &mail_parser::Message) -> String {
+    msg.html_body().filter(|p| matches!(p.kind(), PartKind::Html)).find_map(|p| p.text()).map(|h| h.into_owned()).unwrap_or_default()
+}
+
+fn content_id(p: &mail_parser::MessagePart) -> Option<String> {
+    p.content_id().map(|c| c.trim().trim_matches(['<', '>']).to_string()).filter(|c| !c.is_empty())
+}
+
+fn is_inline_image(p: &mail_parser::MessagePart, html: &str) -> bool {
+    let Some(cid) = content_id(p) else { return false };
+    html.to_ascii_lowercase().contains(&format!("cid:{}", cid.to_ascii_lowercase()))
 }
 
 fn image_host(html: &str) -> Option<String> {
@@ -125,25 +140,23 @@ pub fn parse_body(raw: &[u8]) -> Body {
     };
     let text = msg.text_bodies().map(|t| t.into_owned()).collect::<Vec<_>>().join("\n\n");
     let (paragraphs, quoted) = split_text(&text);
-    let attachments = msg
-        .attachments()
-        .map(|p| AttachmentInfo {
-            name: p.attachment_name().unwrap_or("attachment").to_string(),
-            size: size(p.decoded_len()),
-        })
-        .collect();
-    let remote_images = msg
-        .html_body()
-        .filter(|p| matches!(p.kind(), PartKind::Html))
-        .filter_map(|p| p.text())
-        .find_map(|h| image_host(&h));
-    let blocks = msg
-        .html_body()
-        .filter(|p| matches!(p.kind(), PartKind::Html))
-        .find_map(|p| p.text())
-        .map(|h| super::html::render(&h))
-        .unwrap_or_default();
-    Body { paragraphs, blocks, quoted, attachments, remote_images }
+    let html = html_of(&msg);
+    let mut inline = Vec::new();
+    let mut attachments = Vec::new();
+    for p in msg.attachments() {
+        if is_inline_image(&p, &html) {
+            if let Some(cid) = content_id(&p) {
+                inline.push((cid, Arc::new(p.decoded().into_owned())));
+            }
+        } else {
+            attachments.push(AttachmentInfo {
+                name: p.attachment_name().unwrap_or("attachment").to_string(),
+                size: size(p.decoded_len()),
+            });
+        }
+    }
+    let remote_images = image_host(&html);
+    Body { paragraphs, html: HtmlBody { html, inline }, quoted, attachments, remote_images }
 }
 
 #[cfg(test)]
@@ -173,12 +186,31 @@ mod tests {
     }
 
     #[test]
-    fn html_becomes_text_and_remote_images_are_reported_not_loaded() {
+    fn html_is_kept_for_rendering_and_remote_images_are_reported_not_loaded() {
         let raw = b"From: a@x.test\r\nSubject: s\r\nContent-Type: text/html\r\n\r\n<html><body><p>Hi <b>friend</b></p><img src=\"https://track.example.com/p.gif\"></body></html>\r\n";
         let b = parse_body(raw);
+        assert!(b.html.html.contains("<b>friend</b>"));
         assert!(b.paragraphs.join(" ").contains("Hi"));
-        assert!(!b.paragraphs.join(" ").contains('<'));
         assert_eq!(b.remote_images.as_deref(), Some("track.example.com"));
+    }
+
+    #[test]
+    fn inline_cid_images_are_not_listed_as_attachments() {
+        let raw = b"From: a@x.test\r\nSubject: s\r\nMIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=\"b\"\r\n\r\n--b\r\nContent-Type: text/html\r\n\r\n<p>We're delivering</p><img src=\"cid:dpdlogo\">\r\n--b\r\nContent-Type: image/png\r\nContent-ID: <dpdlogo>\r\nContent-Disposition: inline\r\nContent-Transfer-Encoding: base64\r\n\r\nSGVsbG8=\r\n--b\r\nContent-Type: application/pdf; name=\"q.pdf\"\r\nContent-Disposition: attachment; filename=\"q.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\nSGVsbG8=\r\n--b--\r\n";
+        let b = parse_body(raw);
+        assert_eq!(b.attachments.len(), 1);
+        assert_eq!(b.attachments[0].name, "q.pdf");
+        assert_eq!(b.html.inline.len(), 1);
+        assert_eq!(b.html.inline[0].0, "dpdlogo");
+        assert_eq!(b.html.inline[0].1.as_slice(), b"Hello");
+        assert!(has_attachments(raw));
+    }
+
+    #[test]
+    fn a_mail_whose_only_parts_are_inline_images_has_no_attachments() {
+        let raw = b"From: a@x.test\r\nSubject: s\r\nMIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=\"b\"\r\n\r\n--b\r\nContent-Type: text/html\r\n\r\n<img src=\"cid:a\">\r\n--b\r\nContent-Type: image/png\r\nContent-ID: <a>\r\nContent-Transfer-Encoding: base64\r\n\r\nSGVsbG8=\r\n--b--\r\n";
+        assert!(!has_attachments(raw));
+        assert!(parse_body(raw).attachments.is_empty());
     }
 
     #[test]

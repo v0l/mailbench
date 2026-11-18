@@ -158,20 +158,6 @@ pub struct Headers {
     pub spam_score: Option<f32>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Span {
-    pub text: String,
-    pub bold: bool,
-    pub italic: bool,
-    pub link: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Block {
-    Text { spans: Vec<Span>, heading: bool, quote: bool },
-    Rule,
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BodyState {
     #[default]
@@ -189,7 +175,7 @@ pub struct Message {
     pub cc: Vec<String>,
     pub sent: String,
     pub paragraphs: Vec<String>,
-    pub blocks: Vec<Block>,
+    pub html: crate::htmlview::HtmlBody,
     pub quoted: Vec<String>,
     pub attachments: Vec<AttachmentInfo>,
     pub remote_images: Option<String>,

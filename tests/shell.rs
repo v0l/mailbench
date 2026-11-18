@@ -5,7 +5,7 @@ use mailbench::backend::*;
 use mailbench::dns::Srv;
 use mailbench::mailstore::{self as ms, Query};
 use mailbench::shell::{Env, Protect, Shell};
-use mailbench::store::{Keychain, KdfParams, StoreError};
+use mailbench::store::{Keychain, KdfParams, Store, StoreError};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -105,8 +105,9 @@ fn boot(dir: &Path, kc: Rc<dyn Keychain>, env: Env) -> Harness<'static, State> {
 fn until(h: &mut Harness<'static, State>, what: &str, cond: impl Fn(&mut Shell) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(40);
     loop {
-        h.run();
+        h.run_steps(3);
         if cond(&mut h.state_mut().1) {
+            h.run_steps(3);
             return;
         }
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
@@ -153,15 +154,15 @@ fn first_run_with_password_then_restart_unlocks_and_wrong_password_errors() {
     h.state_mut().1.unlock_form().unwrap().password = "not the password".into();
     h.run();
     h.get_by_label("unlock").click();
-    h.run();
-    h.run();
+    h.step();
+    until(&mut h, "wrong password reported", |s| !s.unlock_form().is_some_and(|f| f.busy()));
     assert_eq!(h.state().1.screen_name(), "unlock");
     h.get_by_label_contains("Wrong password");
     h.state_mut().1.unlock_form().unwrap().password = "correct horse battery".into();
     h.run();
     h.get_by_label("unlock").click();
-    h.run();
-    h.run();
+    h.step();
+    until(&mut h, "unlocked", |s| s.screen_name() != "unlock");
     assert_eq!(h.state().1.screen_name(), "add account");
 }
 
@@ -219,8 +220,29 @@ fn keychain_failing_on_a_later_start_falls_back_to_the_password() {
     h.state_mut().1.unlock_form().unwrap().password = "correct horse battery".into();
     h.run();
     h.get_by_label("unlock").click();
+    h.step();
+    until(&mut h, "unlocked", |s| s.screen_name() != "unlock");
+    assert_eq!(h.state().1.screen_name(), "add account");
+}
+
+#[test]
+fn a_slow_password_unlock_keeps_the_screen_responsive_and_shows_progress() {
+    let d = dir();
+    let slow = KdfParams { memory_kib: 64 * 1024, iterations: 6, lanes: 1 };
+    Store::create(&d.path().join("mail.db"), None, Some(("correct horse battery", slow))).unwrap();
+    let kc: Rc<dyn Keychain> = Rc::new(MemKeychain::default());
+    let mut h = boot(d.path(), kc, env(FixtureNet::default()));
+    assert_eq!(h.state().1.screen_name(), "unlock");
+    h.state_mut().1.unlock_form().unwrap().password = "correct horse battery".into();
     h.run();
-    h.run();
+    h.get_by_label("unlock").click();
+    let frame = Instant::now();
+    h.step();
+    assert!(frame.elapsed() < Duration::from_millis(150), "the frame after unlock took {:?}", frame.elapsed());
+    assert!(h.state_mut().1.unlock_form().is_some_and(|f| f.busy()));
+    h.step();
+    h.get_by_label_contains("unlocking");
+    until(&mut h, "unlocked", |s| s.screen_name() != "unlock");
     assert_eq!(h.state().1.screen_name(), "add account");
 }
 

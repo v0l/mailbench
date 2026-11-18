@@ -1,6 +1,5 @@
 mod display;
 mod headers;
-mod html;
 mod model;
 mod worker;
 
@@ -17,6 +16,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const OUTBOX: &str = "outbox";
+const QUICK_PAGE: usize = 500;
 const LOCAL: &str = "local";
 
 pub struct AccountSetup {
@@ -221,7 +221,7 @@ impl Shared {
             cc: e.cc.clone(),
             sent: display::sent(e.date),
             paragraphs: body.paragraphs,
-            blocks: body.blocks,
+            html: body.html,
             quoted: body.quoted,
             attachments: body.attachments,
             remote_images: body.remote_images,
@@ -343,7 +343,7 @@ impl Shared {
         })
     }
 
-    fn build(&self) -> Cache {
+    fn build(&self, quick: bool) -> Cache {
         let ops = Self::outbox_in(&self.lock_store());
         let known = lock(&self.known_attachments).clone();
         let mut cache = Cache::default();
@@ -381,10 +381,11 @@ impl Shared {
                 loop {
                 let page = {
                     let store = self.lock_store();
-                    StoreSink::new(&store, &account.id, true).messages_page(&folder.name, after.as_deref(), 2000).unwrap_or_default()
+                    let sink = StoreSink::new(&store, &account.id, true);
+                    if quick { sink.newest_page(&folder.name, None, QUICK_PAGE) } else { sink.messages_page(&folder.name, after.as_deref(), 2000) }.unwrap_or_default()
                 };
                 let Some((last, _)) = page.last() else { break };
-                after = Some(last.clone());
+                after = if quick { None } else { Some(last.clone()) };
                 for m in page.into_iter().map(|(_, m)| m) {
                     if m.flags.deleted {
                         continue;
@@ -426,6 +427,9 @@ impl Shared {
                         flagged: flag_ops.get(&(folder.name.clone(), m.uid)).and_then(|f| f.1).unwrap_or(m.flags.flagged),
                         attachments,
                     });
+                }
+                if quick {
+                    break;
                 }
                 }
             }
@@ -473,6 +477,7 @@ impl Shared {
 
 fn builder(shared: Arc<Shared>) {
     let mut seen = 0;
+    let mut first = true;
     while !shared.stop.load(Ordering::Relaxed) {
         let generation = shared.generation.load(Ordering::SeqCst);
         if generation == seen {
@@ -481,7 +486,7 @@ fn builder(shared: Arc<Shared>) {
             continue;
         }
         let user = shared.user_gen.load(Ordering::SeqCst);
-        let fresh = Arc::new(shared.build());
+        let fresh = Arc::new(shared.build(first));
         {
             let mut current = lock(&shared.cache);
             if shared.user_gen.load(Ordering::SeqCst) != user {
@@ -489,7 +494,10 @@ fn builder(shared: Arc<Shared>) {
             }
             *current = fresh;
         }
-        seen = generation;
+        if !first {
+            seen = generation;
+        }
+        first = false;
         if let Some(ctx) = lock(&shared.ctx).as_ref() {
             ctx.request_repaint();
         }
@@ -749,7 +757,7 @@ impl MailStore for RealStore {
             cc: e.cc,
             sent: display::sent(e.date),
             paragraphs: body.paragraphs,
-            blocks: body.blocks,
+            html: body.html,
             quoted: body.quoted,
             attachments: body.attachments,
             remote_images: body.remote_images,

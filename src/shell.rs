@@ -2,7 +2,7 @@ use crate::accounts::{self, AccountConfig, Credential, Step};
 use crate::app::App;
 use crate::autodetect::{self, Detected, Net, Provider, ServerSettings};
 use crate::backend::Security;
-use crate::kit::{header_frame, pane_fill, title};
+use crate::kit::{form_footer, header_frame, pane_fill, title};
 use crate::oauth;
 use crate::real::RealStore;
 use crate::store::{KdfParams, Keychain, Store, StoreError, Unlock, UnlockMethods};
@@ -199,7 +199,7 @@ impl FirstForm {
                         }
                     }
                 }
-                footer(ui, |ui| {
+                form_footer(ui, |ui| {
                     if ui.add(Key::new("continue").solid(READOUT).min_width(120.0).enabled(self.problem().is_none())).clicked() {
                         go = true;
                     }
@@ -210,17 +210,31 @@ impl FirstForm {
     }
 }
 
+pub struct Unlocking {
+    rx: Receiver<Result<Store, StoreError>>,
+}
+
 pub struct UnlockForm {
     pub password: String,
     pub error: Option<String>,
     pub note: Option<String>,
     pub has_password: bool,
     focused: bool,
+    working: Option<Unlocking>,
 }
 
 impl UnlockForm {
+    fn new(error: Option<String>, note: Option<String>, has_password: bool) -> Self {
+        UnlockForm { password: String::new(), error, note, has_password, focused: !has_password, working: None }
+    }
+
+    pub fn busy(&self) -> bool {
+        self.working.is_some()
+    }
+
     fn show(&mut self, ui: &mut Ui) -> bool {
         let mut go = false;
+        let busy = self.working.is_some();
         page(ui, |ui| {
             section(ui, "unlock", "everything on disk is encrypted", |ui| {
                 if let Some(n) = &self.note {
@@ -229,12 +243,12 @@ impl UnlockForm {
                 }
                 if self.has_password {
                     row(ui, "password", |ui| {
-                        let r = secret(ui, &mut self.password);
+                        let r = ui.add_enabled_ui(!busy, |ui| secret(ui, &mut self.password)).inner;
                         if !self.focused {
                             r.request_focus();
                             self.focused = true;
                         }
-                        if submitted(ui, &r) {
+                        if !busy && submitted(ui, &r) {
                             go = true;
                         }
                     });
@@ -243,8 +257,12 @@ impl UnlockForm {
                     status(ui, false, e);
                 }
                 if self.has_password {
-                    footer(ui, |ui| {
-                        if ui.add(Key::new("unlock").solid(READOUT).min_width(120.0).enabled(!self.password.is_empty())).clicked() {
+                    form_footer(ui, |ui| {
+                        if self.working.is_some() {
+                            let (rect, _) = ui.allocate_exact_size(egui::vec2(220.0, KEY_H), egui::Sense::hover());
+                            let r = egui_bench::prelude::busy(ui, rect, None, "unlocking", READOUT);
+                            ui.ctx().accesskit_node_builder(r.id, |node| node.set_label("unlocking"));
+                        } else if ui.add(Key::new("unlock").solid(READOUT).min_width(120.0).enabled(!self.password.is_empty())).clicked() {
                             go = true;
                         }
                     });
@@ -628,7 +646,7 @@ impl AddForm {
                     status(ui, false, e);
                 }
                 let tested = self.test.all_ok() && self.test.for_key == self.key();
-                footer(ui, |ui| {
+                form_footer(ui, |ui| {
                     if let Ok(cfg) = &parsed {
                         if ui.add(Key::new("save and sync").solid(READOUT).min_width(130.0).enabled(tested)).clicked() {
                             event = AddEvent::Save(cfg.clone());
@@ -739,7 +757,7 @@ impl SettingsForm {
                         "This deletes the mail synced from this account on this machine. Nothing is deleted on the server, and you can add the account again.",
                         LEGEND,
                     );
-                    footer(ui, |ui| {
+                    form_footer(ui, |ui| {
                         if ui.add(Key::new("remove").solid(FAULT).min_width(100.0)).clicked() {
                             let id = self.drafts[i].id.clone();
                             match accounts::remove(store, &id) {
@@ -855,7 +873,7 @@ impl SettingsForm {
                             }
                         });
                     });
-                footer(ui, |ui| {
+                form_footer(ui, |ui| {
                     if ui.add(Key::new("apply").solid(READOUT).min_width(100.0)).clicked() {
                         apply = true;
                     }
@@ -981,13 +999,7 @@ impl Shell {
         let methods = match Store::methods(&db) {
             Ok(m) => m,
             Err(e) => {
-                self.screen = Screen::Unlock(UnlockForm {
-                    password: String::new(),
-                    error: Some(format!("Could not read the data file: {e}")),
-                    note: None,
-                    has_password: false,
-                    focused: true,
-                });
+                self.screen = Screen::Unlock(UnlockForm::new(Some(format!("Could not read the data file: {e}")), None, false));
                 return;
             }
         };
@@ -1007,13 +1019,7 @@ impl Shell {
                 }
             }
         }
-        self.screen = Screen::Unlock(UnlockForm {
-            password: String::new(),
-            error: None,
-            note,
-            has_password: methods.password,
-            focused: false,
-        });
+        self.screen = Screen::Unlock(UnlockForm::new(None, note, methods.password));
     }
 
     fn opened(&mut self, store: Store) {
@@ -1135,22 +1141,41 @@ impl Shell {
     }
 
     fn submit_unlock(&mut self) {
+        let db = self.db_path();
         let Screen::Unlock(form) = &mut self.screen else { return };
-        let password = form.password.clone();
-        match Store::open(&self.db_path(), &[Unlock::Password(&password)]) {
+        if form.working.is_some() {
+            return;
+        }
+        let password = zeroize::Zeroizing::new(form.password.clone());
+        let (tx, rx) = channel();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Store::open(&db, &[Unlock::Password(&password)]));
+            if let Some(ctx) = ctx {
+                ctx.request_repaint();
+            }
+        });
+        form.error = None;
+        form.working = Some(Unlocking { rx });
+    }
+
+    fn poll_unlock(&mut self) {
+        let Screen::Unlock(form) = &mut self.screen else { return };
+        let Some(w) = &form.working else { return };
+        let result = match w.rx.try_recv() {
+            Ok(r) => r,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err(StoreError::Locked),
+        };
+        form.working = None;
+        match result {
             Ok(store) => self.opened(store),
             Err(StoreError::WrongKey) => {
-                if let Screen::Unlock(form) = &mut self.screen {
-                    form.error = Some("Wrong password. Try again.".into());
-                    form.password.clear();
-                    form.focused = false;
-                }
+                form.error = Some("Wrong password. Try again.".into());
+                form.password.clear();
+                form.focused = false;
             }
-            Err(e) => {
-                if let Screen::Unlock(form) = &mut self.screen {
-                    form.error = Some(format!("Could not unlock: {e}"));
-                }
-            }
+            Err(e) => form.error = Some(format!("Could not unlock: {e}")),
         }
     }
 
@@ -1179,6 +1204,7 @@ impl Shell {
                 if form.show(ui) {
                     self.submit_unlock();
                 }
+                self.poll_unlock();
             }
             Screen::Add(form, _) => match form.show(ui, &self.env) {
                 AddEvent::None => {}

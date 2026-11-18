@@ -137,6 +137,7 @@ pub struct App {
     go_pending: bool,
     last_shown: Option<MessageId>,
     pub settings_requested: bool,
+    html: crate::htmlview::Renderer,
 }
 
 impl App {
@@ -165,6 +166,7 @@ impl App {
             go_pending: false,
             last_shown: None,
             settings_requested: false,
+            html: crate::htmlview::Renderer::default(),
         }
     }
 
@@ -643,7 +645,7 @@ impl App {
         };
         let account = accounts.get(m.summary.account).map(|a| a.name.as_str()).unwrap_or("");
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            ui.set_max_width(ui.available_width().min(MEASURE + 44.0));
+            ui.set_max_width(ui.available_width().min(if m.html.is_empty() { MEASURE + 44.0 } else { 820.0 }));
             ui.spacing_mut().item_spacing.y = 8.0;
             subject_line(ui, &m.summary.subject);
             let mut to = m.to.join(", ");
@@ -692,25 +694,23 @@ impl App {
                     Line::new().note(format!("Images from {host} loaded for this message")).size(11.5).show(ui);
                 }
             }
-            if m.blocks.is_empty() {
+            if m.html.is_empty() {
                 for p in &m.paragraphs {
                     body_text(ui, p);
                     ui.add_space(4.0);
                 }
-            } else {
-                for b in &m.blocks {
-                    if let Some(link) = rich_block(ui, b) {
-                        actions.push(Action::OpenLink(link));
-                    }
-                    ui.add_space(4.0);
+                if quoted_fold(ui, m.quoted.len(), self.quotes_open) {
+                    actions.push(Action::ToggleQuotes);
                 }
-            }
-            if quoted_fold(ui, m.quoted.len(), self.quotes_open) {
-                actions.push(Action::ToggleQuotes);
-            }
-            if self.quotes_open {
-                for line in &m.quoted {
-                    ui.add(egui::Label::new(egui::RichText::new(line).font(body_italic(13.0)).color(LEGEND)));
+                if self.quotes_open {
+                    for line in &m.quoted {
+                        ui.add(egui::Label::new(egui::RichText::new(line).font(body_italic(13.0)).color(LEGEND)));
+                    }
+                }
+            } else {
+                let remote = self.images_loaded.contains(&m.summary.id);
+                if let Some(link) = html_body(ui, &self.html, m.summary.id.0, &m.html, remote) {
+                    actions.push(Action::OpenLink(link));
                 }
             }
             ui.add_space(6.0);
@@ -788,7 +788,7 @@ impl App {
                         Line::new().note(note).size(11.0).show(ui);
                     });
                 });
-                footer(ui, |ui| {
+                form_footer(ui, |ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         send = ui.add(Key::new("send").solid(READOUT).min_width(100.0).enabled(!draft.to.trim().is_empty())).clicked();
                         save = ui.add(Key::new("save draft").outline(VALUE).min_width(100.0)).clicked();

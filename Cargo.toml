@@ -36,14 +36,22 @@ base64 = "0.22"
 open = "5"
 roxmltree = "0.20"
 dirs = "6"
-scraper = "0.23"
-ego-tree = "0.10"
 async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
 tokio-native-tls = "0.3"
 futures = "0.3"
 async-trait = "0.1"
 native-tls = "0.2"
+blitz-dom = { version = "=0.3.0-beta.4", default-features = false, features = ["svg", "woff", "system-fonts", "floats"] }
+blitz-html = "=0.3.0-beta.4"
+blitz-paint = { version = "=0.3.0-beta.4", default-features = false, features = ["svg"] }
+blitz-traits = "=0.3.0-beta.4"
+anyrender = "0.14"
+anyrender_vello_cpu = "0.18"
+peniko = "0.6"
+percent-encoding = "2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+url = "2"
 
 [dev-dependencies]
 tempfile = "3"

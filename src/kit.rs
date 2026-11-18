@@ -54,6 +54,15 @@ pub fn header_frame() -> egui::Frame {
     egui::Frame::NONE.fill(CHASSIS).inner_margin(egui::Margin { left: 12, right: 12, top: 8, bottom: 6 })
 }
 
+pub fn form_footer(ui: &mut Ui, buttons: impl FnOnce(&mut Ui)) {
+    ui.add_space(10.0);
+    let r = ui.available_rect_before_wrap();
+    ui.painter().line_segment([Pos2::new(r.left(), r.top()), Pos2::new(r.right(), r.top())], Stroke::new(1.0, ETCH));
+    ui.add_space(8.0);
+    let size = Vec2::new(ui.available_width(), KEY_H);
+    ui.allocate_ui_with_layout(size, egui::Layout::right_to_left(egui::Align::Center), buttons);
+}
+
 pub fn footer_frame() -> egui::Frame {
     egui::Frame::NONE.fill(CHASSIS).inner_margin(egui::Margin { left: 12, right: 12, top: 5, bottom: 6 })
 }
@@ -116,42 +125,73 @@ pub fn selection(p: &egui::Painter, r: Rect) {
     p.rect_filled(Rect::from_min_size(r.left_top(), Vec2::new(3.0, r.height())), 0.0, READOUT);
 }
 
-pub fn rich_block(ui: &mut Ui, block: &crate::mailstore::Block) -> Option<String> {
-    use crate::mailstore::Block;
-    match block {
-        Block::Rule => {
-            ui.separator();
-            None
-        }
-        Block::Text { spans, heading, quote } => {
-            let mut clicked = None;
-            let size = if *heading { 17.0 } else { BODY_SIZE };
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                for s in spans {
-                    let font = match (s.bold, s.italic) {
-                        (true, _) => body_strong(size),
-                        (false, true) => body_italic(size),
-                        _ => body(size),
-                    };
-                    let colour = if s.link.is_some() { TRACE } else if *quote { LEGEND } else { VALUE };
-                    let mut text = egui::RichText::new(&s.text).font(font).line_height(Some(BODY_LINE)).color(colour);
-                    if s.link.is_some() {
-                        text = text.underline();
-                    }
-                    if let Some(link) = &s.link {
-                        let r = ui.add(egui::Label::new(text).sense(Sense::click()));
-                        if r.on_hover_text(link).clicked() {
-                            clicked = Some(link.clone());
-                        }
-                    } else {
-                        ui.add(egui::Label::new(text));
-                    }
-                }
-            });
-            clicked
-        }
+#[derive(Clone)]
+struct HtmlTextures {
+    source: usize,
+    textures: Vec<(egui::TextureHandle, u32, u32)>,
+}
+
+fn html_textures(ui: &Ui, page: &std::sync::Arc<crate::htmlview::Rendered>) -> Vec<(egui::TextureHandle, u32, u32)> {
+    let source = std::sync::Arc::as_ptr(page) as usize;
+    let id = egui::Id::new("html-textures");
+    if let Some(cached) = ui.ctx().data(|d| d.get_temp::<HtmlTextures>(id)).filter(|c| c.source == source) {
+        return cached.textures;
     }
+    let textures: Vec<_> = page
+        .tiles
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let image = egui::ColorImage::from_rgba_unmultiplied([t.width as usize, t.height as usize], &t.rgba);
+            (ui.ctx().load_texture(format!("html-{source}-{i}"), image, egui::TextureOptions::LINEAR), t.top, t.height)
+        })
+        .collect();
+    ui.ctx().data_mut(|d| d.insert_temp(id, HtmlTextures { source, textures: textures.clone() }));
+    textures
+}
+
+pub fn html_body(
+    ui: &mut Ui,
+    renderer: &crate::htmlview::Renderer,
+    id: u64,
+    body: &crate::htmlview::HtmlBody,
+    remote: bool,
+) -> Option<String> {
+    let width = (ui.available_width().floor() as u32 / 16 * 16).max(160);
+    let scale = ui.ctx().pixels_per_point();
+    let key = crate::htmlview::RenderKey { id, width, scale_milli: (scale * 1000.0).round() as u32, remote };
+    let page = renderer.get(&key, body).or_else(|| renderer.latest_for(id));
+    let Some(page) = page else {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
+        Line::new().note("Rendering message...").size(11.5).show(ui);
+        return None;
+    };
+    if page.width as u32 != width || !page.scale.eq(&scale) {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
+    }
+    let shown = Vec2::new(page.width.min(ui.available_width()), page.height);
+    let (rect, resp) = ui.allocate_exact_size(shown, Sense::click());
+    let painter = ui.painter_at(rect);
+    let ratio = rect.width() / page.width;
+    for (tex, top, h) in html_textures(ui, &page) {
+        let y = rect.top() + top as f32 / page.scale * ratio;
+        let r = Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(rect.width(), h as f32 / page.scale * ratio));
+        painter.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+    }
+    let hit = |p: Pos2| {
+        let local = (p - rect.left_top()) / ratio;
+        page.links.iter().find(|l| local.x >= l.rect[0] && local.x <= l.rect[0] + l.rect[2] && local.y >= l.rect[1] && local.y <= l.rect[1] + l.rect[3])
+    };
+    let hovered = resp.hover_pos().and_then(hit);
+    if let Some(link) = hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        resp.clone().on_hover_text_at_pointer(&link.href);
+    }
+    ui.ctx().accesskit_node_builder(resp.id, |node| node.set_label("message body"));
+    if resp.clicked() {
+        return resp.interact_pointer_pos().and_then(hit).map(|l| l.href.clone());
+    }
+    None
 }
 
 pub fn body_text(ui: &mut Ui, text: &str) {

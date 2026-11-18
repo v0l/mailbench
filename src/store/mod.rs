@@ -432,6 +432,30 @@ impl Store {
         Ok(out)
     }
 
+    pub fn scan_prefix_page_desc(
+        &self,
+        kind: &str,
+        prefix: &str,
+        before: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, Zeroizing<Vec<u8>>)>> {
+        let end = prefix_end(prefix);
+        let mut st = self.conn.prepare_cached(
+            "SELECT id, blob FROM records WHERE kind = ?1 AND id >= ?2 AND id < ?3 ORDER BY id DESC LIMIT ?4",
+        )?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let upper = before.map_or(end.clone(), |b| b.to_string());
+        let rows = st.query_map(params![kind, prefix, upper, limit], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, blob) = row?;
+            let plain = open(&self.key.0, &record_aad(kind, &id), &blob)
+                .ok_or_else(|| StoreError::Tampered(format!("{kind}/{id}")))?;
+            out.push((id, Zeroizing::new(plain)));
+        }
+        Ok(out)
+    }
+
     pub fn delete_prefix(&self, kind: &str, prefix: &str) -> Result<()> {
         let end = prefix_end(prefix);
         self.conn
