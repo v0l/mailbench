@@ -1,4 +1,6 @@
 mod display;
+mod headers;
+mod html;
 mod model;
 mod worker;
 
@@ -9,16 +11,13 @@ use model::*;
 use std::collections::HashMap;
 use std::result::Result;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Sender, channel};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::mpsc::channel;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const OUTBOX: &str = "outbox";
 const LOCAL: &str = "local";
-const ID_FWD: &str = "idfwd";
-const ID_REV: &str = "idrev";
-const ID_NEXT: &str = "idnext";
 
 pub struct AccountSetup {
     pub id: String,
@@ -53,16 +52,18 @@ struct Entry {
     unread: bool,
     flagged: bool,
     attachments: bool,
+    search_key: String,
 }
 
-#[derive(Default)]
+fn search_key(from: &str, address: &str, subject: &str) -> String {
+    format!("{from}\0{address}\0{subject}").to_lowercase()
+}
+
+#[derive(Default, Clone)]
 struct Cache {
-    generation: u64,
-    built: bool,
     entries: Vec<Entry>,
     by_id: HashMap<u64, usize>,
     labels: Vec<LabelInfo>,
-    attachments: HashMap<u64, bool>,
 }
 
 pub(crate) struct Shared {
@@ -72,9 +73,18 @@ pub(crate) struct Shared {
     ctx: Mutex<Option<egui::Context>>,
     pub stop: AtomicBool,
     generation: AtomicU64,
-    cache: Mutex<Cache>,
+    user_gen: AtomicU64,
+    cache: Mutex<Arc<Cache>>,
+    known_attachments: Mutex<HashMap<u64, bool>>,
+    fetch_state: Mutex<HashMap<u64, bool>>,
+    opened: Mutex<Vec<(u64, Message)>>,
+    parse_pending: Mutex<std::collections::HashSet<u64>>,
+    parser: Mutex<Option<std::sync::mpsc::Sender<Entry>>>,
+    fetchers: Mutex<Vec<tokio::sync::mpsc::UnboundedSender<worker::FetchRequest>>>,
+    wake: Condvar,
+    wake_lock: Mutex<()>,
     seq: AtomicU64,
-    kicks: Mutex<Vec<Sender<()>>>,
+    kicks: Mutex<Vec<tokio::sync::mpsc::UnboundedSender<()>>>,
 }
 
 fn now() -> i64 {
@@ -97,23 +107,10 @@ fn backend_err(e: impl std::fmt::Display) -> StoreError {
     StoreError::Backend(e.to_string())
 }
 
-fn assign_id(store: &Store, key: &str) -> u64 {
-    if let Ok(Some(b)) = store.get(ID_FWD, key) {
-        if let Ok(bytes) = <[u8; 8]>::try_from(&b[..]) {
-            return u64::from_be_bytes(bytes);
-        }
-    }
-    let next = store
-        .get(ID_NEXT, "n")
-        .ok()
-        .flatten()
-        .and_then(|b| <[u8; 8]>::try_from(&b[..]).ok())
-        .map(u64::from_be_bytes)
-        .unwrap_or(1);
-    let _ = store.put(ID_NEXT, "n", &(next + 1).to_be_bytes());
-    let _ = store.put(ID_FWD, key, &next.to_be_bytes());
-    let _ = store.put(ID_REV, &next.to_string(), key.as_bytes());
-    next
+fn stable_id(key: &str) -> u64 {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(key.as_bytes());
+    u64::from_be_bytes(digest[..8].try_into().expect("8 bytes")) & (u64::MAX >> 1)
 }
 
 impl Shared {
@@ -125,14 +122,125 @@ impl Shared {
         lock(&self.states)[index] = (state, detail);
     }
 
-    pub fn repaint(&self) {
+    pub fn refresh(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.wake.notify_all();
         if let Some(ctx) = lock(&self.ctx).as_ref() {
             ctx.request_repaint();
         }
     }
 
-    pub fn refresh(&self) {
-        self.generation.fetch_add(1, Ordering::SeqCst);
+    fn patch(&self, id: u64, f: impl FnOnce(&mut Entry)) {
+        let mut guard = lock(&self.cache);
+        let cache = Arc::make_mut(&mut guard);
+        if let Some(i) = cache.by_id.get(&id).copied() {
+            f(&mut cache.entries[i]);
+        }
+    }
+
+    fn insert(&self, entry: Entry) {
+        let mut guard = lock(&self.cache);
+        let cache = Arc::make_mut(&mut guard);
+        let at = cache.entries.partition_point(|x| (x.date, x.id) > (entry.date, entry.id));
+        cache.entries.insert(at, entry);
+        cache.by_id = cache.entries.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
+    }
+
+    fn request_body(&self, e: &Entry) -> BodyState {
+        let mut state = lock(&self.fetch_state);
+        match state.get(&e.id) {
+            Some(false) => return BodyState::Loading,
+            Some(true) => return BodyState::Failed,
+            None => {}
+        }
+        let sent = lock(&self.fetchers)
+            .get(e.account)
+            .is_some_and(|tx| tx.send(worker::FetchRequest { id: e.id, folder: e.server_folder.clone(), uid: e.uid }).is_ok());
+        if sent {
+            state.insert(e.id, false);
+            BodyState::Loading
+        } else {
+            BodyState::Failed
+        }
+    }
+
+    pub fn finish_fetch(&self, id: u64, has_attachments: Option<bool>) {
+        {
+            let mut state = lock(&self.fetch_state);
+            match has_attachments {
+                Some(_) => {
+                    state.remove(&id);
+                }
+                None => {
+                    state.insert(id, true);
+                }
+            }
+        }
+        lock(&self.parse_pending).remove(&id);
+        if let Some(a) = has_attachments {
+            lock(&self.known_attachments).insert(id, a);
+            self.patch(id, |e| e.attachments = a);
+            let entry = {
+                let cache = lock(&self.cache);
+                cache.by_id.get(&id).map(|i| cache.entries[*i].clone())
+            };
+            if let Some(e) = entry {
+                self.queue_parse(&e);
+            }
+        }
+        self.repaint();
+    }
+
+    fn queue_parse(&self, e: &Entry) {
+        if lock(&self.parse_pending).insert(e.id) {
+            if let Some(tx) = lock(&self.parser).as_ref() {
+                let _ = tx.send(e.clone());
+            }
+        }
+    }
+
+    fn parse_one(&self, e: &Entry) {
+        let raw = {
+            let store = self.lock_store();
+            StoreSink::new(&store, &self.accounts[e.account].id, true).body(&e.server_folder, e.uid).ok().flatten()
+        };
+        let Some(raw) = raw else {
+            if self.request_body(e) == BodyState::Failed {
+                lock(&self.parse_pending).remove(&e.id);
+            }
+            self.repaint();
+            return;
+        };
+        let body = display::parse_body(&raw);
+        let headers = headers::parse_headers(&raw);
+        let message = Message {
+            summary: summary(e, now()),
+            folder: e.folder,
+            from_address: e.from_address.clone(),
+            to: e.to.clone(),
+            cc: e.cc.clone(),
+            sent: display::sent(e.date),
+            paragraphs: body.paragraphs,
+            blocks: body.blocks,
+            quoted: body.quoted,
+            attachments: body.attachments,
+            remote_images: body.remote_images,
+            headers,
+            body_state: BodyState::Ready,
+        };
+        {
+            let mut opened = lock(&self.opened);
+            opened.retain(|(i, _)| *i != e.id);
+            opened.push((e.id, message));
+            if opened.len() > 16 {
+                opened.remove(0);
+            }
+        }
+        lock(&self.parse_pending).remove(&e.id);
+        self.repaint();
+    }
+
+    pub fn repaint(&self) {
         if let Some(ctx) = lock(&self.ctx).as_ref() {
             ctx.request_repaint();
         }
@@ -235,14 +343,16 @@ impl Shared {
         })
     }
 
-    fn build(&self, old: &Cache, generation: u64) -> Cache {
-        let store = self.lock_store();
-        let ops = Self::outbox_in(&store);
-        let mut cache = Cache { generation, built: true, attachments: old.attachments.clone(), ..Default::default() };
+    fn build(&self) -> Cache {
+        let ops = Self::outbox_in(&self.lock_store());
+        let known = lock(&self.known_attachments).clone();
+        let mut cache = Cache::default();
         let mut label_counts: HashMap<String, usize> = HashMap::new();
         for (index, account) in self.accounts.iter().enumerate() {
-            let mut sink = StoreSink::new(&store, &account.id, true);
-            let folders = sink.folders().unwrap_or_default();
+            let folders = {
+                let store = self.lock_store();
+                StoreSink::new(&store, &account.id, true).folders().unwrap_or_default()
+            };
             let mut pending: HashMap<(String, u32), String> = HashMap::new();
             let mut flag_ops: HashMap<(String, u32), (Option<bool>, Option<bool>)> = HashMap::new();
             for (_, op) in &ops {
@@ -263,8 +373,19 @@ impl Shared {
             }
             for folder in folders.iter().filter(|f| f.selectable) {
                 let ui = ui_folder(folder);
-                let validity = sink.sync_token(&folder.name).ok().flatten().map(|t| t.uid_validity).unwrap_or(0);
-                for m in sink.messages(&folder.name).unwrap_or_default() {
+                let validity = {
+                    let store = self.lock_store();
+                    StoreSink::new(&store, &account.id, true).sync_token(&folder.name).ok().flatten().map(|t| t.uid_validity).unwrap_or(0)
+                };
+                let mut after: Option<String> = None;
+                loop {
+                let page = {
+                    let store = self.lock_store();
+                    StoreSink::new(&store, &account.id, true).messages_page(&folder.name, after.as_deref(), 2000).unwrap_or_default()
+                };
+                let Some((last, _)) = page.last() else { break };
+                after = Some(last.clone());
+                for m in page.into_iter().map(|(_, m)| m) {
                     if m.flags.deleted {
                         continue;
                     }
@@ -276,16 +397,16 @@ impl Shared {
                         }
                         continue;
                     };
-                    let key = format!("r\0{}\0{}\0{}\0{}", account.id, folder.name, validity, m.uid);
-                    let id = assign_id(&store, &key);
+                    let id = stable_id(&format!("r\0{}\0{}\0{}\0{}", account.id, folder.name, validity, m.uid));
                     let shown = pending
                         .get(&(folder.name.clone(), m.uid))
                         .map(|to| folder_for(&folders, to))
                         .unwrap_or(Some(ui))
                         .unwrap_or(ui);
-                    let attachments = *cache.attachments.entry(id).or_insert_with(|| {
-                        sink.body(&folder.name, m.uid).ok().flatten().is_some_and(|b| display::has_attachments(&b))
-                    });
+                    let attachments = known.get(&id).copied().unwrap_or(false);
+                    let from: String = m.from.first().map(display::person).unwrap_or_default();
+                    let from_address: String = m.from.first().map(|a| a.address.clone()).unwrap_or_default();
+                    let subject: String = m.subject.clone().unwrap_or_default();
                     cache.entries.push(Entry {
                         id,
                         account: index,
@@ -294,26 +415,29 @@ impl Shared {
                         uid: m.uid,
                         validity,
                         local: None,
-                        from: m.from.first().map(display::person).unwrap_or_default(),
-                        from_address: m.from.first().map(|a| a.address.clone()).unwrap_or_default(),
+                        search_key: search_key(&from, &from_address, &subject),
+                        from,
+                        from_address,
                         to: display::people(&m.to),
                         cc: display::people(&m.cc),
-                        subject: m.subject.clone().unwrap_or_default(),
+                        subject,
                         date: m.date.unwrap_or(0),
                         unread: flag_ops.get(&(folder.name.clone(), m.uid)).and_then(|f| f.0).map(|s| !s).unwrap_or(!m.flags.seen),
                         flagged: flag_ops.get(&(folder.name.clone(), m.uid)).and_then(|f| f.1).unwrap_or(m.flags.flagged),
                         attachments,
                     });
                 }
+                }
             }
         }
+        let store = self.lock_store();
         for key in store.list(LOCAL).unwrap_or_default() {
             let Some(raw) = store.get(LOCAL, &key).ok().flatten() else { continue };
             let Ok(msg) = serde_json::from_slice::<LocalMsg>(&raw) else { continue };
             let Some(index) = self.index_of(&msg.account) else { continue };
             let Some(folder) = folder_from_name(&msg.folder) else { continue };
             cache.entries.push(Entry {
-                id: assign_id(&store, &format!("l\0{key}")),
+                id: stable_id(&format!("l\0{key}")),
                 account: index,
                 folder,
                 server_folder: String::new(),
@@ -325,6 +449,7 @@ impl Shared {
                 to: vec![msg.to.clone()],
                 cc: if msg.cc.is_empty() { Vec::new() } else { vec![msg.cc.clone()] },
                 subject: msg.subject.clone(),
+                search_key: search_key("me", &self.accounts[index].address, &msg.subject),
                 date: msg.date,
                 unread: false,
                 flagged: false,
@@ -341,13 +466,33 @@ impl Shared {
     }
 
     fn with_cache<T>(&self, f: impl FnOnce(&Cache) -> T) -> T {
-        let mut cache = lock(&self.cache);
-        let generation = self.generation.load(Ordering::SeqCst);
-        if !cache.built || cache.generation != generation {
-            let fresh = self.build(&cache, generation);
-            *cache = fresh;
-        }
+        let cache = lock(&self.cache).clone();
         f(&cache)
+    }
+}
+
+fn builder(shared: Arc<Shared>) {
+    let mut seen = 0;
+    while !shared.stop.load(Ordering::Relaxed) {
+        let generation = shared.generation.load(Ordering::SeqCst);
+        if generation == seen {
+            let guard = lock(&shared.wake_lock);
+            let _ = shared.wake.wait_timeout(guard, Duration::from_millis(250));
+            continue;
+        }
+        let user = shared.user_gen.load(Ordering::SeqCst);
+        let fresh = Arc::new(shared.build());
+        {
+            let mut current = lock(&shared.cache);
+            if shared.user_gen.load(Ordering::SeqCst) != user {
+                continue;
+            }
+            *current = fresh;
+        }
+        seen = generation;
+        if let Some(ctx) = lock(&shared.ctx).as_ref() {
+            ctx.request_repaint();
+        }
     }
 }
 
@@ -372,9 +517,10 @@ pub fn purge_account(store: &Store, account: &str) -> Result<(), StoreError> {
 pub struct RealStore {
     shared: Arc<Shared>,
     threads: Vec<JoinHandle<()>>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
-fn matches(e: &Entry, q: &Query) -> bool {
+fn matches(e: &Entry, q: &Query, needle: &str) -> bool {
     if e.folder != q.folder {
         return false;
     }
@@ -384,13 +530,7 @@ fn matches(e: &Entry, q: &Query) -> bool {
         Filter::Flagged if !e.flagged => return false,
         _ => {}
     }
-    if q.text.is_empty() {
-        return true;
-    }
-    let needle = q.text.to_lowercase();
-    e.from.to_lowercase().contains(&needle)
-        || e.from_address.to_lowercase().contains(&needle)
-        || e.subject.to_lowercase().contains(&needle)
+    needle.is_empty() || e.search_key.contains(needle)
 }
 
 fn summary(e: &Entry, now: i64) -> Summary {
@@ -421,22 +561,50 @@ impl RealStore {
             ctx: Mutex::new(None),
             stop: AtomicBool::new(false),
             generation: AtomicU64::new(1),
-            cache: Mutex::new(Cache::default()),
+            user_gen: AtomicU64::new(0),
+            cache: Mutex::new(Arc::new(Cache::default())),
+            known_attachments: Mutex::new(HashMap::new()),
+            fetch_state: Mutex::new(HashMap::new()),
+            opened: Mutex::new(Vec::new()),
+            parse_pending: Mutex::new(std::collections::HashSet::new()),
+            parser: Mutex::new(None),
+            fetchers: Mutex::new(Vec::new()),
+            wake: Condvar::new(),
+            wake_lock: Mutex::new(()),
             seq: AtomicU64::new(0),
             kicks: Mutex::new(Vec::new()),
         });
         let mut threads = Vec::new();
+        let mut tasks = Vec::new();
+        let background = shared.clone();
+        threads.push(std::thread::spawn(move || builder(background)));
+        let (parse_tx, parse_rx) = channel();
+        *lock(&shared.parser) = Some(parse_tx);
+        let parsing = shared.clone();
+        threads.push(std::thread::spawn(move || {
+            for e in parse_rx {
+                if parsing.stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                parsing.parse_one(&e);
+            }
+        }));
         for (index, setup) in accounts.into_iter().enumerate() {
-            let (tx, rx) = channel();
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             lock(&shared.kicks).push(tx);
-            let shared = shared.clone();
-            threads.push(std::thread::spawn(move || worker::run(shared, index, setup.backend, rx)));
+            let (fetch_tx, fetch_rx) = tokio::sync::mpsc::unbounded_channel();
+            lock(&shared.fetchers).push(fetch_tx);
+            if let Some(reader) = setup.backend.fork() {
+                tasks.push(crate::runtime::spawn(worker::serve_fetches(shared.clone(), index, reader, fetch_rx)));
+            }
+            tasks.push(crate::runtime::spawn(worker::run(shared.clone(), index, setup.backend, rx)));
         }
-        RealStore { shared, threads }
+        RealStore { shared, threads, tasks }
     }
 
     pub fn attach(&self, ctx: &egui::Context) {
         *lock(&self.shared.ctx) = Some(ctx.clone());
+        ctx.request_repaint();
     }
 
     pub fn pending(&self) -> usize {
@@ -457,7 +625,13 @@ impl RealStore {
 impl Drop for RealStore {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::SeqCst);
+        self.shared.wake.notify_all();
         lock(&self.shared.kicks).clear();
+        lock(&self.shared.fetchers).clear();
+        *lock(&self.shared.parser) = None;
+        for t in self.tasks.drain(..) {
+            t.abort();
+        }
         for t in self.threads.drain(..) {
             let _ = t.join();
         }
@@ -505,9 +679,10 @@ impl MailStore for RealStore {
 
     fn counts(&self, query: &Query) -> Counts {
         let base = Query { filter: Filter::All, ..query.clone() };
+        let needle = query.text.to_lowercase();
         self.shared.with_cache(|c| {
             let mut out = Counts::default();
-            for e in c.entries.iter().filter(|e| matches(e, &base)) {
+            for e in c.entries.iter().filter(|e| matches(e, &base, &needle)) {
                 out.all += 1;
                 out.unread += e.unread as usize;
                 out.flagged += e.flagged as usize;
@@ -518,10 +693,11 @@ impl MailStore for RealStore {
 
     fn list(&self, query: &Query, offset: usize, limit: usize) -> Page {
         let now = now();
+        let needle = query.text.to_lowercase();
         self.shared.with_cache(|c| {
             let mut total = 0;
             let mut items = Vec::new();
-            for e in c.entries.iter().filter(|e| matches(e, query)) {
+            for e in c.entries.iter().filter(|e| matches(e, query, &needle)) {
                 if total >= offset && items.len() < limit {
                     items.push(summary(e, now));
                 }
@@ -541,16 +717,30 @@ impl MailStore for RealStore {
                 .flatten()
                 .and_then(|r| serde_json::from_slice::<LocalMsg>(&r).ok())
                 .ok_or(StoreError::NotFound)?;
-            display::Body {
-                paragraphs: msg.body.split("\n\n").map(|p| p.to_string()).collect(),
-                ..Default::default()
-            }
+            (
+                display::Body {
+                    paragraphs: msg.body.split("\n\n").map(|p| p.to_string()).collect(),
+                    ..Default::default()
+                },
+                Headers::default(),
+                BodyState::Ready,
+            )
         } else {
-            let store = self.shared.lock_store();
-            let account = &self.shared.accounts[e.account].id;
-            let raw = StoreSink::new(&store, account, true).body(&e.server_folder, e.uid).ok().flatten();
-            raw.map(|r| display::parse_body(&r)).unwrap_or_default()
+            let cached = lock(&self.shared.opened).iter().find(|(i, _)| *i == id.0).map(|(_, m)| m.clone());
+            if let Some(mut m) = cached {
+                m.summary = summary(&e, now());
+                m.folder = e.folder;
+                return Ok(m);
+            }
+            let state = if lock(&self.shared.fetch_state).get(&id.0) == Some(&true) {
+                BodyState::Failed
+            } else {
+                self.shared.queue_parse(&e);
+                BodyState::Loading
+            };
+            (display::Body::default(), Headers::default(), state)
         };
+        let (body, headers, body_state) = body;
         Ok(Message {
             summary: summary(&e, now()),
             folder: e.folder,
@@ -559,9 +749,12 @@ impl MailStore for RealStore {
             cc: e.cc,
             sent: display::sent(e.date),
             paragraphs: body.paragraphs,
+            blocks: body.blocks,
             quoted: body.quoted,
             attachments: body.attachments,
             remote_images: body.remote_images,
+            headers,
+            body_state,
         })
     }
 
@@ -576,6 +769,7 @@ impl MailStore for RealStore {
             return Ok(());
         }
         let account = self.shared.accounts[e.account].id.clone();
+        let validity = self.shared.validity(&account, &e.server_folder).unwrap_or(e.validity);
         {
             let store = self.shared.lock_store();
             let sink = StoreSink::new(&store, &account, true);
@@ -590,7 +784,7 @@ impl MailStore for RealStore {
                     account,
                     folder: e.server_folder.clone(),
                     uid: e.uid,
-                    uid_validity: e.validity,
+                    uid_validity: validity,
                     seen,
                     flagged,
                     base_seen: base.seen,
@@ -598,6 +792,15 @@ impl MailStore for RealStore {
                 },
             )?;
         }
+        self.shared.user_gen.fetch_add(1, Ordering::SeqCst);
+        self.shared.patch(e.id, |x| {
+            if let Some(s) = seen {
+                x.unread = !s;
+            }
+            if let Some(f) = flagged {
+                x.flagged = f;
+            }
+        });
         self.shared.refresh();
         self.shared.kick(e.account);
         Ok(())
@@ -617,18 +820,23 @@ impl MailStore for RealStore {
                 msg.folder = folder.name().to_string();
                 store.put(LOCAL, local, &serde_json::to_vec(&msg).map_err(backend_err)?).map_err(backend_err)?;
             }
+            self.shared.user_gen.fetch_add(1, Ordering::SeqCst);
+            self.shared.patch(e.id, |x| x.folder = folder);
             self.shared.refresh();
             return Ok(());
         }
         let folders = self.shared.folders_of(&account);
+        let validity = self.shared.validity(&account, &e.server_folder).unwrap_or(e.validity);
         let to = server_folder(&folders, folder).unwrap_or_else(|| default_name(folder).to_string());
         {
             let store = self.shared.lock_store();
             self.shared.enqueue(
                 &store,
-                &Op::Move { account, folder: e.server_folder.clone(), uid: e.uid, uid_validity: e.validity, to },
+                &Op::Move { account, folder: e.server_folder.clone(), uid: e.uid, uid_validity: validity, to },
             )?;
         }
+        self.shared.user_gen.fetch_add(1, Ordering::SeqCst);
+        self.shared.patch(e.id, |x| x.folder = folder);
         self.shared.refresh();
         self.shared.kick(e.account);
         Ok(())
@@ -653,8 +861,29 @@ impl MailStore for RealStore {
             if folder == ms::Folder::Sent {
                 self.shared.enqueue(&store, &Op::Send { account, local: key.clone() })?;
             }
-            assign_id(&store, &format!("l\0{key}"))
+            stable_id(&format!("l\0{key}"))
         };
+        let index = message.account;
+        self.shared.user_gen.fetch_add(1, Ordering::SeqCst);
+        self.shared.insert(Entry {
+            id,
+            account: index,
+            folder,
+            server_folder: String::new(),
+            uid: 0,
+            validity: 0,
+            local: Some(key),
+            from: "me".into(),
+            from_address: self.shared.accounts[index].address.clone(),
+            to: vec![msg.to.clone()],
+            cc: if msg.cc.is_empty() { Vec::new() } else { vec![msg.cc.clone()] },
+            search_key: search_key("me", &self.shared.accounts[index].address, &msg.subject),
+            subject: msg.subject.clone(),
+            date: msg.date,
+            unread: false,
+            flagged: false,
+            attachments: false,
+        });
         self.shared.refresh();
         self.shared.kick(message.account);
         Ok(MessageId(id))

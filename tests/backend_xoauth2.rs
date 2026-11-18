@@ -108,7 +108,7 @@ fn mock_smtp() -> (u16, Receiver<String>) {
 fn imap_xoauth2_sends_the_encoded_bearer_string() {
     let (port, rx) = mock_imap();
     let mut backend = ImapBackend::new(ImapConfig::new("127.0.0.1", port, Security::Plain, auth()));
-    backend.list_folders().unwrap();
+    mailbench::runtime::block_on(backend.list_folders()).unwrap();
     assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), EXPECTED);
 }
 
@@ -123,7 +123,7 @@ fn smtp_xoauth2_sends_the_encoded_bearer_string() {
         body: "hello".into(),
         ..Default::default()
     };
-    backend.send(&msg).unwrap();
+    mailbench::runtime::block_on(backend.send(&msg)).unwrap();
     assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), EXPECTED);
 }
 

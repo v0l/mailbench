@@ -1,11 +1,12 @@
 use super::error::{BackendError, Result};
 use super::types::*;
 use super::Backend;
+use async_trait::async_trait;
 use lettre::message::header::{InReplyTo, MessageId, References};
 use lettre::message::{Mailbox, MessageBuilder};
 use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::transport::smtp::client::{Tls, TlsParameters};
-use lettre::{Message, SmtpTransport, Transport};
+use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use std::time::Duration;
 
 pub use super::types::Security as SmtpSecurity;
@@ -42,7 +43,7 @@ impl SmtpBackend {
         Self { cfg }
     }
 
-    fn transport(&self) -> Result<SmtpTransport> {
+    fn transport(&self) -> Result<AsyncSmtpTransport<Tokio1Executor>> {
         let cfg = &self.cfg;
         let tls = || -> Result<TlsParameters> {
             TlsParameters::builder(cfg.host.clone())
@@ -50,7 +51,7 @@ impl SmtpBackend {
                 .build()
                 .map_err(|e| BackendError::Connection(e.to_string()))
         };
-        let mut builder = SmtpTransport::builder_dangerous(cfg.host.as_str())
+        let mut builder = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(cfg.host.as_str())
             .port(cfg.port)
             .timeout(Some(cfg.timeout));
         builder = match cfg.security {
@@ -127,29 +128,34 @@ fn smtp_error(e: lettre::transport::smtp::Error) -> BackendError {
     }
 }
 
+#[async_trait]
 impl Backend for SmtpBackend {
     fn kind(&self) -> &'static str {
         "smtp"
     }
 
-    fn capabilities(&mut self) -> Result<Capabilities> {
+    fn fork(&self) -> Option<Box<dyn Backend>> {
+        Some(Box::new(SmtpBackend::new(self.cfg.clone())))
+    }
+
+    async fn capabilities(&mut self) -> Result<Capabilities> {
         Ok(Capabilities {
             send: true,
             ..Default::default()
         })
     }
 
-    fn send(&mut self, message: &OutgoingMessage) -> Result<()> {
+    async fn send(&mut self, message: &OutgoingMessage) -> Result<()> {
         if message.to.is_empty() && message.cc.is_empty() && message.bcc.is_empty() {
             return Err(BackendError::Protocol("no recipients".into()));
         }
         let email = build_message(message)?;
-        self.transport()?.send(&email).map_err(smtp_error)?;
+        self.transport()?.send(email).await.map_err(smtp_error)?;
         Ok(())
     }
 
-    fn check(&mut self) -> Result<()> {
-        match self.transport()?.test_connection() {
+    async fn check(&mut self) -> Result<()> {
+        match self.transport()?.test_connection().await {
             Ok(true) => Ok(()),
             Ok(false) => Err(BackendError::Connection("the server closed the connection".into())),
             Err(e) => Err(smtp_error(e)),

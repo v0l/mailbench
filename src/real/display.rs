@@ -1,10 +1,11 @@
 use crate::backend::Address;
-use crate::mailstore::AttachmentInfo;
+use crate::mailstore::{AttachmentInfo, Block};
 use mail_parser::{MessageParser, PartKind};
 
 #[derive(Clone, Debug, Default)]
 pub struct Body {
     pub paragraphs: Vec<String>,
+    pub blocks: Vec<Block>,
     pub quoted: Vec<String>,
     pub attachments: Vec<AttachmentInfo>,
     pub remote_images: Option<String>,
@@ -136,7 +137,13 @@ pub fn parse_body(raw: &[u8]) -> Body {
         .filter(|p| matches!(p.kind(), PartKind::Html))
         .filter_map(|p| p.text())
         .find_map(|h| image_host(&h));
-    Body { paragraphs, quoted, attachments, remote_images }
+    let blocks = msg
+        .html_body()
+        .filter(|p| matches!(p.kind(), PartKind::Html))
+        .find_map(|p| p.text())
+        .map(|h| super::html::render(&h))
+        .unwrap_or_default();
+    Body { paragraphs, blocks, quoted, attachments, remote_images }
 }
 
 #[cfg(test)]

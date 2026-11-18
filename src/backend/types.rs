@@ -97,12 +97,19 @@ pub struct MessageSummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FolderState {
+    pub token: SyncToken,
+    pub uids: Vec<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FolderDelta {
     pub token: SyncToken,
     pub reset: bool,
     pub added: Vec<MessageSummary>,
     pub flag_changes: Vec<(u32, Flags)>,
     pub uids: Vec<u32>,
+    pub more: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

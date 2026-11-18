@@ -19,8 +19,8 @@ fn contains(haystack: &[u8], needle: &str) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle.as_bytes())
 }
 
-#[test]
-fn sync_into_encrypted_store_leaves_no_plaintext_on_disk() {
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_into_encrypted_store_leaves_no_plaintext_on_disk() {
     if !common::greenmail() {
         return;
     }
@@ -36,12 +36,13 @@ fn sync_into_encrypted_store_leaves_no_plaintext_on_disk() {
         body: format!("this carries {BODY_WORD}"),
         ..Default::default()
     })
+    .await
     .unwrap();
     let mut imap = ImapBackend::new(ImapConfig::new("127.0.0.1", 3143, Security::Plain, auth));
     let deadline = Instant::now() + Duration::from_secs(15);
-    while imap.search("INBOX", "ALL").unwrap().is_empty() {
+    while imap.search("INBOX", "ALL").await.unwrap().is_empty() {
         assert!(Instant::now() < deadline, "mail did not arrive");
-        std::thread::sleep(Duration::from_millis(200));
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
     let dir = tempfile::tempdir().unwrap();
@@ -49,7 +50,7 @@ fn sync_into_encrypted_store_leaves_no_plaintext_on_disk() {
     let store = Store::create(&path, None, Some(("pw", KdfParams::fast()))).unwrap();
     {
         let mut sink = StoreSink::new(&store, "acct", true);
-        let report = sync_account(&mut imap, &mut sink).unwrap();
+        let report = sync_account(&mut imap, &mut sink).await.unwrap();
         assert_eq!(report.added, 1);
         let messages = sink.messages("INBOX").unwrap();
         assert_eq!(messages[0].subject.as_deref(), Some(SUBJECT));
@@ -57,7 +58,7 @@ fn sync_into_encrypted_store_leaves_no_plaintext_on_disk() {
         assert!(contains(&raw, BODY_WORD));
         assert_eq!(sink.search("zebracorn").unwrap().len(), 1);
         assert_eq!(sink.search(BODY_WORD.split('-').next().unwrap()).unwrap().len(), 1);
-        let again = sync_account(&mut imap, &mut sink).unwrap();
+        let again = sync_account(&mut imap, &mut sink).await.unwrap();
         assert_eq!((again.added, again.flag_changes, again.resets), (0, 0, 0));
     }
     drop(store);

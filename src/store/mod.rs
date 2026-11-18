@@ -40,6 +40,9 @@ pub trait Keychain {
     fn get(&self, account: &str) -> Result<Option<Vec<u8>>>;
     fn set(&self, account: &str, secret: &[u8]) -> Result<()>;
     fn delete(&self, account: &str) -> Result<()>;
+    fn available(&self) -> bool {
+        true
+    }
 }
 
 pub struct OsKeychain;
@@ -51,6 +54,10 @@ impl OsKeychain {
 }
 
 impl Keychain for OsKeychain {
+    fn available(&self) -> bool {
+        self.get("availability-probe").is_ok()
+    }
+
     fn get(&self, account: &str) -> Result<Option<Vec<u8>>> {
         match Self::entry(account)?.get_secret() {
             Ok(v) => Ok(Some(v)),
@@ -171,8 +178,23 @@ pub fn tokenize(text: &str) -> Vec<String> {
 pub struct Store {
     conn: Connection,
     key: DataKey,
+    index_key: DataKey,
     store_id: String,
     path: PathBuf,
+}
+
+fn index_key_for(key: &[u8; 32]) -> DataKey {
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("any key length");
+    mac.update(b"mailbench index key v1");
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&mac.finalize().into_bytes());
+    DataKey(out)
+}
+
+fn prefix_end(prefix: &str) -> String {
+    let mut end = prefix.to_string();
+    end.push(char::MAX);
+    end
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -192,10 +214,12 @@ impl Store {
             return Err(StoreError::Locked);
         }
         let conn = Connection::open(path)?;
+        tune(&conn)?;
         init_schema(&conn)?;
         let store_id = hex(&random::<16>());
         conn.execute("INSERT INTO meta (k, v) VALUES ('store_id', ?1)", params![store_id.as_bytes()])?;
-        let store = Store { conn, key: DataKey(random::<32>()), store_id, path: path.to_path_buf() };
+        let key = DataKey(random::<32>());
+        let store = Store { conn, index_key: index_key_for(&key.0), key, store_id, path: path.to_path_buf() };
         if let Some(kc) = keychain {
             store.enroll_keychain(kc)?;
         }
@@ -207,6 +231,8 @@ impl Store {
 
     pub fn open(path: &Path, methods: &[Unlock]) -> Result<Self> {
         let conn = Connection::open(path)?;
+        tune(&conn)?;
+        init_schema(&conn)?;
         let store_id: Vec<u8> = conn
             .query_row("SELECT v FROM meta WHERE k = 'store_id'", [], |r| r.get(0))
             .optional()?
@@ -219,7 +245,9 @@ impl Store {
                 Unlock::Password(pw) => unwrap_with_password(&conn, pw),
             };
             match attempt {
-                Ok(key) => return Ok(Store { conn, key, store_id, path: path.to_path_buf() }),
+                Ok(key) => {
+                    return Ok(Store { conn, index_key: index_key_for(&key.0), key, store_id, path: path.to_path_buf() });
+                }
                 Err(e) => last = e,
             }
         }
@@ -237,10 +265,30 @@ impl Store {
         Ok(UnlockMethods { keychain: count(WRAP_KEYCHAIN)?, password: count(WRAP_PASSWORD)? })
     }
 
+    pub fn transaction<T, E: From<StoreError>>(&self, f: impl FnOnce() -> std::result::Result<T, E>) -> std::result::Result<T, E> {
+        if !self.conn.is_autocommit() {
+            return f();
+        }
+        self.conn.execute_batch("BEGIN IMMEDIATE").map_err(|e| E::from(StoreError::from(e)))?;
+        match f() {
+            Ok(v) => {
+                self.conn.execute_batch("COMMIT").map_err(|e| E::from(StoreError::from(e)))?;
+                Ok(v)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
     pub fn try_clone(&self) -> Result<Store> {
+        let conn = Connection::open(&self.path)?;
+        tune(&conn)?;
         Ok(Store {
-            conn: Connection::open(&self.path)?,
+            conn,
             key: DataKey(self.key.0),
+            index_key: DataKey(self.index_key.0),
             store_id: self.store_id.clone(),
             path: self.path.clone(),
         })
@@ -311,18 +359,20 @@ impl Store {
 
     pub fn put(&self, kind: &str, id: &str, plain: &[u8]) -> Result<()> {
         let blob = seal(&self.key.0, &record_aad(kind, id), plain);
-        self.conn.execute(
-            "INSERT INTO records (kind, id, blob) VALUES (?1, ?2, ?3)
-             ON CONFLICT(kind, id) DO UPDATE SET blob = excluded.blob",
-            params![kind, id, blob],
-        )?;
+        self.conn
+            .prepare_cached(
+                "INSERT INTO records (kind, id, blob) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(kind, id) DO UPDATE SET blob = excluded.blob",
+            )?
+            .execute(params![kind, id, blob])?;
         Ok(())
     }
 
     pub fn get(&self, kind: &str, id: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
         let blob: Option<Vec<u8>> = self
             .conn
-            .query_row("SELECT blob FROM records WHERE kind = ?1 AND id = ?2", params![kind, id], |r| r.get(0))
+            .prepare_cached("SELECT blob FROM records WHERE kind = ?1 AND id = ?2")?
+            .query_row(params![kind, id], |r| r.get(0))
             .optional()?;
         match blob {
             None => Ok(None),
@@ -334,31 +384,76 @@ impl Store {
 
     pub fn delete(&self, kind: &str, id: &str) -> Result<()> {
         self.conn
-            .execute("DELETE FROM records WHERE kind = ?1 AND id = ?2", params![kind, id])?;
-        self.conn.execute("DELETE FROM idx WHERE id = ?1", params![id])?;
+            .prepare_cached("DELETE FROM records WHERE kind = ?1 AND id = ?2")?
+            .execute(params![kind, id])?;
+        self.conn.prepare_cached("DELETE FROM idx WHERE id = ?1")?.execute(params![id])?;
         Ok(())
     }
 
     pub fn list(&self, kind: &str) -> Result<Vec<String>> {
-        let mut st = self.conn.prepare("SELECT id FROM records WHERE kind = ?1 ORDER BY id")?;
+        let mut st = self.conn.prepare_cached("SELECT id FROM records WHERE kind = ?1 ORDER BY id")?;
         let rows = st.query_map(params![kind], |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    pub fn list_prefix(&self, kind: &str, prefix: &str) -> Result<Vec<String>> {
+        let mut st = self
+            .conn
+            .prepare_cached("SELECT id FROM records WHERE kind = ?1 AND id >= ?2 AND id < ?3 ORDER BY id")?;
+        let rows = st.query_map(params![kind, prefix, prefix_end(prefix)], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    pub fn scan_prefix(&self, kind: &str, prefix: &str) -> Result<Vec<(String, Zeroizing<Vec<u8>>)>> {
+        self.scan_prefix_page(kind, prefix, None, usize::MAX)
+    }
+
+    pub fn scan_prefix_page(
+        &self,
+        kind: &str,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, Zeroizing<Vec<u8>>)>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT id, blob FROM records WHERE kind = ?1 AND id >= ?2 AND id > ?3 AND id < ?4 ORDER BY id LIMIT ?5",
+        )?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = st.query_map(params![kind, prefix, after.unwrap_or(""), prefix_end(prefix), limit], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, blob) = row?;
+            let plain = open(&self.key.0, &record_aad(kind, &id), &blob)
+                .ok_or_else(|| StoreError::Tampered(format!("{kind}/{id}")))?;
+            out.push((id, Zeroizing::new(plain)));
+        }
+        Ok(out)
+    }
+
+    pub fn delete_prefix(&self, kind: &str, prefix: &str) -> Result<()> {
+        let end = prefix_end(prefix);
+        self.conn
+            .prepare_cached("DELETE FROM idx WHERE id IN (SELECT id FROM records WHERE kind = ?1 AND id >= ?2 AND id < ?3)")?
+            .execute(params![kind, prefix, end])?;
+        self.conn
+            .prepare_cached("DELETE FROM records WHERE kind = ?1 AND id >= ?2 AND id < ?3")?
+            .execute(params![kind, prefix, end])?;
+        Ok(())
+    }
+
     fn term_tag(&self, term: &str) -> Vec<u8> {
-        let mut index_key = <Hmac<Sha256> as Mac>::new_from_slice(&self.key.0).expect("any key length");
-        index_key.update(b"mailbench index key v1");
-        let index_key = Zeroizing::new(index_key.finalize().into_bytes().to_vec());
-        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&index_key).expect("any key length");
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&self.index_key.0).expect("any key length");
         mac.update(term.as_bytes());
         mac.finalize().into_bytes().to_vec()
     }
 
     pub fn index_text(&self, id: &str, text: &str) -> Result<()> {
-        self.conn.execute("DELETE FROM idx WHERE id = ?1", params![id])?;
+        self.conn.prepare_cached("DELETE FROM idx WHERE id = ?1")?.execute(params![id])?;
+        let mut insert = self.conn.prepare_cached("INSERT OR IGNORE INTO idx (tag, id) VALUES (?1, ?2)")?;
         for term in tokenize(text) {
-            self.conn
-                .execute("INSERT OR IGNORE INTO idx (tag, id) VALUES (?1, ?2)", params![self.term_tag(&term), id])?;
+            insert.execute(params![self.term_tag(&term), id])?;
         }
         Ok(())
     }
@@ -367,17 +462,25 @@ impl Store {
         let terms = tokenize(query);
         let mut result: Option<Vec<String>> = None;
         for term in terms {
-            let mut st = self.conn.prepare("SELECT id FROM idx WHERE tag = ?1 ORDER BY id")?;
+            let mut st = self.conn.prepare_cached("SELECT id FROM idx WHERE tag = ?1 ORDER BY id")?;
             let ids: Vec<String> = st
                 .query_map(params![self.term_tag(&term)], |r| r.get(0))?
                 .collect::<std::result::Result<_, _>>()?;
             result = Some(match result {
                 None => ids,
-                Some(prev) => prev.into_iter().filter(|i| ids.contains(i)).collect(),
+                Some(prev) => {
+                    let keep: std::collections::HashSet<&String> = ids.iter().collect();
+                    prev.into_iter().filter(|i| keep.contains(i)).collect()
+                }
             });
         }
         Ok(result.unwrap_or_default())
     }
+}
+
+fn tune(conn: &Connection) -> Result<()> {
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;")?;
+    Ok(())
 }
 
 fn init_schema(conn: &Connection) -> Result<()> {
@@ -385,7 +488,8 @@ fn init_schema(conn: &Connection) -> Result<()> {
         "CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v BLOB NOT NULL);
          CREATE TABLE IF NOT EXISTS wraps (name TEXT PRIMARY KEY, blob BLOB NOT NULL, params TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS records (kind TEXT NOT NULL, id TEXT NOT NULL, blob BLOB NOT NULL, PRIMARY KEY (kind, id));
-         CREATE TABLE IF NOT EXISTS idx (tag BLOB NOT NULL, id TEXT NOT NULL, PRIMARY KEY (tag, id));",
+         CREATE TABLE IF NOT EXISTS idx (tag BLOB NOT NULL, id TEXT NOT NULL, PRIMARY KEY (tag, id));
+         CREATE INDEX IF NOT EXISTS idx_by_id ON idx (id);",
     )?;
     Ok(())
 }

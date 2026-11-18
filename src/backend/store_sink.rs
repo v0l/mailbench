@@ -37,14 +37,13 @@ impl<'a> StoreSink<'a> {
 
     pub fn purge(store: &Store, account: &str) -> Result<()> {
         let prefix = format!("{account}\0");
-        for kind in [FOLDERS, FOLDER_IDS, MESSAGE, BODY, TOKEN] {
-            for id in store.list(kind)? {
-                if id == account || id.starts_with(&prefix) {
-                    store.delete(kind, &id)?;
-                }
+        store.transaction(|| {
+            for kind in [FOLDERS, FOLDER_IDS, MESSAGE, BODY, TOKEN] {
+                store.delete(kind, account)?;
+                store.delete_prefix(kind, &prefix)?;
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     fn folder_prefix(&self, folder: &str) -> Result<String> {
@@ -68,28 +67,15 @@ impl<'a> StoreSink<'a> {
         Ok(format!("{}{:010}", self.folder_prefix(folder)?, uid))
     }
 
-    fn uid_of(&self, folder: &str, id: &str) -> Result<Option<u32>> {
-        Ok(id.strip_prefix(&self.folder_prefix(folder)?).and_then(|u| u.parse().ok()))
-    }
-
-    fn ids(&self, kind: &str, folder: &str) -> Result<Vec<String>> {
-        let prefix = self.folder_prefix(folder)?;
-        Ok(self
-            .store
-            .list(kind)?
-            .into_iter()
-            .filter(|id| id.starts_with(&prefix))
-            .collect())
-    }
-
     pub fn messages(&self, folder: &str) -> Result<Vec<MessageSummary>> {
-        let mut out = Vec::new();
-        for id in self.ids(MESSAGE, folder)? {
-            if let Some(raw) = self.store.get(MESSAGE, &id)? {
-                out.push(decode(&raw)?);
-            }
-        }
-        Ok(out)
+        let prefix = self.folder_prefix(folder)?;
+        self.store.scan_prefix(MESSAGE, &prefix)?.iter().map(|(_, raw)| decode(raw)).collect()
+    }
+
+    pub fn messages_page(&self, folder: &str, after: Option<&str>, limit: usize) -> Result<Vec<(String, MessageSummary)>> {
+        let prefix = self.folder_prefix(folder)?;
+        let rows = self.store.scan_prefix_page(MESSAGE, &prefix, after, limit)?;
+        rows.iter().map(|(id, raw)| Ok((id.clone(), decode(raw)?))).collect()
     }
 
     pub fn summary(&self, folder: &str, uid: u32) -> Result<Option<MessageSummary>> {
@@ -143,57 +129,78 @@ impl SyncSink for StoreSink<'_> {
     }
 
     fn reset_folder(&mut self, folder: &str) -> Result<()> {
-        for kind in [MESSAGE, BODY] {
-            for id in self.ids(kind, folder)? {
-                self.store.delete(kind, &id)?;
-            }
-        }
-        self.store.delete(TOKEN, &self.folder_prefix(folder)?)?;
-        Ok(())
+        let prefix = self.folder_prefix(folder)?;
+        self.store.transaction(|| {
+            self.store.delete_prefix(MESSAGE, &prefix)?;
+            self.store.delete_prefix(BODY, &prefix)?;
+            self.store.delete(TOKEN, &prefix)?;
+            Ok(())
+        })
+    }
+
+    fn known_uids(&mut self, folder: &str) -> Result<Vec<u32>> {
+        let prefix = self.folder_prefix(folder)?;
+        Ok(self
+            .store
+            .list_prefix(MESSAGE, &prefix)?
+            .iter()
+            .filter_map(|id| id.strip_prefix(&prefix).and_then(|u| u.parse().ok()))
+            .collect())
     }
 
     fn put_summaries(&mut self, folder: &str, messages: &[MessageSummary]) -> Result<()> {
-        for m in messages {
-            let id = self.message_id(folder, m.uid)?;
-            self.store.put(MESSAGE, &id, &encode(m)?)?;
-            let mut text = m.subject.clone().unwrap_or_default();
-            for a in &m.from {
-                text.push(' ');
-                text.push_str(a.name.as_deref().unwrap_or_default());
-                text.push(' ');
-                text.push_str(&a.address);
+        let prefix = self.folder_prefix(folder)?;
+        self.store.transaction(|| {
+            for m in messages {
+                let id = format!("{prefix}{:010}", m.uid);
+                self.store.put(MESSAGE, &id, &encode(m)?)?;
+                let mut text = m.subject.clone().unwrap_or_default();
+                for a in &m.from {
+                    text.push(' ');
+                    text.push_str(a.name.as_deref().unwrap_or_default());
+                    text.push(' ');
+                    text.push_str(&a.address);
+                }
+                self.index(&id, &text)?;
             }
-            self.index(&id, &text)?;
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     fn put_flags(&mut self, folder: &str, changes: &[(u32, Flags)]) -> Result<usize> {
-        let mut changed = 0;
-        for (uid, flags) in changes {
-            let id = self.message_id(folder, *uid)?;
-            let Some(raw) = self.store.get(MESSAGE, &id)? else {
-                continue;
-            };
-            let mut m: MessageSummary = decode(&raw)?;
-            if m.flags != *flags {
-                m.flags = flags.clone();
-                self.store.put(MESSAGE, &id, &encode(&m)?)?;
-                changed += 1;
+        let prefix = self.folder_prefix(folder)?;
+        self.store.transaction(|| {
+            let mut changed = 0;
+            for (uid, flags) in changes {
+                let id = format!("{prefix}{:010}", uid);
+                let Some(raw) = self.store.get(MESSAGE, &id)? else {
+                    continue;
+                };
+                let mut m: MessageSummary = decode(&raw)?;
+                if m.flags != *flags {
+                    m.flags = flags.clone();
+                    self.store.put(MESSAGE, &id, &encode(&m)?)?;
+                    changed += 1;
+                }
             }
-        }
-        Ok(changed)
+            Ok(changed)
+        })
     }
 
     fn retain_uids(&mut self, folder: &str, uids: &[u32]) -> Result<()> {
-        for kind in [MESSAGE, BODY] {
-            for id in self.ids(kind, folder)? {
-                if self.uid_of(folder, &id)?.is_some_and(|u| !uids.contains(&u)) {
-                    self.store.delete(kind, &id)?;
+        let prefix = self.folder_prefix(folder)?;
+        let keep: std::collections::HashSet<u32> = uids.iter().copied().collect();
+        self.store.transaction(|| {
+            for kind in [MESSAGE, BODY] {
+                for id in self.store.list_prefix(kind, &prefix)? {
+                    let uid = id.strip_prefix(&prefix).and_then(|u| u.parse::<u32>().ok());
+                    if uid.is_some_and(|u| !keep.contains(&u)) {
+                        self.store.delete(kind, &id)?;
+                    }
                 }
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     fn put_token(&mut self, folder: &str, token: &SyncToken) -> Result<()> {

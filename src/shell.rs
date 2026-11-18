@@ -113,11 +113,13 @@ pub struct FirstForm {
     pub password: String,
     pub confirm: String,
     pub error: Option<String>,
+    pub keychain_available: bool,
 }
 
 impl FirstForm {
-    fn new() -> Self {
-        FirstForm { mode: Protect::Keychain, password: String::new(), confirm: String::new(), error: None }
+    fn new(keychain_available: bool) -> Self {
+        let mode = if keychain_available { Protect::Keychain } else { Protect::Password };
+        FirstForm { mode, password: String::new(), confirm: String::new(), error: None, keychain_available }
     }
 
     fn wants_password(&self) -> bool {
@@ -147,13 +149,22 @@ impl FirstForm {
                     VALUE,
                 );
                 ui.add_space(6.0);
-                ui.radio_value(&mut self.mode, Protect::Keychain, "Use the system keychain (recommended)");
-                hint(ui, "Unlocks silently from then on. There is no password to remember.");
+                let keychain_available = self.keychain_available;
+                ui.add_enabled_ui(keychain_available, |ui| {
+                    ui.radio_value(&mut self.mode, Protect::Keychain, "Use the system keychain (recommended)");
+                });
+                if keychain_available {
+                    hint(ui, "Unlocks silently from then on. There is no password to remember.");
+                } else {
+                    hint(ui, "No system keychain found. Start a Secret Service provider such as gnome-keyring or KeePassXC to use it.");
+                }
                 ui.add_space(4.0);
                 ui.radio_value(&mut self.mode, Protect::Password, "Use a password");
                 hint(ui, "You type it each time you start mailbench. Stretched with Argon2id.");
                 ui.add_space(4.0);
-                ui.radio_value(&mut self.mode, Protect::Both, "Use both");
+                ui.add_enabled_ui(keychain_available, |ui| {
+                    ui.radio_value(&mut self.mode, Protect::Both, "Use both");
+                });
                 hint(ui, "The keychain unlocks silently. The password is the fallback when the keychain is not there.");
                 if self.wants_password() {
                     ui.add_space(8.0);
@@ -949,7 +960,7 @@ impl Shell {
             env,
             kdf,
             ctx: None,
-            screen: Screen::First(FirstForm::new()),
+            screen: Screen::First(FirstForm::new(true)),
             store: None,
             settings: None,
         };
@@ -964,7 +975,7 @@ impl Shell {
     fn start(&mut self) {
         let db = self.db_path();
         if !db.exists() {
-            self.screen = Screen::First(FirstForm::new());
+            self.screen = Screen::First(FirstForm::new(self.keychain.available()));
             return;
         }
         let methods = match Store::methods(&db) {
@@ -1114,7 +1125,7 @@ impl Shell {
                 let _ = std::fs::remove_file(&db);
                 let text = match (mode, e) {
                     (Protect::Password, e) => format!("Could not create the encrypted store: {e}"),
-                    (_, e) => format!("The system keychain is not available ({e}). Choose a password instead."),
+                    _ => "No system keychain found. Choose a password instead.".to_string(),
                 };
                 if let Screen::First(form) = &mut self.screen {
                     form.error = Some(text);
@@ -1173,7 +1184,7 @@ impl Shell {
                 AddEvent::None => {}
                 AddEvent::Save(cfg) => self.save_account(cfg),
                 AddEvent::Cancel => {
-                    let Screen::Add(_, back) = std::mem::replace(&mut self.screen, Screen::First(FirstForm::new())) else {
+                    let Screen::Add(_, back) = std::mem::replace(&mut self.screen, Screen::First(FirstForm::new(true))) else {
                         return;
                     };
                     match back {
@@ -1206,7 +1217,7 @@ impl Shell {
             }
             SettingsEvent::AddAccount => {
                 self.settings = None;
-                let back = match std::mem::replace(&mut self.screen, Screen::First(FirstForm::new())) {
+                let back = match std::mem::replace(&mut self.screen, Screen::First(FirstForm::new(true))) {
                     Screen::Main(m) => Some(m),
                     _ => None,
                 };

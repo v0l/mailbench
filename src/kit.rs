@@ -116,6 +116,44 @@ pub fn selection(p: &egui::Painter, r: Rect) {
     p.rect_filled(Rect::from_min_size(r.left_top(), Vec2::new(3.0, r.height())), 0.0, READOUT);
 }
 
+pub fn rich_block(ui: &mut Ui, block: &crate::mailstore::Block) -> Option<String> {
+    use crate::mailstore::Block;
+    match block {
+        Block::Rule => {
+            ui.separator();
+            None
+        }
+        Block::Text { spans, heading, quote } => {
+            let mut clicked = None;
+            let size = if *heading { 17.0 } else { BODY_SIZE };
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                for s in spans {
+                    let font = match (s.bold, s.italic) {
+                        (true, _) => body_strong(size),
+                        (false, true) => body_italic(size),
+                        _ => body(size),
+                    };
+                    let colour = if s.link.is_some() { TRACE } else if *quote { LEGEND } else { VALUE };
+                    let mut text = egui::RichText::new(&s.text).font(font).line_height(Some(BODY_LINE)).color(colour);
+                    if s.link.is_some() {
+                        text = text.underline();
+                    }
+                    if let Some(link) = &s.link {
+                        let r = ui.add(egui::Label::new(text).sense(Sense::click()));
+                        if r.on_hover_text(link).clicked() {
+                            clicked = Some(link.clone());
+                        }
+                    } else {
+                        ui.add(egui::Label::new(text));
+                    }
+                }
+            });
+            clicked
+        }
+    }
+}
+
 pub fn body_text(ui: &mut Ui, text: &str) {
     ui.add(
         egui::Label::new(
@@ -165,6 +203,61 @@ pub fn attachment(ui: &mut Ui, name: &str, size: &str) -> egui::Response {
     p.galley(Pos2::new(rect.left() + 26.0, rect.center().y - g.size().y / 2.0), g.clone(), VALUE);
     p.galley(Pos2::new(rect.left() + 26.0 + g.size().x + 12.0, rect.center().y - s.size().y / 2.0), s, LEGEND);
     resp
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HeaderClick {
+    None,
+    Unsubscribe,
+    Toggle,
+}
+
+pub fn header_notes(ui: &mut Ui, h: &crate::mailstore::Headers, open: bool) -> HeaderClick {
+    let mut click = HeaderClick::None;
+    ui.horizontal_wrapped(|ui| {
+        if let Some(list) = &h.list_id {
+            chip(ui, list, LEGEND, false);
+        } else if h.bulk {
+            chip(ui, "bulk", LEGEND, false);
+        }
+        if h.auth.present() {
+            if h.auth.failed() {
+                chip(ui, &format!("not verified: {}", h.auth.summary()), FAULT, true);
+            } else {
+                chip(ui, &h.auth.summary(), OK, false);
+            }
+        }
+        if h.spam {
+            chip(ui, "marked as spam", FAULT, true);
+        } else if let Some(score) = h.spam_score.filter(|s| *s >= 3.0) {
+            chip(ui, &format!("spam score {score:.1}"), WARN, false);
+        }
+        if let Some(r) = &h.reply_to_differs {
+            chip(ui, &format!("replies go to {r}"), WARN, true);
+        }
+        if h.unsubscribe.is_some() && ui.add(Key::new("unsubscribe").outline(WARN)).clicked() {
+            click = HeaderClick::Unsubscribe;
+        }
+        if !h.all.is_empty() {
+            let label = if open { "hide headers" } else { "all headers" };
+            if ui.add(Key::new(label).outline(VALUE)).clicked() {
+                click = HeaderClick::Toggle;
+            }
+        }
+    });
+    click
+}
+
+pub fn all_headers(ui: &mut Ui, h: &crate::mailstore::Headers) {
+    egui::Frame::NONE.fill(WELL).stroke(Stroke::new(1.0, ETCH)).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        for (k, v) in &h.all {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(legend(k).color(LEGEND));
+                ui.add(egui::Label::new(egui::RichText::new(v).font(figure(11.0)).color(VALUE)).wrap());
+            });
+        }
+    });
 }
 
 pub fn quoted_fold(ui: &mut Ui, lines: usize, open: bool) -> bool {

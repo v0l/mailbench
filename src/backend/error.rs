@@ -25,13 +25,11 @@ impl fmt::Display for BackendError {
 
 impl std::error::Error for BackendError {}
 
-impl From<imap::Error> for BackendError {
-    fn from(e: imap::Error) -> Self {
+impl From<async_imap::error::Error> for BackendError {
+    fn from(e: async_imap::error::Error) -> Self {
+        use async_imap::error::Error;
         match e {
-            imap::Error::Io(_) | imap::Error::ConnectionLost => {
-                BackendError::Connection(e.to_string())
-            }
-            imap::Error::No(_) => BackendError::Protocol(e.to_string()),
+            Error::Io(_) | Error::ConnectionLost => BackendError::Connection(e.to_string()),
             other => BackendError::Protocol(other.to_string()),
         }
     }
@@ -40,6 +38,18 @@ impl From<imap::Error> for BackendError {
 impl From<std::io::Error> for BackendError {
     fn from(e: std::io::Error) -> Self {
         BackendError::Connection(e.to_string())
+    }
+}
+
+impl From<native_tls::Error> for BackendError {
+    fn from(e: native_tls::Error) -> Self {
+        BackendError::Connection(format!("tls: {e}"))
+    }
+}
+
+impl From<tokio::time::error::Elapsed> for BackendError {
+    fn from(_: tokio::time::error::Elapsed) -> Self {
+        BackendError::Connection("timed out".into())
     }
 }
 

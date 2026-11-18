@@ -4,7 +4,7 @@ use mailbench::autodetect::{Net, Provider};
 use mailbench::backend::*;
 use mailbench::dns::Srv;
 use mailbench::mailstore::{self as ms, Query};
-use mailbench::shell::{Env, Shell};
+use mailbench::shell::{Env, Protect, Shell};
 use mailbench::store::{Keychain, KdfParams, StoreError};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -38,6 +38,9 @@ impl Keychain for MemKeychain {
 struct DeadKeychain;
 
 impl Keychain for DeadKeychain {
+    fn available(&self) -> bool {
+        false
+    }
     fn get(&self, _: &str) -> Result<Option<Vec<u8>>, StoreError> {
         Err(StoreError::Keychain("no secret service".into()))
     }
@@ -182,11 +185,10 @@ fn dead_keychain_on_first_run_says_so_and_a_password_still_works() {
     let d = dir();
     let kc: Rc<dyn Keychain> = Rc::new(DeadKeychain);
     let mut h = boot(d.path(), kc, env(FixtureNet::default()));
-    h.get_by_label("continue").click();
-    h.run();
     h.run();
     assert_eq!(h.state().1.screen_name(), "first run");
-    h.get_by_label_contains("keychain is not available");
+    h.get_by_label_contains("No system keychain found");
+    assert_eq!(h.state_mut().1.first_form().unwrap().mode, Protect::Password);
     assert!(!db_exists(d.path()));
     first_run_with_password(&mut h, "correct horse battery");
     assert_eq!(h.state().1.screen_name(), "add account");
@@ -312,15 +314,15 @@ fn add_account_against_greenmail_tests_then_saves_and_syncs_the_inbox() {
     }
     let name = greenmail_user();
     common::create_greenmail_user(&name);
-    SmtpBackend::new(SmtpConfig::new("127.0.0.1", common::GM_SMTP, Security::Plain, Auth::Password { user: name.clone(), password: "secret".into() }))
-        .send(&OutgoingMessage {
-            from: Address { name: Some("Zed".into()), address: "zed@localhost".into() },
-            to: vec![Address { name: None, address: format!("{name}@localhost") }],
-            subject: "Login flow hello".into(),
-            body: "first sync body".into(),
-            ..Default::default()
-        })
-        .unwrap();
+    let mut smtp = SmtpBackend::new(SmtpConfig::new("127.0.0.1", common::GM_SMTP, Security::Plain, Auth::Password { user: name.clone(), password: "secret".into() }));
+    mailbench::runtime::block_on(smtp.send(&OutgoingMessage {
+        from: Address { name: Some("Zed".into()), address: "zed@localhost".into() },
+        to: vec![Address { name: None, address: format!("{name}@localhost") }],
+        subject: "Login flow hello".into(),
+        body: "first sync body".into(),
+        ..Default::default()
+    }))
+    .unwrap();
     let d = dir();
     let kc: Rc<dyn Keychain> = Rc::new(MemKeychain::default());
     let mut h = boot(d.path(), kc.clone(), env(FixtureNet::default()));

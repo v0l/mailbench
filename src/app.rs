@@ -16,7 +16,7 @@ pub enum Reply {
     Forward,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Action {
     Next,
     Previous,
@@ -33,6 +33,9 @@ pub enum Action {
     Back,
     LoadImagesOnce,
     ToggleQuotes,
+    ToggleHeaders,
+    OpenLink(String),
+    Unsubscribe,
     GoTo(Folder),
 }
 
@@ -100,6 +103,21 @@ struct View {
     current: Option<Message>,
 }
 
+fn unsubscribe(u: Unsubscribe) -> String {
+    if u.one_click {
+        let target = u.target;
+        std::thread::spawn(move || {
+            let _ = ureq::post(&target).send_string("List-Unsubscribe=One-Click");
+        });
+        "Unsubscribe request sent".into()
+    } else {
+        match open::that(&u.target) {
+            Ok(()) => "Unsubscribe page opened".into(),
+            Err(_) => "Could not open the unsubscribe link".into(),
+        }
+    }
+}
+
 pub struct App {
     pub store: Box<dyn MailStore>,
     pub folder: Folder,
@@ -110,6 +128,7 @@ pub struct App {
     pub notice: Option<String>,
     pub images_loaded: HashSet<MessageId>,
     pub quotes_open: bool,
+    pub headers_open: bool,
     pub rendered_rows: usize,
     pub reader_focus: bool,
     pub force_failed: bool,
@@ -137,6 +156,7 @@ impl App {
             notice: None,
             images_loaded: HashSet::new(),
             quotes_open: false,
+            headers_open: false,
             rendered_rows: 0,
             reader_focus: false,
             force_failed: false,
@@ -322,6 +342,15 @@ impl App {
                     }
                 }
                 Action::ToggleQuotes => self.quotes_open = !self.quotes_open,
+                Action::ToggleHeaders => self.headers_open = !self.headers_open,
+                Action::OpenLink(link) => {
+                    let _ = open::that(link);
+                }
+                Action::Unsubscribe => {
+                    if let Some(u) = v.current.as_ref().and_then(|m| m.headers.unsubscribe.clone()) {
+                        self.notice = Some(unsubscribe(u));
+                    }
+                }
                 Action::GoTo(f) => self.go_folder(f),
             }
             ctx.request_repaint();
@@ -636,6 +665,23 @@ impl App {
                 }
             });
             ui.add_space(4.0);
+            match header_notes(ui, &m.headers, self.headers_open) {
+                HeaderClick::None => {}
+                HeaderClick::Unsubscribe => actions.push(Action::Unsubscribe),
+                HeaderClick::Toggle => actions.push(Action::ToggleHeaders),
+            }
+            if self.headers_open {
+                all_headers(ui, &m.headers);
+            }
+            match m.body_state {
+                BodyState::Loading => {
+                    Line::new().note("Loading message...").size(11.5).show(ui);
+                }
+                BodyState::Failed => {
+                    Line::new().note("Could not load this message. It will load when the server is reachable.").size(11.5).show(ui);
+                }
+                BodyState::Ready => {}
+            }
             if let Some(host) = &m.remote_images {
                 if !self.images_loaded.contains(&m.summary.id) {
                     if blocked_images(ui, host) {
@@ -646,9 +692,18 @@ impl App {
                     Line::new().note(format!("Images from {host} loaded for this message")).size(11.5).show(ui);
                 }
             }
-            for p in &m.paragraphs {
-                body_text(ui, p);
-                ui.add_space(4.0);
+            if m.blocks.is_empty() {
+                for p in &m.paragraphs {
+                    body_text(ui, p);
+                    ui.add_space(4.0);
+                }
+            } else {
+                for b in &m.blocks {
+                    if let Some(link) = rich_block(ui, b) {
+                        actions.push(Action::OpenLink(link));
+                    }
+                    ui.add_space(4.0);
+                }
             }
             if quoted_fold(ui, m.quoted.len(), self.quotes_open) {
                 actions.push(Action::ToggleQuotes);

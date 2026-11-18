@@ -112,6 +112,74 @@ pub struct AttachmentInfo {
     pub size: String,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AuthResult {
+    pub spf: Option<String>,
+    pub dkim: Option<String>,
+    pub dmarc: Option<String>,
+}
+
+impl AuthResult {
+    pub fn failed(&self) -> bool {
+        [&self.spf, &self.dkim, &self.dmarc].iter().any(|r| matches!(r.as_deref(), Some("fail" | "softfail" | "permerror")))
+    }
+
+    pub fn present(&self) -> bool {
+        self.spf.is_some() || self.dkim.is_some() || self.dmarc.is_some()
+    }
+
+    pub fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        for (name, v) in [("spf", &self.spf), ("dkim", &self.dkim), ("dmarc", &self.dmarc)] {
+            if let Some(v) = v {
+                parts.push(format!("{name} {v}"));
+            }
+        }
+        parts.join("  ")
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unsubscribe {
+    pub target: String,
+    pub one_click: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Headers {
+    pub all: Vec<(String, String)>,
+    pub list_id: Option<String>,
+    pub unsubscribe: Option<Unsubscribe>,
+    pub auth: AuthResult,
+    pub reply_to_differs: Option<String>,
+    pub bulk: bool,
+    pub hops: usize,
+    pub spam: bool,
+    pub spam_score: Option<f32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Span {
+    pub text: String,
+    pub bold: bool,
+    pub italic: bool,
+    pub link: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Block {
+    Text { spans: Vec<Span>, heading: bool, quote: bool },
+    Rule,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BodyState {
+    #[default]
+    Ready,
+    Loading,
+    Failed,
+}
+
 #[derive(Clone, Debug)]
 pub struct Message {
     pub summary: Summary,
@@ -121,9 +189,12 @@ pub struct Message {
     pub cc: Vec<String>,
     pub sent: String,
     pub paragraphs: Vec<String>,
+    pub blocks: Vec<Block>,
     pub quoted: Vec<String>,
     pub attachments: Vec<AttachmentInfo>,
     pub remote_images: Option<String>,
+    pub headers: Headers,
+    pub body_state: BodyState,
 }
 
 #[derive(Clone, Copy, Debug, Default)]

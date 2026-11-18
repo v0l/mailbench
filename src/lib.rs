@@ -9,5 +9,6 @@ pub mod kit;
 pub mod mailstore;
 pub mod oauth;
 pub mod real;
+pub mod runtime;
 pub mod shell;
 pub mod store;

@@ -52,9 +52,12 @@ fn concept_message(id: u64, i: usize, m: &crate::data::Msg, suffix: &str) -> Mes
         cc: Vec::new(),
         sent: if first { "Fri 17 Nov 09:41".into() } else { m.when.to_string() },
         paragraphs,
+        blocks: Vec::new(),
         quoted,
         attachments,
         remote_images: if first { Some(BLOCKED_HOST.to_string()) } else { None },
+        headers: Default::default(),
+        body_state: Default::default(),
     }
 }
 
@@ -78,9 +81,12 @@ fn draft(id: u64, subject: &str, when: &str) -> Message {
         cc: Vec::new(),
         sent: when.into(),
         paragraphs: vec!["Not finished.".into()],
+        blocks: Vec::new(),
         quoted: Vec::new(),
         attachments: Vec::new(),
         remote_images: None,
+        headers: Default::default(),
+        body_state: Default::default(),
     }
 }
 

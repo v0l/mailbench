@@ -26,6 +26,10 @@ impl SyncSink for MemorySink {
         Ok(())
     }
 
+    fn known_uids(&mut self, folder: &str) -> Result<Vec<u32>> {
+        Ok(self.messages.get(folder).map(|m| m.keys().copied().collect()).unwrap_or_default())
+    }
+
     fn put_summaries(&mut self, folder: &str, messages: &[MessageSummary]) -> Result<()> {
         let map = self.messages.entry(folder.to_string()).or_default();
         for m in messages {
@@ -49,7 +53,8 @@ impl SyncSink for MemorySink {
 
     fn retain_uids(&mut self, folder: &str, uids: &[u32]) -> Result<()> {
         if let Some(map) = self.messages.get_mut(folder) {
-            map.retain(|uid, _| uids.contains(uid));
+            let keep: std::collections::HashSet<u32> = uids.iter().copied().collect();
+            map.retain(|uid, _| keep.contains(uid));
         }
         Ok(())
     }

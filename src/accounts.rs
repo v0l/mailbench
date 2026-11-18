@@ -81,20 +81,28 @@ pub fn build_account(cfg: &AccountConfig) -> Account {
 
 struct Fresh {
     cfg: AccountConfig,
-    store: Store,
+    store_path: Option<Store>,
     inner: Option<Account>,
 }
 
 impl Fresh {
-    fn ready(&mut self) -> Result<&mut Account> {
+    async fn ready(&mut self) -> Result<&mut Account> {
         if let Credential::OAuth { provider, tokens } = &self.cfg.credential {
             if tokens.expires_at - now() < 120 {
-                let client = oauth::client_for(*provider)
-                    .ok_or_else(|| BackendError::Auth(oauth::missing_client_note(*provider)))?;
-                let fresh = oauth::refresh(&oauth::endpoints(*provider), &client, &tokens.refresh_token)
-                    .map_err(BackendError::Auth)?;
-                self.cfg.credential = Credential::OAuth { provider: *provider, tokens: fresh };
-                save(&self.store, &self.cfg)?;
+                let provider = *provider;
+                let refresh_token = tokens.refresh_token.clone();
+                let client = oauth::client_for(provider)
+                    .ok_or_else(|| BackendError::Auth(oauth::missing_client_note(provider)))?;
+                let fresh = tokio::task::spawn_blocking(move || {
+                    oauth::refresh(&oauth::endpoints(provider), &client, &refresh_token)
+                })
+                .await
+                .map_err(|e| BackendError::Auth(e.to_string()))?
+                .map_err(BackendError::Auth)?;
+                self.cfg.credential = Credential::OAuth { provider, tokens: fresh };
+                if let Some(store) = &self.store_path {
+                    save(store, &self.cfg)?;
+                }
                 self.inner = None;
             }
         }
@@ -105,52 +113,66 @@ impl Fresh {
     }
 }
 
+#[async_trait::async_trait]
 impl Backend for Fresh {
     fn kind(&self) -> &'static str {
         "imap"
     }
-    fn capabilities(&mut self) -> Result<Capabilities> {
-        self.ready()?.capabilities()
+    fn fork(&self) -> Option<Box<dyn Backend>> {
+        let store = self.store_path.as_ref().and_then(|s| s.try_clone().ok());
+        Some(Box::new(Fresh { cfg: self.cfg.clone(), store_path: store, inner: None }))
     }
-    fn check(&mut self) -> Result<()> {
-        self.ready()?.check()
+    async fn capabilities(&mut self) -> Result<Capabilities> {
+        self.ready().await?.capabilities().await
     }
-    fn list_folders(&mut self) -> Result<Vec<Folder>> {
-        self.ready()?.list_folders()
+    async fn check(&mut self) -> Result<()> {
+        self.ready().await?.check().await
     }
-    fn create_folder(&mut self, name: &str) -> Result<()> {
-        self.ready()?.create_folder(name)
+    async fn list_folders(&mut self) -> Result<Vec<Folder>> {
+        self.ready().await?.list_folders().await
     }
-    fn sync_folder(&mut self, folder: &str, since: Option<&SyncToken>) -> Result<FolderDelta> {
-        self.ready()?.sync_folder(folder, since)
+    async fn create_folder(&mut self, name: &str) -> Result<()> {
+        self.ready().await?.create_folder(name).await
     }
-    fn fetch(&mut self, folder: &str, uid: u32) -> Result<Vec<u8>> {
-        self.ready()?.fetch(folder, uid)
+    async fn open_folder(&mut self, folder: &str) -> Result<FolderState> {
+        self.ready().await?.open_folder(folder).await
     }
-    fn set_flags(&mut self, folder: &str, uids: &[u32], update: &FlagUpdate) -> Result<()> {
-        self.ready()?.set_flags(folder, uids, update)
+    async fn fetch_summaries(&mut self, folder: &str, uids: &[u32]) -> Result<Vec<MessageSummary>> {
+        self.ready().await?.fetch_summaries(folder, uids).await
     }
-    fn move_messages(&mut self, folder: &str, uids: &[u32], destination: &str) -> Result<()> {
-        self.ready()?.move_messages(folder, uids, destination)
+    async fn changed_flags(&mut self, folder: &str, below: u32, since: Option<u64>) -> Result<Vec<(u32, Flags)>> {
+        self.ready().await?.changed_flags(folder, below, since).await
     }
-    fn delete_messages(&mut self, folder: &str, uids: &[u32]) -> Result<()> {
-        self.ready()?.delete_messages(folder, uids)
+    async fn sync_folder(&mut self, folder: &str, since: Option<&SyncToken>) -> Result<FolderDelta> {
+        self.ready().await?.sync_folder(folder, since).await
     }
-    fn search(&mut self, folder: &str, query: &str) -> Result<Vec<u32>> {
-        self.ready()?.search(folder, query)
+    async fn fetch(&mut self, folder: &str, uid: u32) -> Result<Vec<u8>> {
+        self.ready().await?.fetch(folder, uid).await
     }
-    fn send(&mut self, message: &OutgoingMessage) -> Result<()> {
-        self.ready()?.send(message)
+    async fn set_flags(&mut self, folder: &str, uids: &[u32], update: &FlagUpdate) -> Result<()> {
+        self.ready().await?.set_flags(folder, uids, update).await
     }
-    fn watch(&mut self, folder: &str) -> Result<Watch> {
-        self.ready()?.watch(folder)
+    async fn move_messages(&mut self, folder: &str, uids: &[u32], destination: &str) -> Result<()> {
+        self.ready().await?.move_messages(folder, uids, destination).await
+    }
+    async fn delete_messages(&mut self, folder: &str, uids: &[u32]) -> Result<()> {
+        self.ready().await?.delete_messages(folder, uids).await
+    }
+    async fn search(&mut self, folder: &str, query: &str) -> Result<Vec<u32>> {
+        self.ready().await?.search(folder, query).await
+    }
+    async fn send(&mut self, message: &OutgoingMessage) -> Result<()> {
+        self.ready().await?.send(message).await
+    }
+    async fn watch(&mut self, folder: &str) -> Result<Watch> {
+        self.ready().await?.watch(folder).await
     }
 }
 
 pub fn setup_for(cfg: &AccountConfig, store: &Store) -> Result<AccountSetup> {
     let backend: Box<dyn Backend> = match cfg.credential {
         Credential::Password(_) => Box::new(build_account(cfg)),
-        Credential::OAuth { .. } => Box::new(Fresh { cfg: cfg.clone(), store: store.try_clone()?, inner: None }),
+        Credential::OAuth { .. } => Box::new(Fresh { cfg: cfg.clone(), store_path: Some(store.try_clone()?), inner: None }),
     };
     Ok(AccountSetup {
         id: cfg.id.clone(),
@@ -195,11 +217,11 @@ pub fn run_checks(cfg: &AccountConfig, mut report: impl FnMut(Step, std::result:
         }
     }
     let mut account = build_account(&cfg);
-    let imap = account.mail.check().map_err(|e| e.to_string());
+    let imap = crate::runtime::block_on(account.mail.check()).map_err(|e| e.to_string());
     let imap_ok = imap.is_ok();
     report(Step::Imap, imap);
     if imap_ok {
-        report(Step::Smtp, account.outbound.check().map_err(|e| e.to_string()));
+        report(Step::Smtp, crate::runtime::block_on(account.outbound.check()).map_err(|e| e.to_string()));
     }
 }
 
