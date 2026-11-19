@@ -61,6 +61,7 @@ struct Entry {
     date: i64,
     unread: bool,
     flagged: bool,
+    labels: Vec<String>,
     attachments: bool,
     search_key: String,
     thread: u64,
@@ -194,6 +195,16 @@ impl Cache {
             counts.unread += e.thread_unread as usize;
             counts.flagged += e.thread_flagged as usize;
         }
+    }
+
+    fn labels(&self) -> Vec<LabelInfo> {
+        let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        for e in &self.entries {
+            for l in &e.labels {
+                *counts.entry(l.as_str()).or_default() += e.unread as usize;
+            }
+        }
+        counts.into_iter().map(|(name, unread)| LabelInfo { name: name.to_string(), unread }).collect()
     }
 
     fn tree(&self) -> Vec<TreeFolder> {
@@ -816,6 +827,7 @@ impl Shared {
             date: msg.date,
             unread: false,
             flagged: false,
+            labels: Vec::new(),
             attachments: !msg.attachments.is_empty(),
             message_id: msg.message_id.clone(),
             refs: msg.references.clone(),
@@ -1076,6 +1088,7 @@ impl Shared {
                         date: m.date.unwrap_or(0),
                         unread: flag_ops.get(&(stored_name.clone(), m.uid)).and_then(|f| f.0).map(|s| !s).unwrap_or(!m.flags.seen),
                         flagged: flag_ops.get(&(stored_name.clone(), m.uid)).and_then(|f| f.1).unwrap_or(m.flags.flagged),
+                        labels: m.flags.labels.clone(),
                         attachments,
                         thread: id,
                         head: true,
@@ -1132,6 +1145,7 @@ impl Shared {
                 date: msg.date,
                 unread: false,
                 flagged: false,
+                labels: Vec::new(),
                 attachments: !msg.attachments.is_empty(),
                 message_id: msg.message_id.clone(),
                 refs: msg.references.clone(),
@@ -1442,7 +1456,7 @@ impl MailStore for RealStore {
     }
 
     fn labels(&self) -> Vec<LabelInfo> {
-        Vec::new()
+        self.shared.with_cache(|c| c.labels())
     }
 
     fn tree(&self) -> Vec<TreeFolder> {

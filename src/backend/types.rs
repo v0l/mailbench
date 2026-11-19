@@ -28,6 +28,7 @@ pub struct Capabilities {
     pub condstore: bool,
     pub qresync: bool,
     pub uidplus: bool,
+    pub gmail_ext: bool,
     pub send: bool,
 }
 
@@ -66,6 +67,8 @@ pub struct Flags {
     pub deleted: bool,
     pub draft: bool,
     pub keywords: Vec<String>,
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
