@@ -1,3 +1,4 @@
+use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 use mailbench::app::App;
 use mailbench::backend::*;
@@ -198,4 +199,96 @@ fn html_mail_renders_with_its_inline_logo_and_no_fake_attachments() {
     img.save(dir.join("reader-html.png")).unwrap();
     assert!(red(&img) > 2000, "the DPD red header and button were not painted");
     assert!(green(&img) > 1000, "the inline cid logo was not painted");
+}
+
+#[test]
+fn a_new_folder_takes_a_message_moved_with_m_and_shows_in_the_tree() {
+    if !common::greenmail() {
+        return;
+    }
+    let name = format!("rf{}", std::process::id());
+    common::create_greenmail_user(&name);
+    block_on(smtp(&name).send(&OutgoingMessage {
+        from: Address { name: Some("Zed".into()), address: "zed@localhost".into() },
+        to: vec![Address { name: None, address: format!("{name}@localhost") }],
+        subject: "File me".into(),
+        body: "body".into(),
+        ..Default::default()
+    }))
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::create(&dir.path().join("mail.db"), None, Some(("pw", KdfParams::fast()))).unwrap();
+    let mut h = harness(RealStore::open(store, vec![setup(&name)]));
+    until(&mut h, "mail in the inbox", |a| inbox(a) == 1);
+
+    h.state_mut().1.store.create_folder(0, "Receipts").unwrap();
+    until(&mut h, "folder in the tree", |a| a.store.tree().iter().any(|n| n.path == "Receipts"));
+    let folder = ms::Folder::Other(0, "Receipts".into());
+
+    h.key_press(egui::Key::M);
+    h.run();
+    h.query_all_by_role(egui::accesskit::Role::TextInput).last().expect("picker field").type_text("rec");
+    h.run();
+    h.get_by_label("move to Receipts");
+    h.key_press(egui::Key::Enter);
+    until(&mut h, "message listed in the new folder", |a| a.store.counts(&Query::new(folder.clone())).all == 1);
+    assert_eq!(inbox(&h.state().1), 0);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while server_state(&name, "Receipts").len() != 1 {
+        h.run();
+        assert!(Instant::now() < deadline, "message did not reach Receipts on the server");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(server_state(&name, "INBOX").is_empty());
+    until(&mut h, "folder row unread count after resync", |a| {
+        a.store.tree().iter().any(|n| n.path == "Receipts" && n.total == 1)
+    });
+    h.get_by_label("Receipts");
+    let listed = h.state().1.store.list(&Query::new(folder), 0, 5).items;
+    assert_eq!(listed[0].subject, "File me");
+}
+
+fn threaded(name: &str, id: &str, refs: &str, subject: &str) -> String {
+    format!("From: Zed <zed@localhost>\r\nTo: {name}@localhost\r\nSubject: {subject}\r\nDate: Wed, 18 Nov 2026 10:31:00 +0000\r\nMessage-ID: <{id}@t>\r\n{refs}MIME-Version: 1.0\r\nContent-Type: text/plain\r\n\r\nbody\r\n")
+}
+
+#[test]
+fn m_on_a_thread_row_moves_every_message_and_in_the_reader_only_the_one() {
+    if !common::greenmail() {
+        return;
+    }
+    let name = format!("rt{}", std::process::id());
+    common::create_greenmail_user(&name);
+    let mut b = imap(&name);
+    block_on(async {
+        b.append("INBOX", threaded(&name, "one", "", "Plan").as_bytes()).await.unwrap();
+        b.append("INBOX", threaded(&name, "two", "References: <one@t>\r\nIn-Reply-To: <one@t>\r\n", "Re: Plan").as_bytes()).await.unwrap();
+        b.append("INBOX", threaded(&name, "three", "References: <one@t> <two@t>\r\nIn-Reply-To: <two@t>\r\n", "Re: Plan").as_bytes()).await.unwrap();
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::create(&dir.path().join("mail.db"), None, Some(("pw", KdfParams::fast()))).unwrap();
+    let mut real = RealStore::open(store, vec![setup(&name)]);
+    real.create_folder(0, "Projects").unwrap();
+    let mut h = harness(real);
+    until(&mut h, "one thread row of three", |a| {
+        let page = a.store.list(&Query::new(ms::Folder::Inbox), 0, 5);
+        page.total == 1 && page.items[0].thread == 3
+    });
+    until(&mut h, "folder in the tree", |a| a.store.tree().iter().any(|n| n.path == "Projects"));
+    let projects = ms::Folder::Other(0, "Projects".into());
+
+    h.key_press(egui::Key::M);
+    h.run();
+    h.query_all_by_role(egui::accesskit::Role::TextInput).last().expect("picker field").type_text("proj");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    until(&mut h, "whole thread in Projects", |a| a.store.counts(&Query::new(projects.clone())).all == 1);
+    assert_eq!(inbox(&h.state().1), 0);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while server_state(&name, "Projects").len() != 3 {
+        h.run();
+        assert!(Instant::now() < deadline, "thread did not reach Projects on the server");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(server_state(&name, "INBOX").is_empty());
 }

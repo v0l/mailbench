@@ -37,7 +37,7 @@ pub fn ui_folder(f: &Remote) -> Option<Folder> {
     }
 }
 
-pub fn default_name(folder: Folder) -> &'static str {
+pub fn default_name(folder: &Folder) -> &str {
     match folder {
         Folder::Inbox => "INBOX",
         Folder::Drafts => "Drafts",
@@ -46,11 +46,12 @@ pub fn default_name(folder: Folder) -> &'static str {
         Folder::Junk => "Junk",
         Folder::Trash => "Trash",
         Folder::Snoozed => "Snoozed",
+        Folder::Other(_, name) => name,
     }
 }
 
-pub fn server_folder(folders: &[Remote], target: Folder) -> Option<String> {
-    let found = folders.iter().filter(|f| ui_folder(f) == Some(target));
+pub fn server_folder(folders: &[Remote], target: &Folder) -> Option<String> {
+    let found = folders.iter().filter(|f| ui_folder(f).as_ref() == Some(target));
     let mut all: Vec<&Remote> = found.collect();
     all.sort_by_key(|f| f.role.is_none());
     all.first().map(|f| f.name.clone())
@@ -61,14 +62,55 @@ pub enum Op {
     Flags { account: String, folder: String, uid: u32, uid_validity: u32, seen: Option<bool>, flagged: Option<bool>, base_seen: bool, base_flagged: bool },
     Move { account: String, folder: String, uid: u32, uid_validity: u32, to: String },
     Send { account: String, local: String },
+    CreateFolder { account: String, name: String },
+    RenameFolder { account: String, from: String, to: String },
+    DeleteFolder { account: String, name: String },
 }
 
 impl Op {
     pub fn account(&self) -> &str {
         match self {
-            Op::Flags { account, .. } | Op::Move { account, .. } | Op::Send { account, .. } => account,
+            Op::Flags { account, .. }
+            | Op::Move { account, .. }
+            | Op::Send { account, .. }
+            | Op::CreateFolder { account, .. }
+            | Op::RenameFolder { account, .. }
+            | Op::DeleteFolder { account, .. } => account,
         }
     }
+}
+
+pub const DEFAULT_DELIMITER: &str = "/";
+
+fn within(name: &str, root: &str, delimiter: &str) -> bool {
+    name == root || name.strip_prefix(root).is_some_and(|rest| rest.starts_with(delimiter))
+}
+
+pub fn with_pending(folders: Vec<Remote>, ops: &[&Op]) -> Vec<(Option<String>, Remote)> {
+    let delimiter = folders.iter().find_map(|f| f.delimiter.clone()).unwrap_or_else(|| DEFAULT_DELIMITER.to_string());
+    let mut out: Vec<(Option<String>, Remote)> = folders.into_iter().map(|f| (Some(f.name.clone()), f)).collect();
+    for op in ops {
+        match op {
+            Op::CreateFolder { name, .. } => {
+                if !out.iter().any(|(_, f)| f.name == *name) {
+                    out.push((None, Remote { name: name.clone(), delimiter: Some(delimiter.clone()), role: None, selectable: true }));
+                }
+            }
+            Op::RenameFolder { from, to, .. } => {
+                for (_, f) in out.iter_mut() {
+                    let d = f.delimiter.clone().unwrap_or_else(|| delimiter.clone());
+                    if within(&f.name, from, &d) {
+                        f.name = format!("{to}{}", &f.name[from.len()..]);
+                    }
+                }
+            }
+            Op::DeleteFolder { name, .. } => {
+                out.retain(|(_, f)| !within(&f.name, name, f.delimiter.as_deref().unwrap_or(&delimiter)));
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -100,9 +142,25 @@ mod tests {
     }
 
     #[test]
+    fn pending_folder_ops_show_before_the_server_has_them() {
+        let folders = vec![f("INBOX", Some(FolderRole::Inbox)), f("Work", None), f("Work/Old", None)];
+        let ops = [
+            Op::CreateFolder { account: "a".into(), name: "Receipts".into() },
+            Op::RenameFolder { account: "a".into(), from: "Work".into(), to: "Jobs".into() },
+            Op::DeleteFolder { account: "a".into(), name: "Jobs/Old".into() },
+        ];
+        let refs: Vec<&Op> = ops.iter().collect();
+        let shown = with_pending(folders, &refs);
+        let names: Vec<&str> = shown.iter().map(|(_, f)| f.name.as_str()).collect();
+        assert_eq!(names, vec!["INBOX", "Jobs", "Receipts"]);
+        assert_eq!(shown[1].0.as_deref(), Some("Work"));
+        assert_eq!(shown[2].0, None);
+    }
+
+    #[test]
     fn server_folder_prefers_the_role() {
         let folders = vec![f("archive", None), f("Old", Some(FolderRole::Archive))];
-        assert_eq!(server_folder(&folders, Folder::Archive).as_deref(), Some("Old"));
-        assert_eq!(server_folder(&folders, Folder::Trash), None);
+        assert_eq!(server_folder(&folders, &Folder::Archive).as_deref(), Some("Old"));
+        assert_eq!(server_folder(&folders, &Folder::Trash), None);
     }
 }

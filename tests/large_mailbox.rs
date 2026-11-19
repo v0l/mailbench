@@ -73,5 +73,5 @@ fn a_large_mailbox_shows_its_first_page_quickly() {
     let per_frame = frame.elapsed() / 10;
     eprintln!("first page {first:?}, all {all:?}, per frame {per_frame:?}");
     assert!(first < Duration::from_millis(500), "first page took {first:?}");
-    assert!(per_frame < Duration::from_millis(5), "a frame of list queries took {per_frame:?}");
+    assert!(per_frame < Duration::from_micros(200), "a frame of list queries took {per_frame:?}");
 }

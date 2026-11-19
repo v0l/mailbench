@@ -4,6 +4,7 @@ mod model;
 mod threads;
 mod worker;
 
+use crate::backend::Folder as Remote;
 use crate::backend::*;
 use crate::mailstore::{self as ms, *};
 use crate::store::Store;
@@ -77,6 +78,7 @@ impl Cache {
         for t in threads {
             self.reindex(t);
         }
+        self.index_folders();
     }
 
     fn reindex(&mut self, thread: u64) {
@@ -89,7 +91,7 @@ impl Cache {
             let e = &mut self.entries[i];
             e.head = !folders.contains(&e.folder);
             if e.head {
-                folders.push(e.folder);
+                folders.push(e.folder.clone());
             }
             e.count = count;
             e.thread_unread = unread;
@@ -103,7 +105,95 @@ struct Cache {
     entries: Vec<Entry>,
     by_id: HashMap<u64, usize>,
     by_thread: HashMap<u64, Vec<usize>>,
-    labels: Vec<LabelInfo>,
+    by_folder: HashMap<ms::Folder, Vec<usize>>,
+    folder_counts: HashMap<ms::Folder, Counts>,
+    inbox_unread: Vec<usize>,
+    shape: Vec<TreeFolder>,
+}
+
+impl Cache {
+    fn index_folders(&mut self) {
+        self.by_id = HashMap::with_capacity(self.entries.len());
+        self.by_folder.clear();
+        self.folder_counts.clear();
+        self.inbox_unread.clear();
+        for (i, e) in self.entries.iter().enumerate() {
+            self.by_id.insert(e.id, i);
+            if e.folder == ms::Folder::Inbox && e.unread {
+                if self.inbox_unread.len() <= e.account {
+                    self.inbox_unread.resize(e.account + 1, 0);
+                }
+                self.inbox_unread[e.account] += 1;
+            }
+            if !e.head {
+                continue;
+            }
+            self.by_folder.entry(e.folder.clone()).or_default().push(i);
+            let counts = self.folder_counts.entry(e.folder.clone()).or_default();
+            counts.all += 1;
+            counts.unread += e.thread_unread as usize;
+            counts.flagged += e.thread_flagged as usize;
+        }
+    }
+
+    fn tree(&self) -> Vec<TreeFolder> {
+        let mut out = self.shape.clone();
+        let mut carried: Vec<usize> = Vec::new();
+        let mut totals: Vec<usize> = Vec::new();
+        for node in out.iter_mut().rev() {
+            let own = self.folder_counts.get(&node.folder).copied().unwrap_or_default();
+            let depth = node.depth;
+            if carried.len() < depth + 2 {
+                carried.resize(depth + 2, 0);
+                totals.resize(depth + 2, 0);
+            }
+            node.unread = own.unread + std::mem::take(&mut carried[depth + 1]);
+            node.total = own.all + std::mem::take(&mut totals[depth + 1]);
+            carried[depth] += node.unread;
+            totals[depth] += node.total;
+        }
+        out
+    }
+}
+
+fn tree_shape(account: usize, folders: &[Remote]) -> Vec<TreeFolder> {
+    let delimiter = folders.iter().find_map(|f| f.delimiter.clone()).unwrap_or_else(|| DEFAULT_DELIMITER.to_string());
+    let delimiter_of = |f: &Remote| f.delimiter.clone().unwrap_or_else(|| delimiter.clone());
+    let mut nodes: std::collections::BTreeMap<Vec<String>, (String, String, bool)> = Default::default();
+    for f in folders.iter().filter(|f| ui_folder(f).is_none()) {
+        let d = delimiter_of(f);
+        let parts: Vec<String> = f.name.split(d.as_str()).map(str::to_string).collect();
+        for n in 1..=parts.len() {
+            let path = parts[..n].join(&d);
+            let exists = folders.iter().find(|x| x.name == path);
+            if exists.is_some_and(|x| ui_folder(x).is_some()) {
+                continue;
+            }
+            let selectable = exists.is_some_and(|x| x.selectable);
+            let entry = nodes.entry(parts[..n].to_vec()).or_insert((path, d.clone(), selectable));
+            entry.2 |= selectable;
+        }
+    }
+    let paths: std::collections::HashSet<Vec<String>> = nodes.keys().cloned().collect();
+    nodes
+        .iter()
+        .map(|(parts, (path, d, selectable))| {
+            let depth = (1..parts.len()).filter(|n| paths.contains(&parts[..*n])).count();
+            let children = nodes.keys().any(|k| k.len() > parts.len() && k[..parts.len()] == parts[..]);
+            TreeFolder {
+                folder: ms::Folder::Other(account, path.clone()),
+                account,
+                path: path.clone(),
+                delimiter: d.clone(),
+                leaf: parts.last().cloned().unwrap_or_default(),
+                depth,
+                selectable: *selectable,
+                unread: 0,
+                total: 0,
+                children,
+            }
+        })
+        .collect()
 }
 
 pub(crate) struct Shared {
@@ -135,12 +225,17 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn folder_for(folders: &[crate::backend::Folder], name: &str) -> Option<ms::Folder> {
-    folders.iter().find(|f| f.name == name).and_then(ui_folder).or_else(|| {
-        [ms::Folder::Archive, ms::Folder::Trash, ms::Folder::Junk, ms::Folder::Sent, ms::Folder::Drafts, ms::Folder::Inbox]
-            .into_iter()
-            .find(|f| default_name(*f) == name)
-    })
+fn folder_for(account: usize, folders: &[crate::backend::Folder], name: &str) -> ms::Folder {
+    folders
+        .iter()
+        .find(|f| f.name == name)
+        .and_then(ui_folder)
+        .or_else(|| {
+            [ms::Folder::Archive, ms::Folder::Trash, ms::Folder::Junk, ms::Folder::Sent, ms::Folder::Drafts, ms::Folder::Inbox]
+                .into_iter()
+                .find(|f| default_name(f) == name)
+        })
+        .unwrap_or_else(|| ms::Folder::Other(account, name.to_string()))
 }
 
 fn backend_err(e: impl std::fmt::Display) -> StoreError {
@@ -177,6 +272,7 @@ impl Shared {
             f(&mut cache.entries[i]);
             let thread = cache.entries[i].thread;
             cache.reindex(thread);
+            cache.index_folders();
         }
     }
 
@@ -261,7 +357,7 @@ impl Shared {
         let headers = headers::parse_headers(&raw);
         let message = Message {
             summary: summary(e, now()),
-            folder: e.folder,
+            folder: e.folder.clone(),
             from_address: e.from_address.clone(),
             to: e.to.clone(),
             cc: e.cc.clone(),
@@ -364,6 +460,17 @@ impl Shared {
         store.put(OUTBOX, &key, &raw).map_err(backend_err)
     }
 
+    fn queue_folder_op(&self, account: usize, op: Op) -> Result<(), StoreError> {
+        {
+            let store = self.lock_store();
+            self.enqueue(&store, &op)?;
+        }
+        self.user_gen.fetch_add(1, Ordering::SeqCst);
+        self.refresh();
+        self.kick(account);
+        Ok(())
+    }
+
     pub fn outgoing(&self, local: &str) -> Option<OutgoingMessage> {
         let store = self.lock_store();
         let raw = store.get(LOCAL, local).ok().flatten()?;
@@ -394,12 +501,15 @@ impl Shared {
         let known = lock(&self.known_attachments).clone();
         let mut cache = Cache::default();
         let mut meta: Vec<(Option<String>, Vec<String>)> = Vec::new();
-        let mut label_counts: HashMap<String, usize> = HashMap::new();
         for (index, account) in self.accounts.iter().enumerate() {
-            let folders = {
+            let stored = {
                 let store = self.lock_store();
                 StoreSink::new(&store, &account.id, true).folders().unwrap_or_default()
             };
+            let account_ops: Vec<&Op> = ops.iter().map(|(_, op)| op).filter(|op| op.account() == account.id).collect();
+            let shown_folders = with_pending(stored, &account_ops);
+            let folders: Vec<Remote> = shown_folders.iter().map(|(_, f)| f.clone()).collect();
+            cache.shape.extend(tree_shape(index, &folders));
             let mut pending: HashMap<(String, u32), String> = HashMap::new();
             let mut flag_ops: HashMap<(String, u32), (Option<bool>, Option<bool>)> = HashMap::new();
             for (_, op) in &ops {
@@ -418,18 +528,19 @@ impl Shared {
                     }
                 }
             }
-            for folder in folders.iter().filter(|f| f.selectable) {
-                let ui = ui_folder(folder);
+            for (stored_name, folder) in shown_folders.iter().filter(|(_, f)| f.selectable) {
+                let Some(stored_name) = stored_name else { continue };
+                let ui = ui_folder(folder).unwrap_or_else(|| ms::Folder::Other(index, folder.name.clone()));
                 let validity = {
                     let store = self.lock_store();
-                    StoreSink::new(&store, &account.id, true).sync_token(&folder.name).ok().flatten().map(|t| t.uid_validity).unwrap_or(0)
+                    StoreSink::new(&store, &account.id, true).sync_token(stored_name).ok().flatten().map(|t| t.uid_validity).unwrap_or(0)
                 };
                 let mut after: Option<String> = None;
                 loop {
                 let page = {
                     let store = self.lock_store();
                     let sink = StoreSink::new(&store, &account.id, true);
-                    if quick { sink.newest_page(&folder.name, None, QUICK_PAGE) } else { sink.messages_page(&folder.name, after.as_deref(), 2000) }.unwrap_or_default()
+                    if quick { sink.newest_page(stored_name, None, QUICK_PAGE) } else { sink.messages_page(stored_name, after.as_deref(), 2000) }.unwrap_or_default()
                 };
                 let Some((last, _)) = page.last() else { break };
                 after = if quick { None } else { Some(last.clone()) };
@@ -437,20 +548,11 @@ impl Shared {
                     if m.flags.deleted {
                         continue;
                     }
-                    let Some(ui) = ui else {
-                        if !m.flags.seen {
-                            *label_counts.entry(folder.name.clone()).or_default() += 1;
-                        } else {
-                            label_counts.entry(folder.name.clone()).or_default();
-                        }
-                        continue;
-                    };
-                    let id = stable_id(&format!("r\0{}\0{}\0{}\0{}", account.id, folder.name, validity, m.uid));
+                    let id = stable_id(&format!("r\0{}\0{}\0{}\0{}", account.id, stored_name, validity, m.uid));
                     let shown = pending
-                        .get(&(folder.name.clone(), m.uid))
-                        .map(|to| folder_for(&folders, to))
-                        .unwrap_or(Some(ui))
-                        .unwrap_or(ui);
+                        .get(&(stored_name.clone(), m.uid))
+                        .map(|to| folder_for(index, &folders, to))
+                        .unwrap_or_else(|| ui.clone());
                     let attachments = known.get(&id).copied().unwrap_or(false);
                     let from: String = m.from.first().map(display::person).unwrap_or_default();
                     let from_address: String = m.from.first().map(|a| a.address.clone()).unwrap_or_default();
@@ -462,7 +564,7 @@ impl Shared {
                         id,
                         account: index,
                         folder: shown,
-                        server_folder: folder.name.clone(),
+                        server_folder: stored_name.clone(),
                         uid: m.uid,
                         validity,
                         local: None,
@@ -473,8 +575,8 @@ impl Shared {
                         cc: display::people(&m.cc),
                         subject,
                         date: m.date.unwrap_or(0),
-                        unread: flag_ops.get(&(folder.name.clone(), m.uid)).and_then(|f| f.0).map(|s| !s).unwrap_or(!m.flags.seen),
-                        flagged: flag_ops.get(&(folder.name.clone(), m.uid)).and_then(|f| f.1).unwrap_or(m.flags.flagged),
+                        unread: flag_ops.get(&(stored_name.clone(), m.uid)).and_then(|f| f.0).map(|s| !s).unwrap_or(!m.flags.seen),
+                        flagged: flag_ops.get(&(stored_name.clone(), m.uid)).and_then(|f| f.1).unwrap_or(m.flags.flagged),
                         attachments,
                         thread: id,
                         head: true,
@@ -536,10 +638,6 @@ impl Shared {
         }
         cache.entries.sort_by(|a, b| b.date.cmp(&a.date).then(b.id.cmp(&a.id)));
         cache.index();
-        let mut labels: Vec<LabelInfo> =
-            label_counts.into_iter().map(|(name, unread)| LabelInfo { name, unread }).collect();
-        labels.sort_by(|a, b| a.name.cmp(&b.name));
-        cache.labels = labels;
         cache
     }
 
@@ -603,7 +701,7 @@ pub struct RealStore {
 }
 
 fn matches(e: &Entry, q: &Query, needle: &str) -> bool {
-    if e.folder != q.folder || !e.head {
+    if !e.head {
         return false;
     }
     match q.filter {
@@ -735,11 +833,7 @@ impl MailStore for RealStore {
                 .map(|(i, a)| AccountInfo {
                     name: a.name.clone(),
                     address: a.address.clone(),
-                    unread: c
-                        .entries
-                        .iter()
-                        .filter(|e| e.account == i && e.folder == ms::Folder::Inbox && e.unread)
-                        .count(),
+                    unread: c.inbox_unread.get(i).copied().unwrap_or(0),
                     sync: states[i].0,
                     detail: states[i].1.clone(),
                 })
@@ -752,23 +846,30 @@ impl MailStore for RealStore {
             ms::Folder::UNIFIED
                 .iter()
                 .map(|f| {
-                    let inside = c.entries.iter().filter(|e| e.folder == *f);
-                    FolderInfo { folder: *f, unread: inside.clone().filter(|e| e.unread).count(), total: inside.count() }
+                    let counts = c.folder_counts.get(f).copied().unwrap_or_default();
+                    FolderInfo { folder: f.clone(), unread: counts.unread, total: counts.all }
                 })
                 .collect()
         })
     }
 
     fn labels(&self) -> Vec<LabelInfo> {
-        self.shared.with_cache(|c| c.labels.clone())
+        Vec::new()
+    }
+
+    fn tree(&self) -> Vec<TreeFolder> {
+        self.shared.with_cache(|c| c.tree())
     }
 
     fn counts(&self, query: &Query) -> Counts {
-        let base = Query { filter: Filter::All, ..query.clone() };
         let needle = query.text.to_lowercase();
         self.shared.with_cache(|c| {
+            if needle.is_empty() {
+                return c.folder_counts.get(&query.folder).copied().unwrap_or_default();
+            }
+            let base = Query { filter: Filter::All, ..query.clone() };
             let mut out = Counts::default();
-            for e in c.entries.iter().filter(|e| matches(e, &base, &needle)) {
+            for e in c.by_folder.get(&query.folder).into_iter().flatten().map(|i| &c.entries[*i]).filter(|e| matches(e, &base, &needle)) {
                 out.all += 1;
                 out.unread += e.thread_unread as usize;
                 out.flagged += e.thread_flagged as usize;
@@ -781,9 +882,16 @@ impl MailStore for RealStore {
         let now = now();
         let needle = query.text.to_lowercase();
         self.shared.with_cache(|c| {
+            let Some(index) = c.by_folder.get(&query.folder) else {
+                return Page { offset, total: 0, items: Vec::new() };
+            };
+            if needle.is_empty() && query.filter == Filter::All {
+                let items = index.iter().skip(offset).take(limit).map(|i| row(&c.entries[*i], now)).collect();
+                return Page { offset, total: index.len(), items };
+            }
             let mut total = 0;
             let mut items = Vec::new();
-            for e in c.entries.iter().filter(|e| matches(e, query, &needle)) {
+            for e in index.iter().map(|i| &c.entries[*i]).filter(|e| matches(e, query, &needle)) {
                 if total >= offset && items.len() < limit {
                     items.push(row(e, now));
                 }
@@ -801,7 +909,7 @@ impl MailStore for RealStore {
             members
                 .iter()
                 .rev()
-                .map(|m| ThreadItem { summary: summary(&c.entries[*m], now), folder: c.entries[*m].folder })
+                .map(|m| ThreadItem { summary: summary(&c.entries[*m], now), folder: c.entries[*m].folder.clone() })
                 .collect()
         })
     }
@@ -828,7 +936,7 @@ impl MailStore for RealStore {
             let cached = lock(&self.shared.opened).iter().find(|(i, _)| *i == id.0).map(|(_, m)| m.clone());
             if let Some(mut m) = cached {
                 m.summary = summary(&e, now());
-                m.folder = e.folder;
+                m.folder = e.folder.clone();
                 return Ok(m);
             }
             let state = if self.shared.body_failed(id.0) {
@@ -842,7 +950,7 @@ impl MailStore for RealStore {
         let (body, headers, body_state) = body;
         Ok(Message {
             summary: summary(&e, now()),
-            folder: e.folder,
+            folder: e.folder.clone(),
             from_address: e.from_address,
             to: e.to,
             cc: e.cc,
@@ -924,6 +1032,9 @@ impl MailStore for RealStore {
         if e.folder == folder {
             return Ok(());
         }
+        if matches!(&folder, ms::Folder::Other(a, _) if *a != e.account) {
+            return Err(StoreError::Backend("a message cannot move to another account".into()));
+        }
         let account = self.shared.accounts[e.account].id.clone();
         if let Some(local) = &e.local {
             {
@@ -940,7 +1051,10 @@ impl MailStore for RealStore {
         }
         let folders = self.shared.folders_of(&account);
         let validity = self.shared.validity(&account, &e.server_folder).unwrap_or(e.validity);
-        let to = server_folder(&folders, folder).unwrap_or_else(|| default_name(folder).to_string());
+        let to = match &folder {
+            ms::Folder::Other(_, name) => name.clone(),
+            _ => server_folder(&folders, &folder).unwrap_or_else(|| default_name(&folder).to_string()),
+        };
         {
             let store = self.shared.lock_store();
             self.shared.enqueue(
@@ -953,6 +1067,23 @@ impl MailStore for RealStore {
         self.shared.refresh();
         self.shared.kick(e.account);
         Ok(())
+    }
+
+    fn create_folder(&mut self, account: usize, name: &str) -> Result<(), StoreError> {
+        let id = self.shared.accounts.get(account).ok_or(StoreError::NotFound)?.id.clone();
+        self.shared.queue_folder_op(account, Op::CreateFolder { account: id, name: name.to_string() })
+    }
+
+    fn rename_folder(&mut self, folder: &ms::Folder, name: &str) -> Result<(), StoreError> {
+        let ms::Folder::Other(account, from) = folder else { return Err(StoreError::Backend("only your own folders can be renamed".into())) };
+        let id = self.shared.accounts.get(*account).ok_or(StoreError::NotFound)?.id.clone();
+        self.shared.queue_folder_op(*account, Op::RenameFolder { account: id, from: from.clone(), to: name.to_string() })
+    }
+
+    fn delete_folder(&mut self, folder: &ms::Folder) -> Result<(), StoreError> {
+        let ms::Folder::Other(account, name) = folder else { return Err(StoreError::Backend("only your own folders can be deleted".into())) };
+        let id = self.shared.accounts.get(*account).ok_or(StoreError::NotFound)?.id.clone();
+        self.shared.queue_folder_op(*account, Op::DeleteFolder { account: id, name: name.clone() })
     }
 
     fn append(&mut self, folder: ms::Folder, message: Outgoing) -> Result<MessageId, StoreError> {

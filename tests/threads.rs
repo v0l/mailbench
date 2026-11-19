@@ -73,6 +73,6 @@ fn a_reply_in_sent_joins_the_inbox_thread_as_one_row() {
     assert_eq!(page.items[1].thread, 1);
     let thread = real.thread(page.items[0].id);
     assert_eq!(thread.len(), 3);
-    let folders: Vec<_> = thread.iter().map(|t| t.folder).collect();
+    let folders: Vec<_> = thread.iter().map(|t| t.folder.clone()).collect();
     assert_eq!(folders, vec![ms::Folder::Inbox, ms::Folder::Sent, ms::Folder::Inbox]);
 }

@@ -41,6 +41,10 @@ pub trait Backend: Send {
         Err(BackendError::Unsupported("create_folder"))
     }
 
+    async fn rename_folder(&mut self, _from: &str, _to: &str) -> Result<()> {
+        Err(BackendError::Unsupported("rename_folder"))
+    }
+
     async fn open_folder(&mut self, _folder: &str) -> Result<FolderState> {
         Err(BackendError::Unsupported("open_folder"))
     }
@@ -137,6 +141,10 @@ impl Backend for Account {
 
     async fn create_folder(&mut self, name: &str) -> Result<()> {
         self.mail.create_folder(name).await
+    }
+
+    async fn rename_folder(&mut self, from: &str, to: &str) -> Result<()> {
+        self.mail.rename_folder(from, to).await
     }
 
     async fn open_folder(&mut self, folder: &str) -> Result<FolderState> {

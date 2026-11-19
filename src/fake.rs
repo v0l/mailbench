@@ -230,7 +230,7 @@ impl MailStore for FakeStore {
             .map(|f| {
                 let inside = self.messages.iter().filter(|m| m.folder == *f);
                 FolderInfo {
-                    folder: *f,
+                    folder: f.clone(),
                     unread: inside.clone().filter(|m| m.summary.unread).count(),
                     total: inside.count(),
                 }
@@ -270,7 +270,7 @@ impl MailStore for FakeStore {
         ids.push(id.0);
         ids.iter()
             .filter_map(|i| self.messages.iter().find(|m| m.summary.id.0 == *i))
-            .map(|m| ThreadItem { summary: m.summary.clone(), folder: m.folder })
+            .map(|m| ThreadItem { summary: m.summary.clone(), folder: m.folder.clone() })
             .collect()
     }
 

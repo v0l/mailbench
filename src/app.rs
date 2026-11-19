@@ -44,6 +44,12 @@ pub enum Action {
     SaveAllAttachments,
     ViewImage(usize),
     CloseViewer,
+    OpenMove,
+    MoveTo(Folder, bool),
+    ToggleBranch(usize, String),
+    NewFolder(usize, String),
+    RenameFolder(Folder, String),
+    DeleteFolder(Folder),
 }
 
 pub type SavePicker = Box<dyn FnMut(&str, &str) -> Option<std::path::PathBuf>>;
@@ -115,6 +121,40 @@ impl Draft {
     }
 }
 
+struct Mover {
+    query: String,
+    selected: usize,
+    whole: bool,
+}
+
+enum FolderDialog {
+    Create { account: usize, prefix: String, name: String },
+    Rename { folder: Folder, prefix: String, name: String },
+    Delete { folder: Folder },
+}
+
+fn fuzzy_score(query: &str, text: &str) -> Option<usize> {
+    let text: Vec<char> = text.to_lowercase().chars().collect();
+    let mut at = 0;
+    let mut score = 0;
+    let mut last: Option<usize> = None;
+    for q in query.to_lowercase().chars().filter(|c| !c.is_whitespace()) {
+        let found = text[at..].iter().position(|c| *c == q)? + at;
+        score += match last {
+            Some(l) => found - l - 1,
+            None => found * 2,
+        };
+        last = Some(found);
+        at = found + 1;
+    }
+    Some(score + text.len() / 8)
+}
+
+struct Target {
+    folder: Folder,
+    label: String,
+}
+
 struct View {
     query: Query,
     counts: Counts,
@@ -153,6 +193,9 @@ pub struct App {
     pub rendered_rows: usize,
     pub reader_focus: bool,
     pub force_failed: bool,
+    mover: Option<Mover>,
+    dialog: Option<FolderDialog>,
+    collapsed: HashSet<(usize, String)>,
     search_id: Option<egui::Id>,
     scroll_to_selected: bool,
     go_pending: bool,
@@ -191,6 +234,9 @@ impl App {
             rendered_rows: 0,
             reader_focus: false,
             force_failed: false,
+            mover: None,
+            dialog: None,
+            collapsed: HashSet::new(),
             search_id: None,
             scroll_to_selected: false,
             go_pending: false,
@@ -210,7 +256,7 @@ impl App {
     }
 
     pub fn query(&self) -> Query {
-        Query { folder: self.folder, filter: self.filter, text: self.search.clone() }
+        Query { folder: self.folder.clone(), filter: self.filter, text: self.search.clone() }
     }
 
     fn view(&mut self) -> View {
@@ -252,7 +298,10 @@ impl App {
 
     fn key_actions(&mut self, ctx: &egui::Context) -> Vec<Action> {
         use egui::Key as K;
-        if self.draft.is_some() {
+        if self.draft.is_some() || self.dialog.is_some() {
+            return Vec::new();
+        }
+        if self.mover.is_some() {
             return Vec::new();
         }
         if Self::pressed(ctx, K::Escape) {
@@ -262,7 +311,7 @@ impl App {
             return Vec::new();
         }
         let plain = ctx.input(|i| !i.modifiers.shift);
-        let table: [(K, Action); 14] = [
+        let table: [(K, Action); 15] = [
             (K::J, Action::Next),
             (K::ArrowDown, Action::Next),
             (K::K, Action::Previous),
@@ -276,6 +325,7 @@ impl App {
             (K::A, Action::Reply(Reply::All)),
             (K::F, Action::Reply(Reply::Forward)),
             (K::C, Action::Compose),
+            (K::M, Action::OpenMove),
             (K::Slash, Action::Search),
         ];
         let mut out = Vec::new();
@@ -315,15 +365,15 @@ impl App {
 
     fn targets(v: &View, whole: bool, same_folder: bool) -> Vec<(MessageId, Folder)> {
         if whole && !v.thread.is_empty() {
-            let row = v.query.folder;
+            let row = v.query.folder.clone();
             return v
                 .thread
                 .iter()
                 .filter(|t| !same_folder || t.folder == row)
-                .map(|t| (t.summary.id, t.folder))
+                .map(|t| (t.summary.id, t.folder.clone()))
                 .collect();
         }
-        v.current.iter().map(|m| (m.summary.id, m.folder)).collect()
+        v.current.iter().map(|m| (m.summary.id, m.folder.clone())).collect()
     }
 
     fn move_current(&mut self, v: &View, to: Folder, done: &str, whole: bool) {
@@ -331,7 +381,7 @@ impl App {
             if folder == to {
                 continue;
             }
-            match self.store.move_to(id, to) {
+            match self.store.move_to(id, to.clone()) {
                 Ok(()) => self.notice = Some(done.into()),
                 Err(e) => self.notice = Some(format!("Could not move the message: {e:?}")),
             }
@@ -446,6 +496,29 @@ impl App {
                 Action::SaveAllAttachments => self.save_all(&v),
                 Action::ViewImage(i) => self.viewing = Some(i),
                 Action::CloseViewer => self.viewing = None,
+                Action::OpenMove => {
+                    if v.current.is_some() {
+                        self.mover = Some(Mover { query: String::new(), selected: 0, whole: whole && !self.reader_focus });
+                        ctx.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(t) if t.eq_ignore_ascii_case("m"))));
+                    }
+                }
+                Action::MoveTo(f, whole) => {
+                    let said = format!("Moved to {}", f.name());
+                    self.move_current(&v, f, &said, whole);
+                }
+                Action::ToggleBranch(account, path) => {
+                    if !self.collapsed.remove(&(account, path.clone())) {
+                        self.collapsed.insert((account, path));
+                    }
+                }
+                Action::NewFolder(account, prefix) => {
+                    self.dialog = Some(FolderDialog::Create { account, prefix, name: String::new() });
+                }
+                Action::RenameFolder(folder, prefix) => {
+                    let name = folder.name().strip_prefix(prefix.as_str()).unwrap_or(folder.name()).to_string();
+                    self.dialog = Some(FolderDialog::Rename { folder, prefix, name });
+                }
+                Action::DeleteFolder(folder) => self.dialog = Some(FolderDialog::Delete { folder }),
             }
             ctx.request_repaint();
         }
@@ -603,6 +676,8 @@ impl App {
         });
         self.composer(&ctx, &accounts);
         self.viewer(&ctx, &mut actions);
+        self.move_picker(&ctx, v.current.as_ref(), &mut actions);
+        self.folder_dialog(&ctx);
         self.apply(&ctx, actions);
     }
 
@@ -662,6 +737,7 @@ impl App {
                     ("s", "snooze"),
                     ("x", "flag"),
                     ("/", "search"),
+                    ("m", "move"),
                     ("c", "compose"),
                     ("o", "open file"),
                     ("S", "save files"),
@@ -721,19 +797,282 @@ impl App {
                 actions.push(Action::GoTo(f.folder));
             }
         }
-        ui.add_space(12.0);
-        heading(ui, "labels");
-        ui.add_space(4.0);
-        for l in self.store.labels() {
+        let labels = self.store.labels();
+        if !labels.is_empty() {
+            ui.add_space(12.0);
+            heading(ui, "labels");
+            ui.add_space(4.0);
+            for l in labels {
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), egui::Sense::click());
+                let p = ui.painter();
+                if resp.hovered() {
+                    p.rect_filled(rect, 2.0, BAND);
+                }
+                put(p, rect.left() + 12.0, 120.0, rect.center().y, &l.name, body(13.0), LEGEND);
+                if l.unread > 0 {
+                    put_right(p, rect.right() - 6.0, rect.center().y, &l.unread.to_string(), figure(11.0), LEGEND);
+                }
+            }
+        }
+        self.tree(ui, accounts, actions);
+    }
+
+    fn tree(&mut self, ui: &mut Ui, accounts: &[AccountInfo], actions: &mut Vec<Action>) {
+        let tree = self.store.tree();
+        if tree.is_empty() && accounts.is_empty() {
+            return;
+        }
+        for (account, info) in accounts.iter().enumerate() {
+            ui.add_space(12.0);
+            heading(ui, &info.name.to_lowercase());
+            ui.add_space(4.0);
+            let mut hidden_under: Option<usize> = None;
+            for node in tree.iter().filter(|n| n.account == account) {
+                if let Some(depth) = hidden_under {
+                    if node.depth > depth {
+                        continue;
+                    }
+                    hidden_under = None;
+                }
+                let folded = self.collapsed.contains(&(account, node.path.clone()));
+                if folded && node.children {
+                    hidden_under = Some(node.depth);
+                }
+                self.tree_row(ui, node, folded, actions);
+            }
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), egui::Sense::click());
             let p = ui.painter();
             if resp.hovered() {
                 p.rect_filled(rect, 2.0, BAND);
             }
-            put(p, rect.left() + 12.0, 120.0, rect.center().y, &l.name, body(13.0), LEGEND);
-            if l.unread > 0 {
-                put_right(p, rect.right() - 6.0, rect.center().y, &l.unread.to_string(), figure(11.0), LEGEND);
+            put(p, rect.left() + 12.0, 120.0, rect.center().y, "+ new folder", body(12.0), LEGEND);
+            ui.ctx().accesskit_node_builder(resp.id, |node| node.set_label(format!("new folder in {}", info.name)));
+            if resp.clicked() {
+                actions.push(Action::NewFolder(account, String::new()));
             }
+        }
+    }
+
+    fn tree_row(&self, ui: &mut Ui, node: &TreeFolder, folded: bool, actions: &mut Vec<Action>) {
+        let on = node.folder == self.folder;
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), egui::Sense::click());
+        let p = ui.painter();
+        if on {
+            selection(p, rect);
+        } else if resp.hovered() {
+            p.rect_filled(rect, 2.0, BAND);
+        }
+        let indent = rect.left() + 12.0 + node.depth as f32 * 12.0;
+        if node.children {
+            let c = egui::pos2(indent - 1.0, rect.center().y);
+            let points = if folded {
+                vec![c + egui::vec2(-2.0, -4.0), c + egui::vec2(-2.0, 4.0), c + egui::vec2(3.0, 0.0)]
+            } else {
+                vec![c + egui::vec2(-4.0, -2.0), c + egui::vec2(4.0, -2.0), c + egui::vec2(0.0, 3.0)]
+            };
+            p.add(egui::Shape::convex_polygon(points, LEGEND, egui::Stroke::NONE));
+        }
+        let text_x = indent + 8.0;
+        let col = if !node.selectable { TRACE } else if on { VALUE } else { LEGEND };
+        put(p, text_x, (rect.right() - text_x - 28.0).max(20.0), rect.center().y, &node.leaf, body(13.0), col);
+        if node.unread > 0 {
+            put_right(p, rect.right() - 6.0, rect.center().y, &node.unread.to_string(), figure(11.0), if on { READOUT } else { LEGEND });
+        }
+        ui.ctx().accesskit_node_builder(resp.id, |n| n.set_label(node.path.clone()));
+        if resp.clicked() {
+            let on_arrow = node.children
+                && resp.interact_pointer_pos().is_some_and(|pos| pos.x < indent + 6.0);
+            if on_arrow || !node.selectable {
+                actions.push(Action::ToggleBranch(node.account, node.path.clone()));
+            } else {
+                actions.push(Action::GoTo(node.folder.clone()));
+            }
+        }
+        let parent = node.path[..node.path.len() - node.leaf.len()].to_string();
+        resp.context_menu(|ui| {
+            ui.set_min_width(140.0);
+            let child_prefix = format!("{}{}", node.path, node.delimiter);
+            let items = [
+                ("new subfolder", Action::NewFolder(node.account, child_prefix)),
+                ("rename", Action::RenameFolder(node.folder.clone(), parent)),
+                ("delete", Action::DeleteFolder(node.folder.clone())),
+            ];
+            for (label, action) in items {
+                let tint = if label == "delete" { FAULT } else { VALUE };
+                if ui.add(Key::new(label).outline(tint).min_width(ui.available_width())).clicked() {
+                    actions.push(action);
+                    ui.close();
+                }
+            }
+        });
+    }
+
+    fn move_targets(&self, account: usize) -> Vec<Target> {
+        let mut out: Vec<Target> = self
+            .store
+            .folders()
+            .into_iter()
+            .map(|f| Target { label: f.folder.name().to_string(), folder: f.folder })
+            .filter(|t| t.folder != Folder::Drafts && t.folder != Folder::Sent)
+            .collect();
+        out.extend(
+            self.store
+                .tree()
+                .into_iter()
+                .filter(|n| n.account == account && n.selectable)
+                .map(|n| Target { label: n.path, folder: n.folder }),
+        );
+        out
+    }
+
+    fn move_picker(&mut self, ctx: &egui::Context, current: Option<&Message>, actions: &mut Vec<Action>) {
+        let Some(mover) = self.mover.as_mut() else { return };
+        let Some(m) = current else {
+            self.mover = None;
+            return;
+        };
+        let account = m.summary.account;
+        let from = m.folder.clone();
+        let whole = mover.whole;
+        let query = mover.query.clone();
+        let mut ranked: Vec<(usize, Target)> = self
+            .move_targets(account)
+            .into_iter()
+            .filter(|t| t.folder != from)
+            .filter_map(|t| fuzzy_score(&query, &t.label).map(|s| (s, t)))
+            .collect();
+        ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.label.cmp(&b.1.label)));
+        let Some(mover) = self.mover.as_mut() else { return };
+        let (mut picked, mut close) = (None, false);
+        let r = egui::Modal::new(egui::Id::new("move-to"))
+            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                ui.set_width(380.0);
+                modal_title(ui, "move to");
+                let r = field(ui, &mut mover.query, "type a folder name");
+                if !r.has_focus() {
+                    r.request_focus();
+                }
+                if r.changed() {
+                    mover.selected = 0;
+                }
+                ui.input(|i| {
+                    if i.key_pressed(egui::Key::ArrowDown) && mover.selected + 1 < ranked.len() {
+                        mover.selected += 1;
+                    }
+                    if i.key_pressed(egui::Key::ArrowUp) {
+                        mover.selected = mover.selected.saturating_sub(1);
+                    }
+                });
+                ui.add_space(6.0);
+                if ranked.is_empty() {
+                    Line::new().note("No folder matches").size(11.5).show(ui);
+                }
+                for (i, (_, t)) in ranked.iter().take(10).enumerate() {
+                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), egui::Sense::click());
+                    let p = ui.painter();
+                    if i == mover.selected {
+                        selection(p, rect);
+                    } else if resp.hovered() {
+                        p.rect_filled(rect, 2.0, BAND);
+                    }
+                    put(p, rect.left() + 12.0, rect.width() - 20.0, rect.center().y, &t.label, body(13.0), VALUE);
+                    ui.ctx().accesskit_node_builder(resp.id, |n| n.set_label(format!("move to {}", t.label)));
+                    if resp.clicked() {
+                        picked = Some(t.folder.clone());
+                    }
+                }
+                if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    picked = ranked.get(mover.selected).map(|(_, t)| t.folder.clone());
+                }
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    close = true;
+                }
+            });
+        if r.should_close() {
+            close = true;
+        }
+        if let Some(f) = picked {
+            actions.push(Action::MoveTo(f, whole));
+            self.mover = None;
+        } else if close {
+            self.mover = None;
+        }
+    }
+
+    fn folder_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = self.dialog.as_mut() else { return };
+        let (mut submit, mut cancel) = (false, false);
+        let r = egui::Modal::new(egui::Id::new("folder-dialog"))
+            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                ui.set_width(380.0);
+                match dialog {
+                    FolderDialog::Create { prefix, name, .. } => {
+                        modal_title(ui, "new folder");
+                        if !prefix.is_empty() {
+                            Line::new().note(format!("inside {prefix}")).size(11.5).show(ui);
+                        }
+                        let r = field(ui, name, "folder name");
+                        if !r.has_focus() {
+                            r.request_focus();
+                        }
+                    }
+                    FolderDialog::Rename { name, .. } => {
+                        modal_title(ui, "rename folder");
+                        let r = field(ui, name, "folder name");
+                        if !r.has_focus() {
+                            r.request_focus();
+                        }
+                    }
+                    FolderDialog::Delete { folder } => {
+                        modal_title(ui, "delete folder");
+                        Line::new()
+                            .note(format!("Delete {} and every message in it on the server?", folder.name()))
+                            .size(11.5)
+                            .show(ui);
+                    }
+                }
+                let (label, tint) = match dialog {
+                    FolderDialog::Create { .. } => ("create", READOUT),
+                    FolderDialog::Rename { .. } => ("rename", READOUT),
+                    FolderDialog::Delete { .. } => ("delete", FAULT),
+                };
+                form_footer(ui, |ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        submit = ui.add(Key::new(label).solid(tint).min_width(100.0)).clicked();
+                        cancel = ui.add(Key::new("cancel").outline(VALUE).min_width(90.0)).clicked();
+                    });
+                });
+                if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    submit = true;
+                }
+            });
+        if r.should_close() {
+            cancel = true;
+        }
+        if submit {
+            let result = match self.dialog.take() {
+                Some(FolderDialog::Create { account, prefix, name }) if !name.trim().is_empty() => {
+                    self.store.create_folder(account, &format!("{prefix}{}", name.trim())).map(|_| "Folder created")
+                }
+                Some(FolderDialog::Rename { folder, prefix, name }) if !name.trim().is_empty() => {
+                    self.store.rename_folder(&folder, &format!("{prefix}{}", name.trim())).map(|_| "Folder renamed")
+                }
+                Some(FolderDialog::Delete { folder }) => {
+                    if folder == self.folder {
+                        self.go_folder(Folder::Inbox);
+                    }
+                    self.store.delete_folder(&folder).map(|_| "Folder deleted")
+                }
+                _ => return,
+            };
+            self.notice = Some(match result {
+                Ok(said) => said.into(),
+                Err(e) => format!("Could not change the folder: {e:?}"),
+            });
+        } else if cancel {
+            self.dialog = None;
         }
     }
 

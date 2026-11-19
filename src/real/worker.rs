@@ -120,6 +120,9 @@ async fn push(shared: &Shared, backend: &mut dyn Backend, op: &Op, account: &str
                 other => other,
             }
         }
+        Op::CreateFolder { name, .. } => backend.create_folder(name).await,
+        Op::RenameFolder { from, to, .. } => backend.rename_folder(from, to).await,
+        Op::DeleteFolder { name, .. } => backend.delete_folder(name).await,
         Op::Send { local, .. } => {
             let Some(message) = shared.outgoing(local) else { return Ok(()) };
             backend.send(&message).await
@@ -148,9 +151,17 @@ async fn cycle(shared: &Arc<Shared>, index: usize, account: &str, backend: &mut 
         LockedSink { shared: shared.clone(), account: account.to_string(), index, last_refresh: Instant::now(), fresh: false };
     let mut done = Vec::new();
     let pushed = push_outbox(shared, account, backend, &mut done).await;
+    let (folder_ops, done): (Vec<String>, Vec<String>) = done.into_iter().partition(|key| {
+        shared.outbox(account).iter().any(|(k, op)| k == key && matches!(op, Op::CreateFolder { .. } | Op::RenameFolder { .. } | Op::DeleteFolder { .. }))
+    });
     shared.remove_ops(&done);
-    pushed?;
-    sync_account(backend, &mut sink).await?;
+    if let Err(e) = pushed {
+        shared.remove_ops(&folder_ops);
+        return Err(e);
+    }
+    let synced = sync_account(backend, &mut sink).await;
+    shared.remove_ops(&folder_ops);
+    synced?;
     if sink.fresh {
         shared.refresh();
     }

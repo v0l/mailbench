@@ -384,6 +384,15 @@ impl Backend for ImapBackend {
         timed!(self, async { s.create(name).await.map_err(BackendError::from) })
     }
 
+    async fn rename_folder(&mut self, from: &str, to: &str) -> Result<()> {
+        self.ensure().await?;
+        if self.selected.as_deref() == Some(from) {
+            self.selected = None;
+        }
+        let s = self.session();
+        timed!(self, async { s.rename(from, to).await.map_err(BackendError::from) })
+    }
+
     async fn delete_folder(&mut self, name: &str) -> Result<()> {
         self.ensure().await?;
         if self.selected.as_deref() == Some(name) {

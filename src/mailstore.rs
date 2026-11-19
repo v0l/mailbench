@@ -1,7 +1,7 @@
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct MessageId(pub u64);
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub enum Folder {
     Inbox,
     Drafts,
@@ -10,13 +10,14 @@ pub enum Folder {
     Junk,
     Trash,
     Snoozed,
+    Other(usize, String),
 }
 
 impl Folder {
     pub const UNIFIED: [Folder; 6] =
         [Folder::Inbox, Folder::Drafts, Folder::Sent, Folder::Archive, Folder::Junk, Folder::Trash];
 
-    pub fn name(self) -> &'static str {
+    pub fn name(&self) -> &str {
         match self {
             Folder::Inbox => "inbox",
             Folder::Drafts => "drafts",
@@ -25,6 +26,7 @@ impl Folder {
             Folder::Junk => "junk",
             Folder::Trash => "trash",
             Folder::Snoozed => "snoozed",
+            Folder::Other(_, name) => name,
         }
     }
 }
@@ -63,6 +65,20 @@ pub struct FolderInfo {
 pub struct LabelInfo {
     pub name: String,
     pub unread: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct TreeFolder {
+    pub folder: Folder,
+    pub account: usize,
+    pub path: String,
+    pub delimiter: String,
+    pub leaf: String,
+    pub depth: usize,
+    pub selectable: bool,
+    pub unread: usize,
+    pub total: usize,
+    pub children: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -233,5 +249,21 @@ pub trait MailStore {
     fn append(&mut self, folder: Folder, message: Outgoing) -> Result<MessageId, StoreError>;
     fn attachments(&self, _id: MessageId) -> Result<Vec<AttachmentData>, StoreError> {
         Ok(Vec::new())
+    }
+
+    fn tree(&self) -> Vec<TreeFolder> {
+        Vec::new()
+    }
+
+    fn create_folder(&mut self, _account: usize, _name: &str) -> Result<(), StoreError> {
+        Err(StoreError::Backend("folders cannot be created here".into()))
+    }
+
+    fn rename_folder(&mut self, _folder: &Folder, _name: &str) -> Result<(), StoreError> {
+        Err(StoreError::Backend("folders cannot be renamed here".into()))
+    }
+
+    fn delete_folder(&mut self, _folder: &Folder) -> Result<(), StoreError> {
+        Err(StoreError::Backend("folders cannot be deleted here".into()))
     }
 }
