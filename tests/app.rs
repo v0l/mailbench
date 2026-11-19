@@ -261,3 +261,23 @@ fn archiving_from_the_list_takes_the_whole_thread_and_the_reader_takes_one() {
         assert_eq!(h.state().1.store.get(*id).unwrap().folder, Folder::Archive);
     }
 }
+
+#[test]
+fn enter_expands_the_focused_older_message_in_the_reader() {
+    let mut h = harness(FakeStore::concept());
+    let head = inbox_ids(&h.state().1)[0];
+    let thread = h.state().1.store.thread(head);
+    h.key_press(egui::Key::Enter);
+    h.run();
+    assert!(h.state().1.reader_focus);
+    h.key_press(egui::Key::K);
+    h.run();
+    h.key_press(egui::Key::K);
+    h.run();
+    assert_eq!(h.state().1.thread_focus, Some(thread[0].summary.id));
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    assert_eq!(h.state().1.expanded, Some(thread[0].summary.id));
+    h.get_by_label_contains("Hi Mara, the Rev C Gerbers passed");
+}

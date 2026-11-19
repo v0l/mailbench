@@ -213,10 +213,10 @@ pub fn sender_line(ui: &mut Ui, name: &str, to: &str, when: &str) {
     });
 }
 
-pub fn collapsed_message(ui: &mut Ui, from: &str, when: &str, unread: bool) -> bool {
+pub fn collapsed_message(ui: &mut Ui, from: &str, when: &str, unread: bool, focused: bool) -> bool {
     let font = if unread { body_strong(13.0) } else { body(13.0) };
-    let text = format!("{from}   {when}");
-    let resp = ui.add(egui::Label::new(egui::RichText::new(text).font(font).color(LEGEND)).sense(Sense::click()));
+    let text = format!("{}{from}   {when}", if focused { "> " } else { "" });
+    let resp = ui.add(egui::Label::new(egui::RichText::new(text).font(font).color(if focused { VALUE } else { LEGEND })).sense(Sense::click()));
     resp.clicked()
 }
 

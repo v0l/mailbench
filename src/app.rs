@@ -142,6 +142,7 @@ pub struct App {
     last_shown: Option<MessageId>,
     last_head: Option<MessageId>,
     pub expanded: Option<MessageId>,
+    pub thread_focus: Option<MessageId>,
     pub settings_requested: bool,
     html: crate::htmlview::Renderer,
 }
@@ -173,6 +174,7 @@ impl App {
             last_shown: None,
             last_head: None,
             expanded: None,
+            thread_focus: None,
             settings_requested: false,
             html: crate::htmlview::Renderer::default(),
         }
@@ -197,6 +199,7 @@ impl App {
         let head_id = head.as_ref().map(|s| s.id);
         if head_id != self.last_head {
             self.expanded = None;
+            self.thread_focus = None;
             self.last_head = head_id;
         }
         let thread = head_id.map(|id| self.store.thread(id)).unwrap_or_default();
@@ -307,6 +310,16 @@ impl App {
             match a {
                 Action::One(_) => {}
                 Action::Expand(id) => self.expanded = Some(id),
+                Action::Next | Action::Previous if self.reader_focus && v.thread.len() > 1 => {
+                    let shown = v.current.as_ref().map(|m| m.summary.id);
+                    let at = self
+                        .thread_focus
+                        .or(shown)
+                        .and_then(|f| v.thread.iter().position(|t| t.summary.id == f))
+                        .unwrap_or(v.thread.len() - 1);
+                    let to = if a == Action::Next { (at + 1).min(v.thread.len() - 1) } else { at.saturating_sub(1) };
+                    self.thread_focus = Some(v.thread[to].summary.id);
+                }
                 Action::Next => {
                     if self.selected + 1 < v.total {
                         self.selected += 1;
@@ -318,12 +331,8 @@ impl App {
                     self.scroll_to_selected = true;
                 }
                 Action::Open => {
-                    if self.reader_focus && v.thread.len() > 1 {
-                        let shown = v.current.as_ref().map(|m| m.summary.id);
-                        let at = v.thread.iter().position(|t| Some(t.summary.id) == shown).unwrap_or(0);
-                        if at > 0 {
-                            self.expanded = Some(v.thread[at - 1].summary.id);
-                        }
+                    if let Some(f) = self.thread_focus.take().filter(|_| self.reader_focus) {
+                        self.expanded = Some(f);
                     }
                     for (id, _) in Self::targets(&v, true, false) {
                         let _ = self.store.set_flags(id, FlagChange { unread: Some(false), flagged: None });
@@ -690,7 +699,7 @@ impl App {
             subject_line(ui, &m.summary.subject);
             let shown_at = v.thread.iter().position(|t| t.summary.id == m.summary.id).unwrap_or(v.thread.len());
             for t in v.thread.iter().take(shown_at) {
-                if collapsed_message(ui, &t.summary.from, &t.summary.when, t.summary.unread) {
+                if collapsed_message(ui, &t.summary.from, &t.summary.when, t.summary.unread, self.thread_focus == Some(t.summary.id)) {
                     actions.push(Action::Expand(t.summary.id));
                 }
             }
@@ -766,7 +775,7 @@ impl App {
                 }
             });
             for t in v.thread.iter().skip(shown_at + 1) {
-                if collapsed_message(ui, &t.summary.from, &t.summary.when, t.summary.unread) {
+                if collapsed_message(ui, &t.summary.from, &t.summary.when, t.summary.unread, self.thread_focus == Some(t.summary.id)) {
                     actions.push(Action::Expand(t.summary.id));
                 }
             }

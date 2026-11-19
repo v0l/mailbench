@@ -81,19 +81,17 @@ pub fn assign(inputs: &[Input<'_>], ids: &[u64]) -> Vec<u64> {
         }
         let alone = sizes.get(&sets.find(i)).copied().unwrap_or(1) == 1;
         if prefixed && alone {
-            if let Some((date, j)) = latest.get(&norm) {
-                if inputs[i].date - date <= WINDOW {
-                    sets.union(i, *j);
-                }
+            if let Some((_, j)) = latest.get(&norm).filter(|(date, _)| inputs[i].date - date <= WINDOW) {
+                sets.union(i, *j);
             }
         }
         latest.insert(norm, (inputs[i].date, i));
     }
     let mut lowest: HashMap<usize, u64> = HashMap::new();
-    for i in 0..inputs.len() {
+    for (i, id) in ids.iter().enumerate() {
         let root = sets.find(i);
-        let slot = lowest.entry(root).or_insert(ids[i]);
-        *slot = (*slot).min(ids[i]);
+        let slot = lowest.entry(root).or_insert(*id);
+        *slot = (*slot).min(*id);
     }
     (0..inputs.len()).map(|i| lowest[&sets.find(i)]).collect()
 }
