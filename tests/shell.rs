@@ -1,5 +1,5 @@
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use mailbench::autodetect::{Net, Provider};
 use mailbench::backend::*;
 use mailbench::dns::Srv;
@@ -552,4 +552,56 @@ fn a_nostr_account_without_a_relay_list_is_asked_to_publish_one() {
             _ => panic!("not a nostr credential"),
         }
     });
+
+struct ApproveAll;
+
+impl nostr_connect::prelude::NostrConnectSignerActions for ApproveAll {
+    fn approve(&self, _: &nostr_sdk::PublicKey, _: &nostr_connect::prelude::NostrConnectRequest) -> bool {
+        true
+    }
+}
+
+#[test]
+fn add_form_pastes_a_bunker_url_connects_and_only_then_allows_saving() {
+    use nostr_connect::prelude::*;
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let relay = rt.block_on(nostr_relay_builder::MockRelay::run()).unwrap();
+    let relay_url = rt.block_on(relay.url()).to_string();
+    let user = nostr_sdk::Keys::parse(&"01".repeat(32)).unwrap();
+    let signer = NostrConnectRemoteSigner::new(NostrConnectKeys { signer: nostr_sdk::Keys::generate(), user: user.clone() }, [relay_url.as_str()], None, None).unwrap();
+    let bunker = signer.bunker_uri().to_string();
+    rt.spawn(async move {
+        let _ = signer.serve(ApproveAll).await;
+    });
+    std::thread::sleep(Duration::from_millis(500));
+
+    let d = dir();
+    let mut h = boot(d.path(), Rc::new(MemKeychain::default()), env(FixtureNet::default()));
+    h.get_by_label("continue").click();
+    h.run();
+    h.run();
+    h.get_by_label_contains("nostr account").click();
+    h.run();
+    {
+        let f = h.state_mut().1.add_form().unwrap();
+        f.password = bunker.clone();
+        f.relays = relay_url.clone();
+    }
+    h.run();
+    assert!(h.query_by_label_contains("Connected to the bunker").is_none());
+    assert!(h.get_by_label("save and sync").accesskit_node().is_disabled());
+    h.get_by_label("connect bunker").click();
+    let npub = nostr_sdk::ToBech32::to_bech32(&user.public_key()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while h.query_by_label_contains(&npub).is_none() {
+        h.run_steps(3);
+        assert!(Instant::now() < deadline, "bunker never connected");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(h.get_by_label("save and sync").accesskit_node().is_disabled());
+    h.get_by_label("test connection").click();
+    until(&mut h, "test ok", |s| s.add_form().unwrap().test.all_ok());
+    assert!(!h.get_by_label("save and sync").accesskit_node().is_disabled());
+    let cfg = h.state_mut().1.add_form().unwrap().config().unwrap();
+    assert!(matches!(cfg.credential, mailbench::accounts::Credential::NostrBunker { .. }));
 }

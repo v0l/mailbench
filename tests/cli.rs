@@ -233,3 +233,51 @@ fn send_works_for_a_nostr_account_and_refuses_attachments() {
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].subject.as_deref(), Some("Hi Bob"));
 }
+
+struct ApproveAll;
+
+impl nostr_connect::prelude::NostrConnectSignerActions for ApproveAll {
+    fn approve(&self, _: &nostr_sdk::PublicKey, _: &nostr_connect::prelude::NostrConnectRequest) -> bool {
+        true
+    }
+}
+
+#[test]
+fn send_works_for_a_bunker_account_and_refuses_attachments() {
+    use nostr_connect::prelude::*;
+    use nostr_relay_builder::MockRelay;
+    let relay = block_on(MockRelay::run()).unwrap();
+    let url = block_on(relay.url()).to_string();
+    let alice = nostr_sdk::Keys::parse(&"01".repeat(32)).unwrap();
+    let signer = NostrConnectRemoteSigner::new(NostrConnectKeys { signer: nostr_sdk::Keys::generate(), user: alice.clone() }, [url.as_str()], None, None).unwrap();
+    let bunker = signer.bunker_uri().to_string();
+    mailbench::runtime::spawn(async move {
+        let _ = signer.serve(ApproveAll).await;
+    });
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let mut bob = NostrBackend::new(NostrConfig::new(&"02".repeat(32), vec![url.clone()])).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::create(&dir.path().join("mail.db"), None, Some(("pw", KdfParams::fast()))).unwrap();
+    let cfg = block_on(accounts::nostr_bunker_config(&bunker, vec![url.clone()])).unwrap();
+    accounts::save(&store, &cfg).unwrap();
+    drop(store);
+
+    let body = dir.path().join("body.txt");
+    std::fs::write(&body, "hello via bunker").unwrap();
+    let file = dir.path().join("f.bin");
+    std::fs::write(&file, b"x").unwrap();
+    let to = bob.address();
+    let refused = mailbench(dir.path(), &["send", "--to", &to, "--subject", "Hi", "--body-file", body.to_str().unwrap(), "--attach", file.to_str().unwrap()]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("cannot send attachments"));
+
+    let out = mailbench(dir.path(), &["send", "--to", &to, "--subject", "Hi Bob", "--body-file", body.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let state = block_on(bob.open_folder("Inbox")).unwrap();
+    let got = block_on(bob.fetch_summaries("Inbox", &state.uids)).unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].subject.as_deref(), Some("Hi Bob"));
+    assert_eq!(got[0].from[0].address, cfg.address);
+}

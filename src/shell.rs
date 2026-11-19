@@ -298,7 +298,7 @@ impl TestRun {
                 let _ = tx.send((step, result));
                 ctx.request_repaint();
             });
-            if ok && matches!(cfg.credential, Credential::Nostr { .. }) && accounts::nostr_lacks_inbox_list(&cfg) {
+            if ok && matches!(cfg.credential, Credential::Nostr { .. } | Credential::NostrBunker { .. }) && accounts::nostr_lacks_inbox_list(&cfg) {
                 missing.store(true, std::sync::atomic::Ordering::SeqCst);
             }
             ctx.request_repaint();
@@ -477,6 +477,9 @@ impl AddForm {
                     _ => return Err("Connect to the bunker first".into()),
                 };
                 let mut cfg = accounts::nostr_bunker_account(&url, &self.app_key, &user, relays).map_err(|e| e.to_string())?;
+                if let Credential::NostrBunker { publish_inbox, .. } = &mut cfg.credential {
+                    *publish_inbox = self.publish_inbox == Some(true);
+                }
                 cfg.id = self.id.clone();
                 return Ok(cfg);
             }
@@ -667,8 +670,9 @@ impl AddForm {
                     });
                     if self.is_bunker() {
                         let connected = matches!(&self.bunker_user, Some((u, _)) if *u == self.password.trim());
-                        if connected {
-                            status(ui, true, "Connected to the bunker. No nsec is stored.");
+                        if let (true, Some((_, user))) = (connected, &self.bunker_user) {
+                            let npub = nostr_sdk::PublicKey::from_hex(user).ok().and_then(|k| nostr_sdk::ToBech32::to_bech32(&k).ok()).unwrap_or_else(|| user.clone());
+                            status(ui, true, &format!("Connected to the bunker as {npub}. No nsec is stored."));
                         } else if self.bunker_rx.is_some() {
                             hint(ui, "Waiting for the bunker to approve. Check your signer app.");
                         } else {
