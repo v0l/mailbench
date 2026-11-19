@@ -30,6 +30,7 @@ pub(super) struct SearchJob {
 
 pub(super) struct View {
     parsed: Parsed,
+    plain: bool,
     hits: Option<Arc<HashSet<u64>>>,
     remote: Arc<HashSet<u64>>,
 }
@@ -48,7 +49,7 @@ pub(super) fn matches_row(c: &super::Cache, e: &Entry, q: &Query, v: &View) -> b
     if !e.head {
         return false;
     }
-    if v.parsed.is_empty() {
+    if v.plain {
         return e.folder == q.folder
             && match q.filter {
                 Filter::All => true,
@@ -120,7 +121,8 @@ impl Shared {
     pub(super) fn search_view(&self, query: &Query) -> View {
         let parsed = Parsed::parse(&query.text);
         if !parsed.has_text() {
-            return View { parsed, hits: None, remote: Default::default() };
+            let plain = parsed.is_empty();
+            return View { parsed, plain, hits: None, remote: Default::default() };
         }
         let epoch = self.index_epoch.load(Ordering::SeqCst);
         let mut st = lock(&self.search);
@@ -138,7 +140,7 @@ impl Shared {
                 st.running = false;
             }
         }
-        View { parsed, hits: st.hits.clone(), remote: st.remote.clone() }
+        View { parsed, plain: false, hits: st.hits.clone(), remote: st.remote.clone() }
     }
 
     pub(super) fn searching(&self, query: &Query) -> bool {
