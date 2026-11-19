@@ -157,6 +157,7 @@ fn caps_of(raw: &async_imap::types::Capabilities) -> Capabilities {
         condstore: raw.has_str("CONDSTORE") || raw.has_str("QRESYNC"),
         qresync: raw.has_str("QRESYNC"),
         uidplus: raw.has_str("UIDPLUS"),
+        gmail_ext: raw.has_str("X-GM-EXT-1"),
         send: false,
     }
 }
@@ -267,6 +268,58 @@ fn flag_list(flags: &Flags) -> String {
     }
     out.extend(flags.keywords.iter().cloned());
     format!("({})", out.join(" "))
+}
+
+fn gmail_item(caps: &Capabilities) -> &'static str {
+    if caps.gmail_ext { " X-GM-LABELS" } else { "" }
+}
+
+fn parse_fetch_flags(f: &Fetch) -> Flags {
+    let mut flags = parse_flags(f.flags());
+    if let Some(labels) = f.gmail_labels() {
+        flags.labels = user_labels(labels.iter().map(|l| l.as_ref()));
+    }
+    flags
+}
+
+fn user_labels<'a>(raw: impl Iterator<Item = &'a str>) -> Vec<String> {
+    raw.filter(|l| !l.starts_with('\\')).map(decode_mutf7).collect()
+}
+
+fn decode_mutf7(s: &str) -> String {
+    const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+,";
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i + 1..];
+        let Some(end) = tail.find('-') else {
+            out.push_str(&rest[i..]);
+            return out;
+        };
+        let body = &tail[..end];
+        if body.is_empty() {
+            out.push('&');
+        } else {
+            let mut bits = 0u32;
+            let mut n = 0;
+            let mut units: Vec<u16> = Vec::new();
+            for c in body.bytes() {
+                let Some(v) = B64.iter().position(|b| *b == c) else { continue };
+                bits = (bits << 6) | v as u32;
+                n += 6;
+                if n >= 16 {
+                    n -= 16;
+                    units.push((bits >> n) as u16);
+                    bits &= (1 << n) - 1;
+                }
+            }
+            out.push_str(&String::from_utf16_lossy(&units));
+        }
+        rest = &tail[end + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 fn parse_flags<'a>(flags: impl Iterator<Item = Flag<'a>>) -> Flags {
@@ -422,16 +475,17 @@ impl Backend for ImapBackend {
         if uids.is_empty() {
             return Ok(Vec::new());
         }
+        let caps = self.ensure().await?;
         self.select(folder).await?;
         let set = uid_set(uids);
         let s = self.session();
         timed!(self, async {
-            let query = format!("(UID FLAGS RFC822.SIZE {HEADER_FIELDS})");
+            let query = format!("(UID FLAGS{} RFC822.SIZE {HEADER_FIELDS})", gmail_item(&caps));
             let stream = s.uid_fetch(&set, &query).await?;
             let fetches: Vec<Fetch> = stream.try_collect().await?;
             let mut out: Vec<MessageSummary> = fetches
                 .iter()
-                .filter_map(|f| Some(summarize(f.uid?, parse_flags(f.flags()), f.size, header_bytes(f))))
+                .filter_map(|f| Some(summarize(f.uid?, parse_fetch_flags(f), f.size, header_bytes(f))))
                 .collect();
             out.sort_by_key(|m| m.uid);
             Ok::<_, BackendError>(out)
@@ -445,15 +499,16 @@ impl Backend for ImapBackend {
         let caps = self.ensure().await?;
         self.select(folder).await?;
         let range = format!("1:{}", below - 1);
+        let items = format!("UID FLAGS{}", gmail_item(&caps));
         let query = match (caps.condstore, since_mod_seq) {
-            (true, Some(m)) => format!("(UID FLAGS) (CHANGEDSINCE {m})"),
-            _ => "(UID FLAGS)".to_string(),
+            (true, Some(m)) => format!("({items}) (CHANGEDSINCE {m})"),
+            _ => format!("({items})"),
         };
         let s = self.session();
         timed!(self, async {
             let fetches: Vec<Fetch> = s.uid_fetch(&range, &query).await?.try_collect().await?;
             let mut out: Vec<(u32, Flags)> =
-                fetches.iter().filter_map(|f| Some((f.uid?, parse_flags(f.flags())))).filter(|(u, _)| *u < below).collect();
+                fetches.iter().filter_map(|f| Some((f.uid?, parse_fetch_flags(f)))).filter(|(u, _)| *u < below).collect();
             out.sort_by_key(|(u, _)| *u);
             Ok::<_, BackendError>(out)
         })
@@ -614,5 +669,42 @@ mod tests {
         assert_eq!(uid_set(&[5, 1, 2, 3, 9, 10, 12]), "1:3,5,9:10,12");
         assert_eq!(uid_set(&[7]), "7");
         assert_eq!(uid_set(&[]), "");
+    }
+
+    #[test]
+    fn gmail_labels_are_requested_only_with_the_extension() {
+        assert_eq!(gmail_item(&Capabilities::default()), "");
+        assert_eq!(gmail_item(&Capabilities { gmail_ext: true, ..Default::default() }), " X-GM-LABELS");
+    }
+
+    fn labels_in(response: &[u8]) -> Vec<String> {
+        use async_imap::imap_proto::{AttributeValue, Response};
+        let (_, parsed) = Response::parse(response).unwrap();
+        let Response::Fetch(_, attrs) = parsed else { panic!("not a fetch") };
+        attrs
+            .iter()
+            .find_map(|a| match a {
+                AttributeValue::GmailLabels(l) => Some(user_labels(l.iter().map(|c| c.as_ref()))),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn x_gm_labels_response_keeps_user_labels_decoded() {
+        let raw = b"* 7 FETCH (UID 4412 X-GM-LABELS (\\Inbox \\Important Receipts \"Bench Night\" \"&AOk-t&AOk-\" \"&2D3eAA- fun\" \"A &- B\") FLAGS (\\Seen))\r\n";
+        assert_eq!(labels_in(raw), ["Receipts", "Bench Night", "\u{e9}t\u{e9}", "\u{1f600} fun", "A & B"]);
+    }
+
+    #[test]
+    fn x_gm_labels_empty_when_only_system_labels() {
+        assert!(labels_in(b"* 1 FETCH (X-GM-LABELS (\\Inbox \\Sent))\r\n").is_empty());
+    }
+
+    #[test]
+    fn stored_flags_without_labels_still_decode() {
+        let old = r#"{"seen":true,"answered":false,"flagged":false,"deleted":false,"draft":false,"keywords":[]}"#;
+        let flags: Flags = serde_json::from_str(old).unwrap();
+        assert!(flags.labels.is_empty());
     }
 }

@@ -61,6 +61,7 @@ struct Entry {
     date: i64,
     unread: bool,
     flagged: bool,
+    labels: Vec<String>,
     attachments: bool,
     search_key: String,
     thread: u64,
@@ -194,6 +195,16 @@ impl Cache {
             counts.unread += e.thread_unread as usize;
             counts.flagged += e.thread_flagged as usize;
         }
+    }
+
+    fn labels(&self) -> Vec<LabelInfo> {
+        let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        for e in &self.entries {
+            for l in &e.labels {
+                *counts.entry(l.as_str()).or_default() += e.unread as usize;
+            }
+        }
+        counts.into_iter().map(|(name, unread)| LabelInfo { name: name.to_string(), unread }).collect()
     }
 
     fn tree(&self) -> Vec<TreeFolder> {
@@ -817,6 +828,7 @@ impl Shared {
             date: msg.date,
             unread: false,
             flagged: false,
+            labels: Vec::new(),
             attachments: !msg.attachments.is_empty(),
             message_id: msg.message_id.clone(),
             refs: msg.references.clone(),
@@ -1077,6 +1089,7 @@ impl Shared {
                         date: m.date.unwrap_or(0),
                         unread: flag_ops.get(&(stored_name.clone(), m.uid)).and_then(|f| f.0).map(|s| !s).unwrap_or(!m.flags.seen),
                         flagged: flag_ops.get(&(stored_name.clone(), m.uid)).and_then(|f| f.1).unwrap_or(m.flags.flagged),
+                        labels: m.flags.labels.clone(),
                         attachments,
                         thread: id,
                         head: true,
@@ -1133,6 +1146,7 @@ impl Shared {
                 date: msg.date,
                 unread: false,
                 flagged: false,
+                labels: Vec::new(),
                 attachments: !msg.attachments.is_empty(),
                 message_id: msg.message_id.clone(),
                 refs: msg.references.clone(),
@@ -1461,7 +1475,7 @@ impl MailStore for RealStore {
     }
 
     fn labels(&self) -> Vec<LabelInfo> {
-        Vec::new()
+        self.shared.with_cache(|c| c.labels())
     }
 
     fn tree(&self) -> Vec<TreeFolder> {
@@ -2075,5 +2089,57 @@ impl MailStore for RealStore {
 
     fn send_hold(&self) -> Duration {
         *lock(&self.shared.hold)
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+
+    fn entry(labels: &[&str], unread: bool) -> Entry {
+        Entry {
+            id: 0,
+            account: 0,
+            folder: ms::Folder::Inbox,
+            server_folder: String::new(),
+            uid: 0,
+            validity: 0,
+            local: None,
+            from: String::new(),
+            from_address: String::new(),
+            to: Vec::new(),
+            cc: Vec::new(),
+            subject: String::new(),
+            date: 0,
+            unread,
+            flagged: false,
+            labels: labels.iter().map(|l| l.to_string()).collect(),
+            attachments: false,
+            search_key: String::new(),
+            thread: 0,
+            head: true,
+            count: 1,
+            thread_unread: false,
+            thread_flagged: false,
+            to_key: String::new(),
+            message_id: None,
+            refs: Vec::new(),
+            wake: None,
+        }
+    }
+
+    #[test]
+    fn labels_lists_one_entry_per_label_with_unread_counts() {
+        let cache = Cache {
+            entries: vec![
+                entry(&["Receipts", "Bench Night"], true),
+                entry(&["Receipts"], false),
+                entry(&["Receipts"], true),
+                entry(&[], true),
+            ],
+            ..Default::default()
+        };
+        let got: Vec<(String, usize)> = cache.labels().into_iter().map(|l| (l.name, l.unread)).collect();
+        assert_eq!(got, [("Bench Night".to_string(), 1), ("Receipts".to_string(), 2)]);
     }
 }

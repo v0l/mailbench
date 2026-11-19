@@ -35,6 +35,7 @@ pub struct Parsed {
     pub unread: Option<bool>,
     pub flagged: Option<bool>,
     pub folder: Option<String>,
+    pub label: Option<String>,
     pub before: Option<i64>,
     pub after: Option<i64>,
 }
@@ -132,6 +133,10 @@ impl Parsed {
                 }
                 ("in", v) => {
                     p.folder = Some(v.into());
+                    true
+                }
+                ("label", v) => {
+                    p.label = Some(v.into());
                     true
                 }
                 ("before", v) => match parse_date(v) {
@@ -293,5 +298,17 @@ mod tests {
     fn highlights_cover_terms_phrases_and_fields() {
         let p = Parsed::parse("rover from:mara \"gear box\"");
         assert_eq!(p.highlights(), ["rover", "gear box", "mara"]);
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+
+    #[test]
+    fn label_operator_keeps_quoted_names_whole() {
+        assert_eq!(Parsed::parse("label:receipts").label.as_deref(), Some("receipts"));
+        assert_eq!(Parsed::parse("label:\"Bench Night\"").label.as_deref(), Some("bench night"));
+        assert!(!Parsed::parse("label:receipts").has_text());
     }
 }
