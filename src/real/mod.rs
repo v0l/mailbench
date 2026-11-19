@@ -288,6 +288,8 @@ pub(crate) struct Shared {
     search_tx: Mutex<Option<std::sync::mpsc::Sender<search::SearchJob>>>,
     index_epoch: AtomicU64,
     policies: Mutex<Vec<crate::search::BackfillPolicy>>,
+    body_policy: Mutex<crate::prefs::BodyPolicy>,
+    sync_opts: Mutex<Vec<crate::accounts::SyncOptions>>,
     progress: Mutex<Vec<Option<(usize, usize)>>>,
     backfill_wake: Mutex<Vec<Arc<tokio::sync::Notify>>>,
     wake: Condvar,
@@ -1313,6 +1315,8 @@ impl RealStore {
             search_tx: Mutex::new(None),
             index_epoch: AtomicU64::new(0),
             policies: Mutex::new(vec![Default::default(); accounts.len()]),
+            body_policy: Mutex::new(Default::default()),
+            sync_opts: Mutex::new(vec![Default::default(); accounts.len()]),
             progress: Mutex::new(vec![None; accounts.len()]),
             backfill_wake: Mutex::new(Vec::new()),
             contacts: Mutex::new(HashMap::new()),
@@ -1383,6 +1387,16 @@ impl RealStore {
         if let Some(w) = lock(&self.shared.backfill_wake).get(i) {
             w.notify_one();
         }
+    }
+
+    pub fn set_body_policy(&self, policy: crate::prefs::BodyPolicy) {
+        *lock(&self.shared.body_policy) = policy;
+    }
+
+    pub fn set_sync_options(&self, account: &str, options: crate::accounts::SyncOptions) {
+        let Some(i) = self.shared.index_of(account) else { return };
+        lock(&self.shared.sync_opts)[i] = options;
+        self.shared.kick(i);
     }
 
     pub fn attach(&self, ctx: &egui::Context) {

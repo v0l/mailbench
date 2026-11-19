@@ -758,3 +758,57 @@ fn trusting_a_sender_loads_images_without_asking_again() {
     assert!(h.query_by_label_contains("REMOTE IMAGES BLOCKED").is_none());
     assert_eq!(h.state().1.trusted.len(), 1);
 }
+
+#[test]
+fn rebound_archive_key_archives_and_the_hint_bar_shows_it() {
+    let mut h = harness(FakeStore::concept());
+    h.state_mut().1.prefs.keys.set("archive", egui::Key::B).unwrap();
+    h.run();
+    h.get_by_label_contains("archive");
+    let first = inbox_ids(&h.state().1)[0];
+    h.key_press(egui::Key::E);
+    h.run();
+    assert!(inbox_ids(&h.state().1).contains(&first));
+    h.key_press(egui::Key::B);
+    h.run();
+    assert!(!inbox_ids(&h.state().1).contains(&first));
+}
+
+#[test]
+fn never_policy_hides_the_load_once_button() {
+    let mut h = harness(FakeStore::concept());
+    h.state_mut().1.prefs.reading.remote_images = mailbench::prefs::RemoteImages::Never;
+    h.run();
+    h.run();
+    h.get_by_label_contains("REMOTE IMAGES BLOCKED");
+    assert!(h.query_by_label("load once").is_none());
+}
+
+#[test]
+fn trusted_only_policy_hides_the_load_once_button_but_keeps_trust_choices() {
+    let mut h = harness(FakeStore::concept());
+    h.state_mut().1.prefs.reading.remote_images = mailbench::prefs::RemoteImages::Trusted;
+    h.run();
+    h.run();
+    assert!(h.query_by_label("load once").is_none());
+    h.get_by_label("always from sender");
+}
+
+#[test]
+fn compact_density_fits_more_rows_than_comfortable() {
+    let mut h = harness(FakeStore::bulk(10_000));
+    let comfortable = h.state().1.rendered_rows;
+    h.state_mut().1.prefs.density = mailbench::prefs::Density::Compact;
+    h.run();
+    h.run();
+    assert!(h.state().1.rendered_rows > comfortable, "{} vs {comfortable}", h.state().1.rendered_rows);
+}
+
+#[test]
+fn default_reading_zoom_seeds_the_html_zoom() {
+    let mut h = harness(FakeStore::concept());
+    h.state_mut().1.html_state.default_zoom = 1500;
+    h.run();
+    h.run();
+    assert!(h.state().1.html_state.zoom.values().all(|z| *z == 1500));
+}

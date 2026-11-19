@@ -1,5 +1,5 @@
 use super::model::*;
-use super::{Outbound, Shared};
+use super::{Outbound, Shared, lock};
 use crate::backend::*;
 use crate::mailstore::SyncState;
 use std::sync::Arc;
@@ -20,6 +20,7 @@ struct LockedSink {
     fresh: bool,
     inbox: String,
     reset: bool,
+    keep_bodies: bool,
 }
 
 impl LockedSink {
@@ -33,7 +34,7 @@ impl LockedSink {
 
     fn with<T>(&self, f: impl FnOnce(&mut StoreSink<'_>) -> Result<T>) -> Result<T> {
         let guard = self.shared.lock_store();
-        let mut sink = StoreSink::new(&guard, &self.account, true);
+        let mut sink = StoreSink::new(&guard, &self.account, self.keep_bodies);
         f(&mut sink)
     }
 }
@@ -305,6 +306,7 @@ async fn cycle(shared: &Arc<Shared>, index: usize, account: &str, backend: &mut 
         fresh: false,
         inbox: inbox_name(shared, account),
         reset: false,
+        keep_bodies: *lock(&shared.body_policy) != crate::prefs::BodyPolicy::HeadersOnly,
     };
     queue_wakes(shared, account);
     let mut done = Vec::new();
@@ -317,7 +319,8 @@ async fn cycle(shared: &Arc<Shared>, index: usize, account: &str, backend: &mut 
         shared.remove_ops(&folder_ops);
         return Err(e);
     }
-    let synced = sync_account(backend, &mut sink).await;
+    let filter = lock(&shared.sync_opts)[index].filter(shared.now_secs());
+    let synced = sync_account_with(backend, &mut sink, &filter).await;
     shared.remove_ops(&folder_ops);
     synced?;
     if sink.fresh {
@@ -417,7 +420,12 @@ pub(super) async fn run(
             Err(e) => shared.set_state(index, SyncState::Failed, Some(e.to_string())),
         }
         shared.refresh();
-        let wait = next_wait(&shared, &account, if result.is_ok() { POLL } else { RETRY });
+        let polling = lock(&shared.sync_opts)[index].poll();
+        let wait = next_wait(&shared, &account, match (&result, watch.is_some()) {
+            (Ok(()), true) => POLL,
+            (Ok(()), false) => polling,
+            _ => RETRY,
+        });
         let changed = async {
             match watch.as_mut() {
                 Some(w) => {

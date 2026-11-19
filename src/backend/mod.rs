@@ -13,7 +13,7 @@ pub use memory::MemorySink;
 pub use nostr_dm::*;
 pub use smtp::{bracket, build_message, new_message_id_for, render_message, SmtpBackend, SmtpConfig, SmtpSecurity};
 pub use store_sink::StoreSink;
-pub use sync::{SyncReport, SyncSink, sync_account};
+pub use sync::{SyncFilter, SyncReport, SyncSink, sync_account, sync_account_with};
 pub use types::*;
 
 use async_trait::async_trait;

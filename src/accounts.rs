@@ -29,6 +29,45 @@ pub enum Credential {
     },
 }
 
+pub const DEFAULT_POLL_SECONDS: u32 = 60;
+pub const MIN_POLL_SECONDS: u32 = 15;
+const SECONDS_PER_MONTH: i64 = 30 * 86_400;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncOptions {
+    #[serde(default)]
+    pub excluded_folders: Vec<String>,
+    #[serde(default)]
+    pub window_months: u32,
+    #[serde(default)]
+    pub poll_seconds: u32,
+}
+
+impl SyncOptions {
+    pub fn poll(&self) -> std::time::Duration {
+        let secs = if self.poll_seconds == 0 { DEFAULT_POLL_SECONDS } else { self.poll_seconds.max(MIN_POLL_SECONDS) };
+        std::time::Duration::from_secs(secs as u64)
+    }
+
+    pub fn filter(&self, now: i64) -> SyncFilter {
+        SyncFilter {
+            excluded: self.excluded_folders.clone(),
+            since: (self.window_months > 0).then(|| now - self.window_months as i64 * SECONDS_PER_MONTH),
+        }
+    }
+
+    pub fn syncs(&self, folder: &str) -> bool {
+        !self.excluded_folders.iter().any(|f| f == folder)
+    }
+
+    pub fn set_syncs(&mut self, folder: &str, on: bool) {
+        self.excluded_folders.retain(|f| f != folder);
+        if !on {
+            self.excluded_folders.push(folder.to_string());
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountConfig {
     pub id: String,
@@ -44,6 +83,14 @@ pub struct AccountConfig {
     pub backfill: crate::search::BackfillPolicy,
     #[serde(default)]
     pub notify: crate::notify::NotifyPrefs,
+    #[serde(default)]
+    pub sync: SyncOptions,
+}
+
+impl AccountConfig {
+    pub fn is_nostr(&self) -> bool {
+        matches!(self.credential, Credential::Nostr { .. } | Credential::NostrBunker { .. })
+    }
 }
 
 pub fn new_id() -> String {
@@ -243,6 +290,7 @@ pub fn nostr_bunker_account(url: &str, app_key: &str, user_hex: &str, relays: Ve
         credential,
         backfill: Default::default(),
         notify: Default::default(),
+        sync: Default::default(),
     })
 }
 
@@ -262,6 +310,7 @@ pub fn nostr_config(secret: &str, relays: Vec<String>) -> Result<AccountConfig> 
         credential: Credential::Nostr { secret: secret.trim().to_string(), relays, publish_inbox: false },
         backfill: Default::default(),
         notify: Default::default(),
+        sync: Default::default(),
     })
 }
 
@@ -388,6 +437,7 @@ mod tests {
             credential: Credential::Password("x".into()),
             backfill: Default::default(),
             notify: Default::default(),
+            sync: Default::default(),
         }
     }
 

@@ -1,6 +1,7 @@
 use crate::fake::FakeStore;
 use crate::kit::*;
 use crate::mailstore::*;
+use crate::prefs::RemoteImages;
 use egui::{Margin, Ui};
 use egui_bench::prelude::*;
 use std::collections::HashSet;
@@ -469,6 +470,8 @@ pub struct App {
     pub thread_focus: Option<MessageId>,
     pub settings_requested: bool,
     pub allow_open: bool,
+    pub prefs: crate::prefs::Prefs,
+    applied_theme: Option<crate::prefs::Theme>,
     pub open_dir: std::path::PathBuf,
     pub save_picker: SavePicker,
     pub opener: Box<dyn FnMut(&std::path::Path) -> bool>,
@@ -522,6 +525,8 @@ impl App {
             thread_focus: None,
             settings_requested: false,
             allow_open: true,
+            prefs: Default::default(),
+            applied_theme: None,
             open_dir: crate::attach::default_open_dir(),
             save_picker: rfd_picker(),
             opener: Box::new(|p| open::that(p).is_ok()),
@@ -597,23 +602,25 @@ impl App {
             return Vec::new();
         }
         let plain = ctx.input(|i| !i.modifiers.shift);
+        let keys = &self.prefs.keys;
         let table: [(K, Action); 15] = [
-            (K::J, Action::Next),
+            (keys.key_for("next"), Action::Next),
             (K::ArrowDown, Action::Next),
-            (K::K, Action::Previous),
+            (keys.key_for("previous"), Action::Previous),
             (K::ArrowUp, Action::Previous),
-            (K::Enter, Action::Open),
-            (K::E, Action::Archive),
-            (K::S, Action::Snooze),
-            (K::X, Action::ToggleFlag),
-            (K::U, Action::ToggleUnread),
-            (K::R, Action::Reply(Reply::One)),
-            (K::A, Action::Reply(Reply::All)),
-            (K::F, Action::Reply(Reply::Forward)),
-            (K::C, Action::Compose),
-            (K::M, Action::OpenMove),
-            (K::Slash, Action::Search),
+            (keys.key_for("open"), Action::Open),
+            (keys.key_for("archive"), Action::Archive),
+            (keys.key_for("snooze"), Action::Snooze),
+            (keys.key_for("flag"), Action::ToggleFlag),
+            (keys.key_for("unread"), Action::ToggleUnread),
+            (keys.key_for("reply"), Action::Reply(Reply::One)),
+            (keys.key_for("reply_all"), Action::Reply(Reply::All)),
+            (keys.key_for("forward"), Action::Reply(Reply::Forward)),
+            (keys.key_for("compose"), Action::Compose),
+            (keys.key_for("move"), Action::OpenMove),
+            (keys.key_for("search"), Action::Search),
         ];
+        let snooze_key = keys.key_for("snooze");
         let mut out = Vec::new();
         if self.star_pending {
             if ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. }))) {
@@ -664,7 +671,7 @@ impl App {
             return out;
         }
         for (key, action) in table {
-            if key == K::S && !plain {
+            if key == snooze_key && !plain {
                 continue;
             }
             if !plain && matches!(key, K::J | K::K | K::ArrowDown | K::ArrowUp) {
@@ -1109,6 +1116,10 @@ impl App {
 
     pub fn show(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
+        if self.applied_theme != Some(self.prefs.theme) {
+            ctx.set_theme(self.prefs.theme.preference());
+            self.applied_theme = Some(self.prefs.theme);
+        }
         self.follow_notification();
         let keys = self.key_actions(&ctx);
         self.apply(&ctx, keys);
@@ -1191,29 +1202,16 @@ impl App {
                 None => ("synced 09:41", TRACE),
             };
             let count = self.marked.len().to_string();
-            let mut items: Vec<(&str, &str)> = Vec::new();
+            let mut items: Vec<(String, String)> = Vec::new();
             if !self.marked.is_empty() {
-                items.push((&count, "selected"));
+                items.push((count, "selected".into()));
             }
-            items.extend([
-                ("j k", "move"),
-                ("J K", "extend"),
-                ("*a", "all"),
-                ("*n", "none"),
-                ("I", "all read"),
-                ("z", "undo"),
-                ("Enter", "open"),
-                ("e", "archive"),
-                ("r", "reply"),
-                ("s", "snooze"),
-                ("x", "flag"),
-                ("/", "search"),
-                ("m", "move"),
-                ("c", "compose"),
-                ("o", "open file"),
-                ("S", "save files"),
-                ("Esc", "back"),
-            ]);
+            items.extend(
+                [("J K", "extend"), ("*a", "all"), ("*n", "none"), ("I", "all read"), ("z", "undo")]
+                    .map(|(k, a)| (k.to_string(), a.to_string())),
+            );
+            items.extend(self.prefs.keys.hint_items());
+            let items: Vec<(&str, &str)> = items.iter().map(|(k, a)| (k.as_str(), a.as_str())).collect();
             keycap_bar(ui, &items, Some((text, tint)));
         });
     }
@@ -1747,11 +1745,12 @@ impl App {
         let mut painted = 0;
         let mut clicked = None;
         let mut opened = None;
+        let row_h = self.prefs.density.row_height();
         egui::ScrollArea::vertical().auto_shrink([false, false]).show_viewport(ui, |ui, viewport| {
             let total = v.total;
-            ui.set_height(total as f32 * ROW_H);
-            let first = (viewport.min.y / ROW_H).floor().max(0.0) as usize;
-            let last = ((viewport.max.y / ROW_H).ceil() as usize + 1).min(total);
+            ui.set_height(total as f32 * row_h);
+            let first = (viewport.min.y / row_h).floor().max(0.0) as usize;
+            let last = ((viewport.max.y / row_h).ceil() as usize + 1).min(total);
             let page = self.store.list(&v.query, first, last.saturating_sub(first));
             let origin = ui.min_rect().min;
             let width = ui.available_width();
@@ -1759,8 +1758,8 @@ impl App {
             for (n, s) in page.items.iter().enumerate() {
                 let i = first + n;
                 let rect = egui::Rect::from_min_size(
-                    origin + egui::vec2(0.0, i as f32 * ROW_H),
-                    egui::vec2(width, ROW_H),
+                    origin + egui::vec2(0.0, i as f32 * row_h),
+                    egui::vec2(width, row_h),
                 );
                 let resp = ui.interact(rect, ui.id().with(("row", i)), egui::Sense::click());
                 let name = accounts.get(s.account).map(|a| a.name.as_str());
@@ -1785,8 +1784,8 @@ impl App {
             }
             if scroll_to {
                 let rect = egui::Rect::from_min_size(
-                    origin + egui::vec2(0.0, selected as f32 * ROW_H),
-                    egui::vec2(width, ROW_H),
+                    origin + egui::vec2(0.0, selected as f32 * row_h),
+                    egui::vec2(width, row_h),
                 );
                 ui.scroll_to_rect(rect, None);
             }
@@ -1824,7 +1823,7 @@ impl App {
         self.sync_previews(&ui.ctx().clone(), m);
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.set_max_width(ui.available_width().min(if m.html.is_empty() { MEASURE + 44.0 } else { 820.0 }));
-            ui.spacing_mut().item_spacing.y = 8.0;
+            ui.spacing_mut().item_spacing.y = self.prefs.density.reader_gap();
             subject_line(ui, &m.summary.subject);
             let shown_at = v.thread.iter().position(|t| t.summary.id == m.summary.id).unwrap_or(v.thread.len());
             for t in v.thread.iter().take(shown_at) {
@@ -1879,12 +1878,14 @@ impl App {
                 }
                 BodyState::Ready => {}
             }
+            let policy = self.prefs.reading.remote_images;
             let trust = trust_keys(&m.from_address);
-            let trusted = trust.iter().any(|k| self.trusted.contains(k));
+            let trusted = policy != RemoteImages::Never && trust.iter().any(|k| self.trusted.contains(k));
+            let may_load = policy == RemoteImages::Ask;
             if let Some(host) = &m.remote_images {
-                if !self.images_loaded.contains(&m.summary.id) && !trusted {
+                if !(may_load && self.images_loaded.contains(&m.summary.id)) && !trusted {
                     let domain = trust[1].trim_start_matches("domain:");
-                    match blocked_images(ui, host, &m.from_address, domain) {
+                    match blocked_images(ui, host, &m.from_address, domain, policy) {
                         Some(ImageChoice::Once) => actions.push(Action::LoadImagesOnce),
                         Some(ImageChoice::Sender) => actions.push(Action::TrustImages(trust[0].clone())),
                         Some(ImageChoice::Domain) => actions.push(Action::TrustImages(trust[1].clone())),
@@ -1897,7 +1898,7 @@ impl App {
             }
             if m.html.is_empty() {
                 for p in &m.paragraphs {
-                    body_text(ui, p);
+                    body_text(ui, p, self.prefs.reading.zoom());
                     ui.add_space(4.0);
                 }
                 if quoted_fold(ui, m.quoted.len(), self.quotes_open) {
@@ -1909,7 +1910,7 @@ impl App {
                     }
                 }
             } else {
-                let remote = self.images_loaded.contains(&m.summary.id) || trusted;
+                let remote = trusted || (may_load && self.images_loaded.contains(&m.summary.id));
                 if let Some(find) = &mut self.html_state.find {
                     let count = self.html_state.match_count;
                     if find_bar(ui, find, count) {

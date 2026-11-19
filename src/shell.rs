@@ -517,6 +517,7 @@ impl AddForm {
             credential,
             backfill: Default::default(),
             notify: Default::default(),
+            sync: Default::default(),
         })
     }
 
@@ -837,11 +838,12 @@ pub struct SettingsForm {
     retest: Option<(String, TestRun)>,
     methods: UnlockMethods,
     pub allow_open: bool,
-    pub dark_reading: bool,
+    pub panels: crate::settings::Panels,
 }
 
 pub enum SettingsEvent {
     None,
+    Prefs,
     Close,
     Rebuild,
     AddAccount,
@@ -853,9 +855,10 @@ fn methods_of(store: &Store) -> UnlockMethods {
 }
 
 impl SettingsForm {
-    fn new(store: &Store) -> Self {
+    fn new(store: &Store, dir: &std::path::Path) -> Self {
         let drafts = accounts::load_all(store);
         SettingsForm {
+            panels: crate::settings::Panels::new(store, &drafts, crate::settings::default_backup_path(dir)),
             original: drafts.clone(),
             drafts,
             removing: None,
@@ -865,7 +868,6 @@ impl SettingsForm {
             retest: None,
             methods: methods_of(store),
             allow_open: allow_open_setting(store),
-            dark_reading: dark_reading_setting(store),
         }
     }
 
@@ -941,6 +943,7 @@ impl SettingsForm {
         let mut drop_password = false;
         let mut set_password = false;
         let mut allow_open_changed = false;
+        let mut prefs_event = false;
         let m = egui::Modal::new(egui::Id::new("settings"))
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .show(ctx, |ui| {
@@ -949,7 +952,7 @@ impl SettingsForm {
                 let w = ui.available_width();
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, true])
-                    .max_height((ctx.content_rect().height() * 0.7).clamp(320.0, 760.0))
+                    .max_height((ctx.content_rect().height() * 0.7).max(320.0))
                     .show(ui, |ui| {
                         ui.set_max_width(w);
                         for (i, draft) in self.drafts.iter_mut().enumerate() {
@@ -986,8 +989,9 @@ impl SettingsForm {
                                         ui.ctx().accesskit_node_builder(r.id, |node| node.set_label("size cap, 0 for none"));
                                     }
                                 });
+                                self.panels.account_sync(ui, draft, i);
                                 ui.horizontal(|ui| {
-                                    ui.checkbox(&mut draft.notify.enabled, "desktop notifications");
+                                    ui.checkbox(&mut draft.notify.enabled, "notifications");
                                     if draft.notify.enabled {
                                         let mut quiet = draft.notify.quiet.is_some();
                                         ui.checkbox(&mut quiet, "quiet hours");
@@ -1050,12 +1054,8 @@ impl SettingsForm {
                             }
                         });
                         ui.add_space(8.0);
-                        section(ui, "reading", "how HTML mail is drawn", |ui| {
-                            if ui.checkbox(&mut self.dark_reading, "dark background for mail that sets no colours").changed() {
-                                let _ = store.put(SETTINGS_KIND, DARK_READING_KEY, if self.dark_reading { b"1" } else { b"0" });
-                                allow_open_changed = true;
-                            }
-                        });
+                        let outcome = self.panels.show(ui, store, &self.drafts);
+                        prefs_event = outcome.prefs_changed;
                         ui.add_space(8.0);
                         section(ui, "attachments", "what happens when you open a file", |ui| {
                             if ui.checkbox(&mut self.allow_open, "allow open (writes a plain copy to a temp folder)").changed() {
@@ -1076,6 +1076,9 @@ impl SettingsForm {
             });
         if allow_open_changed {
             event = SettingsEvent::AllowOpen;
+        }
+        if prefs_event {
+            event = SettingsEvent::Prefs;
         }
         if let Some(i) = remove {
             self.removing = Some(i);
@@ -1162,12 +1165,7 @@ pub struct Shell {
 pub const SETTINGS_KIND: &str = "settings";
 pub const ALLOW_OPEN_KEY: &str = "attachments.allow_open";
 
-pub const DARK_READING_KEY: &str = "reading.dark";
 pub const IMAGE_TRUST_KIND: &str = "image-trust";
-
-pub fn dark_reading_setting(store: &Store) -> bool {
-    store.get(SETTINGS_KIND, DARK_READING_KEY).ok().flatten().map(|v| v.as_slice() == b"1").unwrap_or(false)
-}
 
 pub fn allow_open_setting(store: &Store) -> bool {
     store.get(SETTINGS_KIND, ALLOW_OPEN_KEY).ok().flatten().map(|v| v.as_slice() != b"0").unwrap_or(true)
@@ -1206,17 +1204,29 @@ impl Shell {
         shell
     }
 
+    fn apply_prefs(&mut self) {
+        let Some(store) = &self.store else { return };
+        let prefs = crate::prefs::load(store);
+        let rebuild = matches!(&self.screen, Screen::Main(m) if m.app.prefs.bodies != prefs.bodies);
+        if let Screen::Main(m) = &mut self.screen {
+            m.app.html_state.dark = prefs.reading.dark_html;
+            m.app.html_state.default_zoom = prefs.reading.zoom_milli();
+            m.app.prefs = prefs;
+        }
+        if rebuild {
+            self.build_main();
+        }
+    }
+
     fn apply_open_settings(&mut self) {
         let allow = self.store.as_ref().map(allow_open_setting).unwrap_or(true);
         let dir = self.open_dir.clone();
-        let dark = self.store.as_ref().map(dark_reading_setting).unwrap_or(false);
         let trusted: std::collections::HashSet<String> =
             self.store.as_ref().and_then(|s| s.list(IMAGE_TRUST_KIND).ok()).unwrap_or_default().into_iter().collect();
         let saver = self.store.as_ref().and_then(|s| s.try_clone().ok());
         if let Screen::Main(m) = &mut self.screen {
             m.app.allow_open = allow;
             m.app.open_dir = dir;
-            m.app.html_state.dark = dark;
             m.app.trusted = trusted;
             if let Some(saver) = saver {
                 m.app.trust_saver = Box::new(move |key| {
@@ -1282,13 +1292,20 @@ impl Shell {
         let setups: Vec<_> = configs.iter().filter_map(|c| accounts::setup_for(c, store).ok()).collect();
         let Ok(clone) = store.try_clone() else { return };
         let real = RealStore::open(clone, setups);
+        let prefs = crate::prefs::load(store);
+        real.set_body_policy(prefs.bodies);
         for c in &configs {
-            real.set_backfill(&c.id, c.backfill);
+            real.set_backfill(&c.id, prefs.bodies.effective_backfill(c.backfill));
+            real.set_sync_options(&c.id, c.sync.clone());
             real.set_signature(&c.id, &c.signature);
             real.set_notify(&c.id, c.notify);
         }
         real.set_notifier(std::sync::Arc::new(crate::notify::DesktopNotifier));
-        self.screen = Screen::Main(Box::new(Main { app: App::with_store(Box::new(real)) }));
+        let mut app = App::with_store(Box::new(real));
+        app.html_state.dark = prefs.reading.dark_html;
+        app.html_state.default_zoom = prefs.reading.zoom_milli();
+        app.prefs = prefs;
+        self.screen = Screen::Main(Box::new(Main { app }));
         self.apply_open_settings();
         self.attach();
     }
@@ -1349,7 +1366,7 @@ impl Shell {
 
     pub fn open_settings(&mut self) {
         if let Some(store) = &self.store {
-            self.settings = Some(SettingsForm::new(store));
+            self.settings = Some(SettingsForm::new(store, &self.dir));
         }
     }
 
@@ -1484,6 +1501,7 @@ impl Shell {
             SettingsEvent::None => {}
             SettingsEvent::Close => self.settings = None,
             SettingsEvent::AllowOpen => self.apply_open_settings(),
+            SettingsEvent::Prefs => self.apply_prefs(),
             SettingsEvent::Rebuild => {
                 self.build_main();
                 if matches!(self.screen, Screen::Add(..)) {

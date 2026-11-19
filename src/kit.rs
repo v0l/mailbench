@@ -143,10 +143,17 @@ pub struct FindState {
 pub struct HtmlState {
     pub zoom: std::collections::HashMap<u64, u32>,
     pub dark: bool,
+    pub default_zoom: u32,
     pub find: Option<FindState>,
     pub selection: Option<(crate::htmlview::TextPos, crate::htmlview::TextPos)>,
     pub selection_for: Option<crate::htmlview::RenderKey>,
     pub match_count: usize,
+}
+
+impl HtmlState {
+    fn base_zoom(&self) -> u32 {
+        if self.default_zoom == 0 { 1000 } else { self.default_zoom }
+    }
 }
 
 pub struct LinkClick {
@@ -224,7 +231,7 @@ pub fn html_body(
 ) -> Option<LinkClick> {
     let width = (ui.available_width().floor() as u32 / 16 * 16).max(160);
     let scale = ui.ctx().pixels_per_point();
-    let mut zoom = state.zoom.get(&id).copied().unwrap_or(1000);
+    let mut zoom = state.zoom.get(&id).copied().unwrap_or(state.base_zoom());
     if !ui.ctx().egui_wants_keyboard_input() {
         let (reset, inn, out) = ui.input_mut(|i| {
             (
@@ -234,7 +241,7 @@ pub fn html_body(
             )
         });
         if reset {
-            zoom = 1000;
+            zoom = state.base_zoom();
         } else if inn {
             zoom = zoom_step(zoom, true);
         } else if out {
@@ -385,10 +392,10 @@ fn paint_tiles(ui: &Ui, renderer: &crate::htmlview::Renderer, page: &std::sync::
     ui.ctx().data_mut(|d| d.insert_temp(cache_id, cache));
 }
 
-pub fn body_text(ui: &mut Ui, text: &str) {
+pub fn body_text(ui: &mut Ui, text: &str, zoom: f32) {
     ui.add(
         egui::Label::new(
-            egui::RichText::new(text).font(body(BODY_SIZE)).line_height(Some(BODY_LINE)).color(VALUE),
+            egui::RichText::new(text).font(body(BODY_SIZE * zoom)).line_height(Some(BODY_LINE * zoom)).color(VALUE),
         )
         .wrap(),
     );
@@ -422,19 +429,22 @@ pub enum ImageChoice {
     Domain,
 }
 
-pub fn blocked_images(ui: &mut Ui, host: &str, sender: &str, domain: &str) -> Option<ImageChoice> {
+pub fn blocked_images(ui: &mut Ui, host: &str, sender: &str, domain: &str, policy: crate::prefs::RemoteImages) -> Option<ImageChoice> {
     let mut choice = None;
     rail_block(ui, WARN, WARN.gamma_multiply(0.12), |ui| {
         ui.horizontal(|ui| {
             ui.label(legend("remote images blocked").color(WARN));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if policy == crate::prefs::RemoteImages::Never {
+                    return;
+                }
                 if ui.add(Key::new("always from domain").outline(WARN)).on_hover_text(format!("Always load images in mail from {domain}")).clicked() {
                     choice = Some(ImageChoice::Domain);
                 }
                 if ui.add(Key::new("always from sender").outline(WARN)).on_hover_text(format!("Always load images in mail from {sender}")).clicked() {
                     choice = Some(ImageChoice::Sender);
                 }
-                if ui.add(Key::new("load once").outline(WARN)).clicked() {
+                if policy == crate::prefs::RemoteImages::Ask && ui.add(Key::new("load once").outline(WARN)).clicked() {
                     choice = Some(ImageChoice::Once);
                 }
             });

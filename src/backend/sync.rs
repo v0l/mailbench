@@ -30,6 +30,23 @@ pub trait SyncSink {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SyncFilter {
+    pub excluded: Vec<String>,
+    pub since: Option<i64>,
+}
+
+impl SyncFilter {
+    pub fn allows(&self, folder: &Folder) -> bool {
+        folder.role == Some(FolderRole::Inbox) || !self.excluded.iter().any(|e| *e == folder.name)
+    }
+
+    fn imap_since(&self) -> Option<String> {
+        let at = chrono::DateTime::from_timestamp(self.since?, 0)?;
+        Some(format!("SENTSINCE {}", at.format("%-d-%b-%Y")))
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SyncReport {
     pub folders: usize,
     pub added: usize,
@@ -56,6 +73,7 @@ pub async fn sync_folder_into<S: SyncSink + ?Sized>(
     backend: &mut dyn Backend,
     sink: &mut S,
     folder: &str,
+    filter: &SyncFilter,
     report: &mut SyncReport,
 ) -> Result<()> {
     let state = backend.open_folder(folder).await?;
@@ -69,6 +87,12 @@ pub async fn sync_folder_into<S: SyncSink + ?Sized>(
     let known: std::collections::HashSet<u32> =
         if valid.is_some() { sink.known_uids(folder)?.into_iter().collect() } else { Default::default() };
     let mut missing: Vec<u32> = state.uids.iter().copied().filter(|u| !known.contains(u)).collect();
+    if let (Some(query), false) = (filter.imap_since(), missing.is_empty()) {
+        if let Ok(in_window) = backend.search(folder, &query).await {
+            let in_window: std::collections::HashSet<u32> = in_window.into_iter().collect();
+            missing.retain(|u| in_window.contains(u));
+        }
+    }
     missing.sort_unstable_by(|a, b| b.cmp(a));
     let total = missing.len();
     let mut done = 0;
@@ -104,6 +128,14 @@ pub async fn sync_folder_into<S: SyncSink + ?Sized>(
 }
 
 pub async fn sync_account<S: SyncSink + ?Sized>(backend: &mut dyn Backend, sink: &mut S) -> Result<SyncReport> {
+    sync_account_with(backend, sink, &SyncFilter::default()).await
+}
+
+pub async fn sync_account_with<S: SyncSink + ?Sized>(
+    backend: &mut dyn Backend,
+    sink: &mut S,
+    filter: &SyncFilter,
+) -> Result<SyncReport> {
     let folders = backend.list_folders().await?;
     sink.put_folders(&folders)?;
     let mut report = SyncReport { folders: folders.len(), ..Default::default() };
@@ -111,7 +143,10 @@ pub async fn sync_account<S: SyncSink + ?Sized>(backend: &mut dyn Backend, sink:
         if sink.cancelled() {
             return Err(stopped());
         }
-        sync_folder_into(backend, sink, &folder.name, &mut report).await?;
+        if !filter.allows(folder) {
+            continue;
+        }
+        sync_folder_into(backend, sink, &folder.name, filter, &mut report).await?;
     }
     Ok(report)
 }

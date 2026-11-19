@@ -22,6 +22,7 @@ fn config(name: &str) -> AccountConfig {
         credential: Credential::Password("secret".into()),
         backfill: Default::default(),
         notify: Default::default(),
+        sync: Default::default(),
     }
 }
 

@@ -22,6 +22,8 @@ pub enum StoreError {
     WrongKey,
     #[error("record {0} failed authentication")]
     Tampered(String),
+    #[error("backup failed: {0}")]
+    Backup(String),
     #[error("no unlock method available")]
     Locked,
     #[error("store has no such unlock method")]
@@ -354,6 +356,42 @@ impl Store {
              ON CONFLICT(name) DO UPDATE SET blob = excluded.blob, params = excluded.params",
             params![name, blob, params_text],
         )?;
+        Ok(())
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn size_on_disk(&self) -> u64 {
+        let wal = PathBuf::from(format!("{}-wal", self.path.display()));
+        [self.path.clone(), wal].iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum()
+    }
+
+    pub fn count(&self, kind: &str) -> Result<u64> {
+        let n: i64 = self
+            .conn
+            .prepare_cached("SELECT COUNT(*) FROM records WHERE kind = ?1")?
+            .query_row(params![kind], |r| r.get(0))?;
+        Ok(n.max(0) as u64)
+    }
+
+    pub fn vacuum(&self) -> Result<()> {
+        self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;")?;
+        Ok(())
+    }
+
+    pub fn backup_to(&self, dest: &Path) -> Result<()> {
+        if dest.exists() {
+            return Err(StoreError::Backup(format!("{} already exists", dest.display())));
+        }
+        let text = dest.to_str().ok_or_else(|| StoreError::Backup("the path is not valid text".into()))?;
+        self.conn.execute("VACUUM INTO ?1", params![text])?;
+        Ok(())
+    }
+
+    pub fn clear_index(&self) -> Result<()> {
+        self.conn.execute_batch("DELETE FROM idx")?;
         Ok(())
     }
 

@@ -112,6 +112,10 @@ impl<'a> StoreSink<'a> {
         }
     }
 
+    pub fn sync_token_for(&self, folder: &str) -> Option<SyncToken> {
+        SyncSink::sync_token(&mut Self { store: self.store, account: self.account.clone(), keep_bodies: false }, folder).ok().flatten()
+    }
+
     pub fn folders(&self) -> Result<Vec<Folder>> {
         match self.store.get(FOLDERS, &self.account)? {
             Some(raw) => decode(&raw),
@@ -191,6 +195,54 @@ impl<'a> StoreSink<'a> {
 
     pub fn body_text(&self, folder: &str, uid: u32) -> Result<Option<String>> {
         Ok(self.body(folder, uid)?.map(|raw| plain_text(&raw)))
+    }
+
+    fn index_body(&self, id: &str, raw: &[u8]) -> Result<()> {
+        let mut text = match self.store.get(MESSAGE, id)? {
+            Some(m) => summary_text(&decode(&m)?),
+            None => String::new(),
+        };
+        text.push_str(&plain_text(raw));
+        if let Some(msg) = mail_parser::MessageParser::default().parse(raw) {
+            for p in msg.attachments() {
+                text.push(' ');
+                text.push_str(p.attachment_name().unwrap_or_default());
+            }
+        }
+        self.index(id, &text)
+    }
+
+    pub fn reindex(&self) -> Result<usize> {
+        let prefix = format!("{}\0", self.account);
+        let mut done = 0;
+        self.store.transaction(|| {
+            for (id, raw) in self.store.scan_prefix(MESSAGE, &prefix)? {
+                match self.store.get(BODY, &id)? {
+                    Some(body) => self.index_body(&id, &body)?,
+                    None => self.index(&id, &summary_text(&decode(&raw)?))?,
+                }
+                done += 1;
+            }
+            Ok(done)
+        })
+    }
+
+    pub fn drop_bodies_before(&self, cutoff: i64) -> Result<usize> {
+        let mut dropped = 0;
+        for folder in self.folders()? {
+            for uid in self.body_uids(&folder.name)? {
+                let old = self.summary(&folder.name, uid)?.and_then(|m| m.date).is_some_and(|d| d < cutoff);
+                if old {
+                    self.drop_body(&folder.name, uid)?;
+                    dropped += 1;
+                }
+            }
+        }
+        Ok(dropped)
+    }
+
+    pub fn drop_all_bodies(&self) -> Result<usize> {
+        self.drop_bodies_before(i64::MAX)
     }
 
     fn index(&self, id: &str, text: &str) -> Result<()> {
@@ -293,18 +345,6 @@ impl SyncSink for StoreSink<'_> {
     fn put_body(&mut self, folder: &str, uid: u32, raw: &[u8]) -> Result<()> {
         let id = self.message_id(folder, uid)?;
         self.store.put(BODY, &id, raw)?;
-        let mut text = match self.store.get(MESSAGE, &id)? {
-            Some(m) => summary_text(&decode(&m)?),
-            None => String::new(),
-        };
-        text.push_str(&plain_text(raw));
-        if let Some(msg) = mail_parser::MessageParser::default().parse(raw) {
-            for p in msg.attachments() {
-                text.push(' ');
-                text.push_str(p.attachment_name().unwrap_or_default());
-            }
-        }
-        self.index(&id, &text)?;
-        Ok(())
+        self.index_body(&id, raw)
     }
 }
