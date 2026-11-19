@@ -692,4 +692,10 @@ fn clicking_a_label_with_spaces_quotes_it_in_the_query() {
     let app = &h.state().1;
     assert_eq!(app.search, "label:\"bench night\"");
     assert_eq!(Parsed::parse(&app.search).label.as_deref(), Some("bench night"));
+
+#[test]
+fn imap_style_accounts_show_the_new_folder_action() {
+    let h = harness(FakeStore::concept());
+    let name = h.state().1.store.accounts()[0].name.clone();
+    h.get_by_label(&format!("new folder in {name}"));
 }

@@ -519,3 +519,37 @@ fn starting_the_shell_wipes_leftover_open_copies() {
     assert!(!leftover.exists());
     assert!(!open_dir.exists());
 }
+
+#[test]
+fn a_nostr_account_without_a_relay_list_is_asked_to_publish_one() {
+    mailbench::runtime::block_on(async {
+        let relay = nostr_relay_builder::MockRelay::run().await.unwrap();
+        let url = relay.url().await.to_string();
+        let d = dir();
+        let mut h = boot(d.path(), Rc::new(MemKeychain::default()), env(FixtureNet::default()));
+        h.get_by_label("continue").click();
+        h.run();
+        h.run();
+        {
+            let f = h.state_mut().1.add_form().unwrap();
+            f.nostr = true;
+            f.password = "05".repeat(32);
+            f.relays = url;
+        }
+        h.run();
+        h.get_by_label("test connection").click();
+        until(&mut h, "prompt", |s| !s.add_form().unwrap().test.running() && s.add_form().unwrap().test.all_ok());
+        h.run();
+        assert!(h.state_mut().1.add_form().unwrap().test.inbox_missing.load(std::sync::atomic::Ordering::SeqCst));
+        h.get_by_label_contains("Publish your DM relay list?");
+        assert!(!h.state_mut().1.add_form().unwrap().config().is_ok_and(|_| false));
+        h.get_by_label("publish relay list").click();
+        h.run();
+        let f = h.state_mut().1.add_form().unwrap();
+        assert_eq!(f.publish_inbox, Some(true));
+        match f.config().unwrap().credential {
+            mailbench::accounts::Credential::Nostr { publish_inbox, .. } => assert!(publish_inbox),
+            _ => panic!("not a nostr credential"),
+        }
+    });
+}

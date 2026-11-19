@@ -278,6 +278,7 @@ pub struct TestRun {
     pub results: Vec<(Step, Result<(), String>)>,
     rx: Option<Receiver<(Step, Result<(), String>)>>,
     pub for_key: String,
+    pub inbox_missing: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl TestRun {
@@ -288,11 +289,18 @@ impl TestRun {
         self.rx = Some(rx);
         let cfg = cfg.clone();
         let ctx = ctx.clone();
+        let missing = self.inbox_missing.clone();
+        missing.store(false, std::sync::atomic::Ordering::SeqCst);
         std::thread::spawn(move || {
+            let mut ok = true;
             accounts::run_checks(&cfg, |step, result| {
+                ok &= result.is_ok();
                 let _ = tx.send((step, result));
                 ctx.request_repaint();
             });
+            if ok && matches!(cfg.credential, Credential::Nostr { .. }) && accounts::nostr_lacks_inbox_list(&cfg) {
+                missing.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
             ctx.request_repaint();
         });
     }
@@ -366,6 +374,7 @@ pub struct AddForm {
     pub smtp_security: Security,
     pub edit: bool,
     pub nostr: bool,
+    pub publish_inbox: Option<bool>,
     pub relays: String,
     pub provider: Option<Provider>,
     pub oauth: Option<(Provider, oauth::OAuthTokens)>,
@@ -411,6 +420,7 @@ impl AddForm {
             smtp_security: Security::StartTls,
             edit: false,
             nostr: false,
+            publish_inbox: None,
             relays: String::new(),
             provider: None,
             oauth: None,
@@ -435,6 +445,9 @@ impl AddForm {
             }
             let relays = self.relays.split([',', ' ', '\n']).map(str::trim).filter(|r| !r.is_empty()).map(String::from).collect();
             let mut cfg = accounts::nostr_config(&self.password, relays).map_err(|_| "That is not a valid nsec".to_string())?;
+            if let Credential::Nostr { publish_inbox, .. } = &mut cfg.credential {
+                *publish_inbox = self.publish_inbox == Some(true);
+            }
             cfg.id = self.id.clone();
             return Ok(cfg);
         }
@@ -469,6 +482,9 @@ impl AddForm {
     }
 
     fn key(&self) -> String {
+        if self.nostr {
+            return format!("nostr\0{}\0{}", self.password.trim(), self.relays.trim());
+        }
         match self.config() {
             Ok(c) => format!("{c:?}"),
             Err(e) => e,
@@ -600,7 +616,7 @@ impl AddForm {
                         secret(ui, &mut self.password);
                     });
                     row(ui, "relays", |ui| {
-                        ui.text_edit_singleline(&mut self.relays);
+                        field(ui, &mut self.relays, "wss://relay.example");
                     });
                     hint(ui, "Leave relays empty to use your kind 10050 list, then your NIP-65 relays, then the defaults.");
                     let parsed = self.config();
@@ -608,7 +624,21 @@ impl AddForm {
                     if let Some(e) = &self.saved_error {
                         status(ui, false, e);
                     }
-                    let tested = self.test.all_ok() && self.test.for_key == self.key();
+                    let asked = self.test.inbox_missing.load(std::sync::atomic::Ordering::SeqCst) && !self.test.running();
+                    if asked && self.publish_inbox.is_none() {
+                        status(ui, false, "Publish your DM relay list?");
+                        hint(ui, "You have no kind 10050 list, so other people cannot tell where to send you messages.");
+                        ui.horizontal(|ui| {
+                            if ui.add(Key::new("publish relay list").solid(READOUT)).clicked() {
+                                self.publish_inbox = Some(true);
+                            }
+                            if ui.add(Key::new("not now").outline(VALUE)).clicked() {
+                                self.publish_inbox = Some(false);
+                            }
+                        });
+                    }
+                    let answered = !asked || self.publish_inbox.is_some();
+                    let tested = self.test.all_ok() && self.test.for_key == self.key() && answered;
                     form_footer(ui, |ui| {
                         let ok = parsed.is_ok();
                         if ui.add(Key::new("save and sync").solid(READOUT).min_width(130.0).enabled(tested && ok)).clicked() {

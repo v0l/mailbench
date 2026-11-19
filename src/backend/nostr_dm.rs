@@ -404,6 +404,11 @@ impl NostrBackend {
         Ok(())
     }
 
+    pub async fn lacks_inbox_list(&mut self) -> Result<bool> {
+        let client = self.client().await?;
+        Ok(!self.has_inbox_list(&client).await)
+    }
+
     pub async fn relays_for(&mut self, who: &PublicKey) -> Result<Vec<String>> {
         let client = self.client().await?;
         self.lookup_relays(&client, who).await

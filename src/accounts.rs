@@ -11,7 +11,13 @@ pub const KIND: &str = "account";
 pub enum Credential {
     Password(String),
     OAuth { provider: Provider, tokens: OAuthTokens },
-    Nostr { secret: String, #[serde(default)] relays: Vec<String> },
+    Nostr {
+        secret: String,
+        #[serde(default)]
+        relays: Vec<String>,
+        #[serde(default)]
+        publish_inbox: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -189,7 +195,11 @@ impl Backend for Fresh {
 
 pub fn nostr_backend(cfg: &AccountConfig) -> Result<NostrBackend> {
     match &cfg.credential {
-        Credential::Nostr { secret, relays } => NostrBackend::new(NostrConfig::new(secret, relays.clone())),
+        Credential::Nostr { secret, relays, publish_inbox } => {
+            let mut c = NostrConfig::new(secret, relays.clone());
+            c.publish_inbox = *publish_inbox;
+            NostrBackend::new(c)
+        }
         _ => Err(BackendError::Auth("not a nostr account".into())),
     }
 }
@@ -207,10 +217,17 @@ pub fn nostr_config(secret: &str, relays: Vec<String>) -> Result<AccountConfig> 
         address,
         imap: none.clone(),
         smtp: none,
-        credential: Credential::Nostr { secret: secret.trim().to_string(), relays },
+        credential: Credential::Nostr { secret: secret.trim().to_string(), relays, publish_inbox: false },
         backfill: Default::default(),
         notify: Default::default(),
     })
+}
+
+pub fn nostr_lacks_inbox_list(cfg: &AccountConfig) -> bool {
+    match nostr_backend(cfg) {
+        Ok(mut b) => crate::runtime::block_on(b.lacks_inbox_list()).unwrap_or(false),
+        Err(_) => false,
+    }
 }
 
 pub fn setup_for(cfg: &AccountConfig, store: &Store) -> Result<AccountSetup> {
