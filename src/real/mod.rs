@@ -1690,6 +1690,24 @@ impl MailStore for RealStore {
         self.move_to(id, ms::Folder::Snoozed)
     }
 
+    fn bulk_snooze(&mut self, ids: &[MessageId], wake_at: i64) -> Result<(), StoreError> {
+        let mut moving = Vec::new();
+        for id in ids {
+            let e = self.entry(*id)?;
+            if e.folder == ms::Folder::Snoozed {
+                continue;
+            }
+            if e.local.is_none() {
+                let account = self.shared.accounts[e.account].id.clone();
+                let record = Snooze { account, message_id: e.message_id.clone(), subject: e.subject.clone(), date: e.date, wake_at };
+                let clock = lock(&self.shared.clock).clone();
+                SnoozeTable::new(&self.shared.lock_store(), &*clock).add(&record).map_err(backend_err)?;
+            }
+            moving.push(*id);
+        }
+        self.bulk_move(&moving, ms::Folder::Snoozed)
+    }
+
     fn take_focus(&mut self) -> Option<MessageId> {
         lock(&self.shared.focus).take().map(MessageId)
     }
@@ -1827,6 +1845,11 @@ impl MailStore for RealStore {
             let Some(e) = found else { continue };
             let account = self.shared.accounts[e.account].id.clone();
             if r.moved_to.is_some() {
+                if r.moved_to == Some(ms::Folder::Snoozed) && e.local.is_none() {
+                    let record = Snooze { account: account.clone(), message_id: e.message_id.clone(), subject: e.subject.clone(), date: e.date, wake_at: 0 };
+                    let clock = lock(&self.shared.clock).clone();
+                    let _ = SnoozeTable::new(&self.shared.lock_store(), &*clock).remove(&record);
+                }
                 if e.local.is_none() && self.shared.cancel_pending(&account, &e.server_folder, e.uid, true) {
                     self.shared.patch(e.id, |x| x.folder = r.folder.clone());
                 } else {

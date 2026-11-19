@@ -622,6 +622,9 @@ impl App {
         if !ctx.input(|i| i.modifiers.shift) && Self::pressed(ctx, K::Z) {
             return vec![Action::Undo];
         }
+        if ctx.input(|i| i.modifiers.shift && !i.modifiers.command && !i.modifiers.alt && i.key_pressed(K::I)) {
+            return vec![Action::MarkAllRead(self.folder.clone())];
+        }
         if !plain {
             if Self::pressed(ctx, K::J) || Self::pressed(ctx, K::ArrowDown) {
                 return vec![Action::ExtendNext];
@@ -820,18 +823,26 @@ impl App {
                 },
                 Action::Archive => self.move_current(&v, Folder::Archive, "Archived", whole),
                 Action::Snooze => {
-                    if v.current.is_some() {
+                    if v.current.is_some() || !self.marked.is_empty() {
                         self.snoozer = Some(Snoozer { custom: String::new(), whole: whole && !self.reader_focus, error: false });
                         ctx.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(t) if t.eq_ignore_ascii_case("s"))));
                     }
                 }
                 Action::SnoozeUntil(at, whole) => {
-                    for (id, folder) in Self::targets(&v, whole, true) {
-                        if folder == Folder::Snoozed {
-                            continue;
-                        }
-                        match self.store.snooze(id, at) {
-                            Ok(()) => self.notice = Some(format!("Snoozed until {}", crate::snooze::describe(at))),
+                    let ids = self.act_ids(&v, whole, true);
+                    let mut before = self.store.snapshot(&ids);
+                    before.retain(|r| r.folder != Folder::Snoozed);
+                    let moving: Vec<MessageId> = before.iter().map(|r| r.id).collect();
+                    for r in before.iter_mut() {
+                        r.moved_to = Some(Folder::Snoozed);
+                    }
+                    if !moving.is_empty() {
+                        match self.store.bulk_snooze(&moving, at) {
+                            Ok(()) => {
+                                self.notice = Some(format!("Snoozed until {}", crate::snooze::describe(at)));
+                                self.undo = Some(before);
+                                self.marked.clear();
+                            }
                             Err(e) => self.notice = Some(format!("Could not snooze the message: {e:?}")),
                         }
                     }
@@ -1153,6 +1164,7 @@ impl App {
                 ("J K", "extend"),
                 ("*a", "all"),
                 ("*n", "none"),
+                ("I", "all read"),
                 ("z", "undo"),
                 ("Enter", "open"),
                 ("e", "archive"),
@@ -1220,6 +1232,15 @@ impl App {
             if n > 0 {
                 put_right(p, rect.right() - 6.0, rect.center().y, &n.to_string(), figure(11.0), if on { READOUT } else { LEGEND });
             }
+            ui.ctx().accesskit_node_builder(resp.id, |n| n.set_label(format!("folder {}", f.folder.name())));
+            let target = f.folder.clone();
+            resp.context_menu(|ui| {
+                ui.set_min_width(140.0);
+                if ui.add(Key::new("mark all as read").outline(VALUE).min_width(ui.available_width())).clicked() {
+                    actions.push(Action::MarkAllRead(target.clone()));
+                    ui.close();
+                }
+            });
             if resp.clicked() {
                 actions.push(Action::GoTo(f.folder));
             }
@@ -1321,6 +1342,7 @@ impl App {
             let child_prefix = format!("{}{}", node.path, node.delimiter);
             let items = [
                 ("new subfolder", Action::NewFolder(node.account, child_prefix)),
+                ("mark all as read", Action::MarkAllRead(node.folder.clone())),
                 ("rename", Action::RenameFolder(node.folder.clone(), parent)),
                 ("delete", Action::DeleteFolder(node.folder.clone())),
             ];

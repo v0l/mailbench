@@ -345,6 +345,12 @@ pub trait MailStore {
         }
         Ok(())
     }
+    fn bulk_snooze(&mut self, ids: &[MessageId], wake_at: i64) -> Result<(), StoreError> {
+        for id in ids {
+            self.snooze(*id, wake_at)?;
+        }
+        Ok(())
+    }
     fn snapshot(&self, ids: &[MessageId]) -> Vec<Restore> {
         ids.iter()
             .filter_map(|id| self.get(*id).ok())

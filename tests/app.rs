@@ -630,3 +630,41 @@ fn flagging_marked_rows_is_undone_by_z() {
     h.run();
     assert_eq!(h.state().1.store.counts(&Query::new(Folder::Inbox)).flagged, before);
 }
+
+#[test]
+fn shift_i_marks_every_message_in_the_folder_read_and_z_restores() {
+    let mut h = harness(FakeStore::concept());
+    let before = h.state().1.store.counts(&Query::new(Folder::Inbox)).unread;
+    assert!(before > 1);
+    press(&mut h, egui::Key::I, egui::Modifiers::SHIFT);
+    assert_eq!(h.state().1.store.counts(&Query::new(Folder::Inbox)).unread, 0);
+    h.key_press(egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().1.store.counts(&Query::new(Folder::Inbox)).unread, before);
+}
+
+#[test]
+fn the_folder_context_menu_has_mark_all_as_read() {
+    let mut h = harness(FakeStore::concept());
+    let before = h.state().1.store.counts(&Query::new(Folder::Inbox)).unread;
+    assert!(before > 1);
+    h.get_by_label("folder inbox").click_secondary();
+    h.run();
+    h.get_by_label("mark all as read").click();
+    h.run();
+    h.run();
+    assert_eq!(h.state().1.store.counts(&Query::new(Folder::Inbox)).unread, 0);
+}
+
+#[test]
+fn snoozing_marked_rows_uses_the_picker_and_moves_them_together() {
+    let mut h = harness(FakeStore::concept());
+    h.state_mut().1.marked = [0usize, 1, 2].into_iter().collect();
+    h.key_press(egui::Key::S);
+    h.run();
+    h.get_by_label("snooze tomorrow 08:00").click();
+    h.run();
+    h.run();
+    assert_eq!(h.state().1.store.counts(&Query::new(Folder::Snoozed)).all, 3);
+    assert_eq!(h.state().1.store.counts(&Query::new(Folder::Inbox)).all, 27);
+}
