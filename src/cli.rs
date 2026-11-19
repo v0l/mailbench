@@ -34,6 +34,23 @@ pub enum Command {
     #[command(name = "mark-read")]
     MarkRead(Ids),
     Unread(Ids),
+    Snooze(SnoozeArgs),
+    #[command(name = "mark-all-read")]
+    MarkAllRead(FolderArg),
+}
+
+#[derive(Args, Debug)]
+pub struct SnoozeArgs {
+    #[arg(required = true)]
+    pub ids: Vec<String>,
+    #[arg(long, help = "Hours until the mail returns to the inbox")]
+    pub hours: f64,
+}
+
+#[derive(Args, Debug)]
+pub struct FolderArg {
+    #[arg(long, default_value = "inbox")]
+    pub folder: String,
 }
 
 #[derive(Args, Debug)]
@@ -394,15 +411,28 @@ fn send_cmd(cli: &Cli, a: &SendArgs) -> Res<()> {
     Ok(())
 }
 
-fn change_cmd(cli: &Cli, ids: &Ids, apply: impl Fn(&mut RealStore, MessageId) -> Result<(), crate::mailstore::StoreError>) -> Res<()> {
+fn change_cmd(cli: &Cli, ids: &[String], apply: impl Fn(&mut RealStore, &[MessageId]) -> Result<(), crate::mailstore::StoreError>) -> Res<()> {
     let mut s = session(cli)?;
-    for text in &ids.ids {
-        let id = parse_id(text)?;
-        apply(&mut s.real, id).map_err(|e| format!("{text}: {e:?}"))?;
-    }
+    let parsed = ids.iter().map(|t| parse_id(t)).collect::<Res<Vec<_>>>()?;
+    apply(&mut s.real, &parsed).map_err(|e| format!("{e:?}"))?;
     if !until(SETTLE, || s.real.pending() == 0) {
         return Err("changes are queued but the server did not take them yet".into());
     }
+    Ok(())
+}
+
+fn flags(unread: Option<bool>, flagged: Option<bool>) -> FlagChange {
+    FlagChange { unread, flagged }
+}
+
+fn mark_all_read_cmd(cli: &Cli, folder: &str) -> Res<()> {
+    let mut s = session(cli)?;
+    let q = folder_query(folder, false);
+    let done = s.real.mark_all_read(&q.folder).map_err(|e| format!("{e:?}"))?;
+    if !until(SETTLE, || s.real.pending() == 0) {
+        return Err("changes are queued but the server did not take them yet".into());
+    }
+    println!("marked {} read", done.len());
     Ok(())
 }
 
@@ -416,9 +446,17 @@ pub fn run(cli: &Cli) -> Res<()> {
         Command::Search(a) => search_cmd(cli, a),
         Command::Send(a) => send_cmd(cli, a),
         Command::Sync => session(cli).map(|_| ()),
-        Command::Archive(i) => change_cmd(cli, i, |r, id| r.move_to(id, Folder::Archive)),
-        Command::Flag(i) => change_cmd(cli, i, |r, id| r.set_flags(id, FlagChange { unread: None, flagged: Some(true) })),
-        Command::MarkRead(i) => change_cmd(cli, i, |r, id| r.set_flags(id, FlagChange { unread: Some(false), flagged: None })),
-        Command::Unread(i) => change_cmd(cli, i, |r, id| r.set_flags(id, FlagChange { unread: Some(true), flagged: None })),
+        Command::Archive(i) => change_cmd(cli, &i.ids, |r, ids| r.bulk_move(ids, Folder::Archive)),
+        Command::Flag(i) => change_cmd(cli, &i.ids, |r, ids| r.bulk_flags(ids, flags(None, Some(true)))),
+        Command::MarkRead(i) => change_cmd(cli, &i.ids, |r, ids| r.bulk_flags(ids, flags(Some(false), None))),
+        Command::Unread(i) => change_cmd(cli, &i.ids, |r, ids| r.bulk_flags(ids, flags(Some(true), None))),
+        Command::Snooze(a) => {
+            if !(a.hours > 0.0) {
+                return Err("--hours must be above zero".into());
+            }
+            let wake = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0) + (a.hours * 3600.0) as i64;
+            change_cmd(cli, &a.ids, move |r, ids| r.bulk_snooze(ids, wake))
+        }
+        Command::MarkAllRead(f) => mark_all_read_cmd(cli, &f.folder),
     }
 }

@@ -182,3 +182,18 @@ fn two_connections_write_the_same_store_at_once() {
     writer.join().unwrap();
     assert_eq!(first.list("k").unwrap().len(), 400);
 }
+
+#[test]
+fn snooze_and_mark_all_read_use_the_bulk_paths() {
+    if !common::greenmail() {
+        return;
+    }
+    let (_name, dir) = seeded("cb");
+    let d = dir.path();
+    let id = json_of(d, &["list", "--json"])[0]["id"].as_str().unwrap().to_string();
+    assert!(ok(d, &["mark-all-read"]).contains("marked 1 read"));
+    assert_eq!(json_of(d, &["list", "--unread", "--json"]), json!([]));
+    ok(d, &["snooze", &id, "--hours", "2"]);
+    assert_eq!(json_of(d, &["list", "--json"]), json!([]));
+    assert_eq!(json_of(d, &["list", "--folder", "snoozed", "--json"]).as_array().unwrap().len(), 1);
+}

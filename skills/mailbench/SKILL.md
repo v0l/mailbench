@@ -43,10 +43,12 @@ mailbench archive <id>...
 mailbench flag <id>...
 mailbench mark-read <id>...
 mailbench unread <id>...
+mailbench snooze <id>... --hours 4
+mailbench mark-all-read --folder inbox
 mailbench sync
 ```
 
-Nothing is deleted. Archive, flag and read state changes are the only writes besides sending.
+Ids can be given together, so one command moves a whole set. Nothing is deleted. Archive, snooze, flag and read state changes are the only writes besides sending. Run `mark-all-read` only when the user asked for it.
 
 ## Send safely
 
