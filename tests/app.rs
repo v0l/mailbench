@@ -380,6 +380,17 @@ fn save_as_writes_the_attachment_bytes_to_the_chosen_path() {
     assert_eq!(std::fs::read(&target).unwrap(), b"fake content of stencil-quote-revc.pdf");
 }
 
+const TINY_PDF: &str = "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]/Contents 4 0 R/Resources<<>>>>endobj\n4 0 obj<</Length 30>>stream\n1 0 0 rg 0 0 100 100 re f\nendstream\nendobj\ntrailer<</Root 1 0 R/Size 5>>\n";
+
+#[test]
+fn a_pdf_attachment_shows_a_preview_image_in_the_reader() {
+    let mut h = harness(FakeStore::concept());
+    assert!(h.query_by_role(egui::accesskit::Role::Image).is_none());
+    let mut h = harness(FakeStore::concept().with_attachment_bytes("stencil-quote-revc.pdf", TINY_PDF.as_bytes().to_vec()));
+    h.run();
+    assert!(h.query_by_role(egui::accesskit::Role::Image).is_some());
+}
+
 #[test]
 fn shift_s_saves_every_attachment_as_a_zip() {
     let dir = tempfile::tempdir().unwrap();

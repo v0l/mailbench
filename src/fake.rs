@@ -7,6 +7,7 @@ pub struct FakeStore {
     next: u64,
     older: Vec<(u64, Vec<u64>)>,
     stash: std::collections::HashMap<u64, Outgoing>,
+    blobs: std::collections::HashMap<String, Vec<u8>>,
 }
 
 fn sync_of(state: AccountState) -> SyncState {
@@ -127,6 +128,11 @@ impl FakeStore {
         }
     }
 
+    pub fn with_attachment_bytes(mut self, name: &str, data: Vec<u8>) -> FakeStore {
+        self.blobs.insert(name.to_string(), data);
+        self
+    }
+
     fn base_accounts() -> Vec<AccountInfo> {
         ACCOUNTS
             .iter()
@@ -157,7 +163,7 @@ impl FakeStore {
         let n = messages.len() as u64;
         messages.push(draft(n + 1, "Re: Firmware release notes for 2.4", "Wed"));
         messages.push(draft(n + 2, "Bench night checklist", "Tue"));
-        let mut store = FakeStore { accounts: Self::base_accounts(), messages, next: n + 3, older: Vec::new(), stash: Default::default() };
+        let mut store = FakeStore { accounts: Self::base_accounts(), messages, next: n + 3, older: Vec::new(), stash: Default::default(), blobs: Default::default() };
         store.add_older(1, &[THREAD[0].clone(), THREAD[1].clone()]);
         store
     }
@@ -192,7 +198,7 @@ impl FakeStore {
     }
 
     pub fn empty() -> FakeStore {
-        FakeStore { accounts: Self::base_accounts(), messages: Vec::new(), next: 1, older: Vec::new(), stash: Default::default() }
+        FakeStore { accounts: Self::base_accounts(), messages: Vec::new(), next: 1, older: Vec::new(), stash: Default::default(), blobs: Default::default() }
     }
 
     pub fn failed() -> FakeStore {
@@ -214,7 +220,7 @@ impl FakeStore {
                 m
             })
             .collect();
-        FakeStore { accounts: Self::base_accounts(), messages, next: count as u64 + 1, older: Vec::new(), stash: Default::default() }
+        FakeStore { accounts: Self::base_accounts(), messages, next: count as u64 + 1, older: Vec::new(), stash: Default::default(), blobs: Default::default() }
     }
 
     fn matches(&self, m: &Message, q: &Query) -> bool {
@@ -332,7 +338,7 @@ impl MailStore for FakeStore {
             .map(|a| AttachmentData {
                 name: a.name.clone(),
                 mime: a.mime.clone(),
-                data: std::sync::Arc::new(format!("fake content of {}", a.name).into_bytes()),
+                data: std::sync::Arc::new(self.blobs.get(&a.name).cloned().unwrap_or_else(|| format!("fake content of {}", a.name).into_bytes())),
             })
             .collect())
     }
