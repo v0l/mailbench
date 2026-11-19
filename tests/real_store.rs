@@ -2,7 +2,7 @@ use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 use mailbench::app::App;
 use mailbench::backend::*;
-use mailbench::mailstore::{self as ms, Query};
+use mailbench::mailstore::{self as ms, MailStore, Query};
 use mailbench::real::{AccountSetup, RealStore};
 use mailbench::runtime::block_on;
 use mailbench::store::{KdfParams, Store, Unlock};
