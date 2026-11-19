@@ -839,6 +839,7 @@ pub struct SettingsForm {
     methods: UnlockMethods,
     pub allow_open: bool,
     pub panels: crate::settings::Panels,
+    updater: egui_bench::update::Updater,
 }
 
 pub enum SettingsEvent {
@@ -868,6 +869,7 @@ impl SettingsForm {
             retest: None,
             methods: methods_of(store),
             allow_open: allow_open_setting(store),
+            updater: egui_bench::update::Updater::new(UPDATE_REPO, Some(env!("CARGO_PKG_VERSION").to_string())),
         }
     }
 
@@ -1057,6 +1059,19 @@ impl SettingsForm {
                         let outcome = self.panels.show(ui, store, &self.drafts);
                         prefs_event = outcome.prefs_changed;
                         ui.add_space(8.0);
+                        section(ui, "updates", "new versions are published on GitHub releases", |ui| {
+                            reading(ui, "version", env!("CARGO_PKG_VERSION"));
+                            ui.horizontal(|ui| {
+                                if ui.add(Key::new("check for updates").outline(VALUE).enabled(!self.updater.busy())).clicked() {
+                                    self.updater.check(ui.ctx());
+                                }
+                                if ui.add(Key::new("releases page").outline(VALUE)).clicked() {
+                                    let _ = open::that(self.updater.page());
+                                }
+                            });
+                            self.updater.status(ui);
+                        });
+                        ui.add_space(8.0);
                         section(ui, "attachments", "what happens when you open a file", |ui| {
                             if ui.checkbox(&mut self.allow_open, "allow open (writes a plain copy to a temp folder)").changed() {
                                 let _ = store.put(SETTINGS_KIND, ALLOW_OPEN_KEY, if self.allow_open { b"1" } else { b"0" });
@@ -1162,6 +1177,7 @@ pub struct Shell {
     open_dir: PathBuf,
 }
 
+pub const UPDATE_REPO: &str = "v0l/mailbench";
 pub const SETTINGS_KIND: &str = "settings";
 pub const ALLOW_OPEN_KEY: &str = "attachments.allow_open";
 

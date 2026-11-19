@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="Mailbench"
+      Manufacturer="v0l"
+      Version="$(var.Version)"
+      UpgradeCode="6e2b9c41-8d07-4a35-b1f6-92c7d3a05e18"
+      Scope="perMachine"
+      Compressed="yes">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Mailbench is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="AppIcon" SourceFile="packaging\windows\icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/v0l/mailbench" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Mailbench">
+        <Component Id="AppExe" Guid="3f8a1d62-b5c9-4e07-a2d4-71c8e0f9b536">
+          <File Id="MailbenchExe" Source="$(var.BinDir)\mailbench.exe" KeyPath="yes" />
+        </Component>
+        <Component Id="AppDocs" Guid="9c4e7b15-2a68-4d30-8f1b-e5a3d6c07f42">
+          <File Id="ReadmeMd" Source="README.md" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="AppShortcut" Guid="d1a5f830-6c27-4b9e-93e4-08b7c2e1a659">
+        <Shortcut Id="MailbenchShortcut" Icon="AppIcon" Name="Mailbench" Target="[#MailbenchExe]" WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKLM" Key="Software\v0l\Mailbench" Name="shortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="Mailbench" Level="1">
+      <ComponentRef Id="AppExe" />
+      <ComponentRef Id="AppDocs" />
+      <ComponentRef Id="AppShortcut" />
+    </Feature>
+  </Package>
+</Wix>

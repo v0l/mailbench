@@ -68,3 +68,13 @@ The design plan and the three concepts it was chosen from are in [docs/design.md
 ## Licence
 
 GPL-3.0-only. The IBM Plex Sans font in `assets/` is under the SIL Open Font License.
+
+## Releasing
+
+A release is a pushed `v*` tag. `.github/workflows/release.yml` checks the tag against the Cargo version and `CHANGELOG.md`, then builds:
+
+- Linux x86_64 and arm64: `.tar.gz` and `.deb`
+- macOS arm64: `.tar.gz` and an ad-hoc signed `.dmg`
+- Windows x86_64: `.zip` and `.msi`
+
+Each archive holds the `mailbench` binary (GUI and CLI are the same binary), `README.md`, `LICENSE` and `skills/`. A `workflow_dispatch` run with a `tag` input builds everything and publishes nothing. Settings has a check for updates button that reads the GitHub releases. Android is not built yet.

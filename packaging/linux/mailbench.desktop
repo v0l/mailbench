@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Mailbench
+Comment=A keyboard-first mail client
+Exec=mailbench
+Icon=mailbench
+Categories=Network;Email;
+MimeType=x-scheme-handler/mailto;
+Terminal=false
+StartupWMClass=mailbench
