@@ -46,6 +46,7 @@ blitz-dom = { version = "=0.3.0-beta.4", default-features = false, features = ["
 blitz-html = "=0.3.0-beta.4"
 blitz-paint = { version = "=0.3.0-beta.4", default-features = false, features = ["svg"] }
 blitz-traits = "=0.3.0-beta.4"
+parley = "0.12"
 anyrender = "0.14"
 anyrender_vello_cpu = "0.18"
 peniko = "0.6"

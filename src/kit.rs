@@ -125,29 +125,93 @@ pub fn selection(p: &egui::Painter, r: Rect) {
     p.rect_filled(Rect::from_min_size(r.left_top(), Vec2::new(3.0, r.height())), 0.0, READOUT);
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct HtmlTextures {
     source: usize,
-    textures: Vec<(egui::TextureHandle, u32, u32)>,
+    textures: Vec<Option<egui::TextureHandle>>,
 }
 
-fn html_textures(ui: &Ui, page: &std::sync::Arc<crate::htmlview::Rendered>) -> Vec<(egui::TextureHandle, u32, u32)> {
-    let source = std::sync::Arc::as_ptr(page) as usize;
-    let id = egui::Id::new("html-textures");
-    if let Some(cached) = ui.ctx().data(|d| d.get_temp::<HtmlTextures>(id)).filter(|c| c.source == source) {
-        return cached.textures;
+#[derive(Clone, Debug, Default)]
+pub struct FindState {
+    pub query: String,
+    pub index: usize,
+    pub focus: bool,
+    pub jump: bool,
+}
+
+#[derive(Default)]
+pub struct HtmlState {
+    pub zoom: std::collections::HashMap<u64, u32>,
+    pub dark: bool,
+    pub find: Option<FindState>,
+    pub selection: Option<(crate::htmlview::TextPos, crate::htmlview::TextPos)>,
+    pub selection_for: Option<crate::htmlview::RenderKey>,
+    pub match_count: usize,
+}
+
+pub struct LinkClick {
+    pub href: String,
+    pub mismatch: Option<(String, String)>,
+}
+
+const ZOOM_STEPS: [u32; 11] = [500, 600, 700, 800, 900, 1000, 1100, 1250, 1500, 1750, 2000];
+
+fn zoom_step(current: u32, up: bool) -> u32 {
+    if up {
+        ZOOM_STEPS.iter().copied().find(|z| *z > current).unwrap_or(2000)
+    } else {
+        ZOOM_STEPS.iter().rev().copied().find(|z| *z < current).unwrap_or(500)
     }
-    let textures: Vec<_> = page
-        .tiles
-        .iter()
-        .enumerate()
-        .map(|(i, t)| {
-            let image = egui::ColorImage::from_rgba_unmultiplied([t.width as usize, t.height as usize], &t.rgba);
-            (ui.ctx().load_texture(format!("html-{source}-{i}"), image, egui::TextureOptions::LINEAR), t.top, t.height)
-        })
-        .collect();
-    ui.ctx().data_mut(|d| d.insert_temp(id, HtmlTextures { source, textures: textures.clone() }));
-    textures
+}
+
+fn rect_of(origin: Pos2, r: [f32; 4], ratio: f32) -> Rect {
+    Rect::from_min_size(origin + Vec2::new(r[0], r[1]) * ratio, Vec2::new(r[2], r[3]) * ratio)
+}
+
+pub fn find_bar(ui: &mut Ui, find: &mut FindState, count: usize) -> bool {
+    let mut close = false;
+    ui.horizontal(|ui| {
+        let edit = ui.add(egui::TextEdit::singleline(&mut find.query).hint_text("find in message").desired_width(220.0));
+        if find.focus {
+            edit.request_focus();
+            find.focus = false;
+        }
+        if edit.changed() {
+            find.index = 0;
+            find.jump = true;
+        }
+        if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            let shift = ui.input(|i| i.modifiers.shift);
+            step_find(find, count, !shift);
+            edit.request_focus();
+        }
+        let label = if find.query.trim().is_empty() {
+            String::new()
+        } else if count == 0 {
+            "no matches".to_string()
+        } else {
+            format!("{} of {count}", find.index.min(count - 1) + 1)
+        };
+        Line::new().measured(label).size(11.0).show(ui);
+        if ui.add(Key::new("prev").outline(VALUE)).clicked() {
+            step_find(find, count, false);
+        }
+        if ui.add(Key::new("next").outline(VALUE)).clicked() {
+            step_find(find, count, true);
+        }
+        if ui.add(Key::new("done").outline(VALUE)).clicked() {
+            close = true;
+        }
+    });
+    close
+}
+
+fn step_find(find: &mut FindState, count: usize, forward: bool) {
+    if count == 0 {
+        return;
+    }
+    find.index = if forward { (find.index + 1) % count } else { (find.index + count - 1) % count };
+    find.jump = true;
 }
 
 pub fn html_body(
@@ -156,42 +220,169 @@ pub fn html_body(
     id: u64,
     body: &crate::htmlview::HtmlBody,
     remote: bool,
-) -> Option<String> {
+    state: &mut HtmlState,
+) -> Option<LinkClick> {
     let width = (ui.available_width().floor() as u32 / 16 * 16).max(160);
     let scale = ui.ctx().pixels_per_point();
-    let key = crate::htmlview::RenderKey { id, width, scale_milli: (scale * 1000.0).round() as u32, remote };
+    let mut zoom = state.zoom.get(&id).copied().unwrap_or(1000);
+    if !ui.ctx().egui_wants_keyboard_input() {
+        let (reset, inn, out) = ui.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num0),
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Equals) || i.consume_key(egui::Modifiers::COMMAND, egui::Key::Plus),
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Minus),
+            )
+        });
+        if reset {
+            zoom = 1000;
+        } else if inn {
+            zoom = zoom_step(zoom, true);
+        } else if out {
+            zoom = zoom_step(zoom, false);
+        }
+        state.zoom.insert(id, zoom);
+    }
+    let key = crate::htmlview::RenderKey { id, width, scale_milli: (scale * 1000.0).round() as u32, remote, zoom_milli: zoom, dark: state.dark };
     let page = renderer.get(&key, body).or_else(|| renderer.latest_for(id));
     let Some(page) = page else {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
         Line::new().note("Rendering message...").size(11.5).show(ui);
         return None;
     };
-    if page.width as u32 != width || !page.scale.eq(&scale) {
+    if page.key != key {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
     }
+    if state.selection_for.as_ref() != Some(&page.key) {
+        state.selection = None;
+        state.selection_for = Some(page.key.clone());
+    }
     let shown = Vec2::new(page.width.min(ui.available_width()), page.height);
-    let (rect, resp) = ui.allocate_exact_size(shown, Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(shown, Sense::click_and_drag());
     let painter = ui.painter_at(rect);
     let ratio = rect.width() / page.width;
-    for (tex, top, h) in html_textures(ui, &page) {
-        let y = rect.top() + top as f32 / page.scale * ratio;
-        let r = Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(rect.width(), h as f32 / page.scale * ratio));
-        painter.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+    paint_tiles(ui, renderer, &page, rect, ratio);
+
+    let local = |p: Pos2| (p - rect.left_top()) / ratio;
+    if resp.drag_started() {
+        let origin = ui.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos());
+        if let Some(p) = origin.and_then(|p| page.pos_at(local(p).x, local(p).y)) {
+            state.selection = Some((p, p));
+        }
+    } else if resp.dragged() {
+        if let (Some((a, _)), Some(p)) = (state.selection, resp.interact_pointer_pos().and_then(|p| page.pos_at(local(p).x, local(p).y))) {
+            state.selection = Some((a, p));
+        }
     }
+    if let Some((a, b)) = state.selection {
+        for r in page.selection_rects(a, b) {
+            painter.rect_filled(rect_of(rect.left_top(), r, ratio), 0.0, READOUT.gamma_multiply(0.35));
+        }
+    }
+
+    let mut matches = Vec::new();
+    if let Some(find) = &mut state.find {
+        matches = page.find(&find.query);
+        if !matches.is_empty() {
+            find.index = find.index.min(matches.len() - 1);
+        }
+        let current = find.index;
+        for (i, hit) in matches.iter().enumerate() {
+            let color = if i == current { WARN.gamma_multiply(0.65) } else { Color32::from_rgba_unmultiplied(255, 220, 60, 90) };
+            for r in &hit.rects {
+                painter.rect_filled(rect_of(rect.left_top(), *r, ratio), 1.0, color);
+            }
+        }
+        if find.jump {
+            find.jump = false;
+            if let Some(r) = matches.get(current).and_then(|h| h.rects.first()) {
+                ui.scroll_to_rect(rect_of(rect.left_top(), *r, ratio).expand(40.0), Some(egui::Align::Center));
+            }
+        }
+        if !ui.ctx().egui_wants_keyboard_input() {
+            let (n, shift) = ui.input(|i| (i.key_pressed(egui::Key::N) && !i.modifiers.command, i.modifiers.shift));
+            if n {
+                step_find(find, matches.len(), !shift);
+            }
+        }
+    }
+    state.match_count = matches.len();
+
     let hit = |p: Pos2| {
-        let local = (p - rect.left_top()) / ratio;
-        page.links.iter().find(|l| local.x >= l.rect[0] && local.x <= l.rect[0] + l.rect[2] && local.y >= l.rect[1] && local.y <= l.rect[1] + l.rect[3])
+        let l = local(p);
+        page.links.iter().find(|k| l.x >= k.rect[0] && l.x <= k.rect[0] + k.rect[2] && l.y >= k.rect[1] && l.y <= k.rect[1] + k.rect[3])
     };
     let hovered = resp.hover_pos().and_then(hit);
     if let Some(link) = hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        resp.clone().on_hover_text_at_pointer(&link.href);
+        let tip = match &link.mismatch {
+            Some((shown, real)) => format!("Text says {shown} but this goes to {real}\n{}", link.href),
+            None => link.href.clone(),
+        };
+        resp.clone().on_hover_text_at_pointer(tip);
+    } else if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
     }
     ui.ctx().accesskit_node_builder(resp.id, |node| node.set_label("message body"));
+
+    let wants_copy = !ui.ctx().egui_wants_keyboard_input() && ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
+    if wants_copy {
+        let text = match state.selection {
+            Some((a, b)) if a != b || !page.blocks.is_empty() => {
+                let t = page.selected_text(a, b);
+                if t.is_empty() { page.plain_text() } else { t }
+            }
+            _ => page.plain_text(),
+        };
+        ui.ctx().copy_text(text);
+    }
+
     if resp.clicked() {
-        return resp.interact_pointer_pos().and_then(hit).map(|l| l.href.clone());
+        state.selection = None;
+        return resp.interact_pointer_pos().and_then(hit).map(|l| LinkClick { href: l.href.clone(), mismatch: l.mismatch.clone() });
     }
     None
+}
+
+fn paint_tiles(ui: &Ui, renderer: &crate::htmlview::Renderer, page: &std::sync::Arc<crate::htmlview::Rendered>, rect: Rect, ratio: f32) {
+    let source = std::sync::Arc::as_ptr(page) as usize;
+    let cache_id = egui::Id::new("html-textures");
+    let mut cache = ui
+        .ctx()
+        .data(|d| d.get_temp::<HtmlTextures>(cache_id))
+        .filter(|c| c.source == source)
+        .unwrap_or(HtmlTextures { source, textures: vec![None; page.tile_rows.len()] });
+    let clip = ui.clip_rect();
+    let painter = ui.painter_at(rect);
+    let mut visible = Vec::new();
+    for (i, (top, h)) in page.tile_rows.iter().enumerate() {
+        let y = rect.top() + *top as f32 / page.scale * ratio;
+        let r = Rect::from_min_size(Pos2::new(rect.left(), y), Vec2::new(rect.width(), *h as f32 / page.scale * ratio));
+        let near = r.expand2(Vec2::new(0.0, clip.height() * 0.5));
+        if !near.intersects(clip) {
+            continue;
+        }
+        visible.push(i);
+        if cache.textures[i].is_none() {
+            if let Some(tile) = renderer.tile(page, i) {
+                let image = egui::ColorImage::from_rgba_unmultiplied([tile.width as usize, tile.height as usize], &tile.rgba);
+                cache.textures[i] = Some(ui.ctx().load_texture(format!("html-{source}-{i}"), image, egui::TextureOptions::LINEAR));
+            } else {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(30));
+            }
+        }
+        if let Some(tex) = &cache.textures[i] {
+            painter.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        }
+    }
+    if let (Some(&first), Some(&last)) = (visible.first(), visible.last()) {
+        for (i, t) in cache.textures.iter_mut().enumerate() {
+            if i + 1 < first || i > last + 1 {
+                *t = None;
+            }
+        }
+        renderer.keep_tiles(page, first.saturating_sub(1), last + 1);
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(cache_id, cache));
 }
 
 pub fn body_text(ui: &mut Ui, text: &str) {
@@ -224,18 +415,33 @@ pub fn subject_line(ui: &mut Ui, text: &str) {
     ui.add(egui::Label::new(egui::RichText::new(text).font(body_strong(18.0)).color(VALUE)).wrap());
 }
 
-pub fn blocked_images(ui: &mut Ui, host: &str) -> bool {
-    let mut load = false;
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ImageChoice {
+    Once,
+    Sender,
+    Domain,
+}
+
+pub fn blocked_images(ui: &mut Ui, host: &str, sender: &str, domain: &str) -> Option<ImageChoice> {
+    let mut choice = None;
     rail_block(ui, WARN, WARN.gamma_multiply(0.12), |ui| {
         ui.horizontal(|ui| {
             ui.label(legend("remote images blocked").color(WARN));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                load = ui.add(Key::new("load once").outline(WARN)).clicked();
+                if ui.add(Key::new("always from domain").outline(WARN)).on_hover_text(format!("Always load images in mail from {domain}")).clicked() {
+                    choice = Some(ImageChoice::Domain);
+                }
+                if ui.add(Key::new("always from sender").outline(WARN)).on_hover_text(format!("Always load images in mail from {sender}")).clicked() {
+                    choice = Some(ImageChoice::Sender);
+                }
+                if ui.add(Key::new("load once").outline(WARN)).clicked() {
+                    choice = Some(ImageChoice::Once);
+                }
             });
         });
         Line::new().note(format!("This message wants to load pictures from {host}, which tells the sender you opened it.")).size(12.0).wrapped(ui);
     });
-    load
+    choice
 }
 
 pub fn attachment(ui: &mut Ui, name: &str, size: &str) -> egui::Response {
