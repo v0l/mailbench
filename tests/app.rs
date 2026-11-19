@@ -1015,3 +1015,13 @@ fn double_clicking_the_divider_resets_the_list_width() {
     assert!((after - before - 160.0).abs() < 6.0, "{before} -> {after}");
     assert_eq!(h.state().1.prefs.layout.list_w, 540);
 }
+
+#[test]
+fn a_wide_html_table_scrolls_instead_of_shrinking_below_legibility() {
+    let mut store = FakeStore::concept();
+    let id = store.list(&Query::new(Folder::Inbox), 0, 1).items[0].id;
+    store.set_html(id, "<body style=\"margin:0\"><table width=\"2400\"><tr><td>wide</td></tr></table></body>");
+    let h = wide_harness(store, |app| app.prefs.reading.reader_width = mailbench::prefs::ReaderWidth::Comfortable);
+    let app = &h.state().1;
+    assert!(app.html_state.shown_width > app.reader_content_w + 100.0, "{} vs {}", app.html_state.shown_width, app.reader_content_w);
+}

@@ -541,6 +541,8 @@ pub struct DocState {
     fill: [u8; 3],
 }
 
+const MIN_FIT: f32 = 0.7;
+
 pub fn render(body: &HtmlBody, key: &RenderKey) -> (Rendered, DocState) {
     let scale = key.scale_milli as f32 / 1000.0;
     let zoom = (key.zoom_milli as f32 / 1000.0).max(0.1);
@@ -552,13 +554,15 @@ pub fn render(body: &HtmlBody, key: &RenderKey) -> (Rendered, DocState) {
     settle(&mut doc, &resources);
     let content_w = doc.try_root_element().map_or(0.0, |_| widest(&doc));
     let content_h = doc.try_root_element().map_or(0.0, |r| r.final_layout().size.height);
-    let fit = if content_w > layout_width + 1.0 { layout_width / content_w } else { 1.0 };
-    let layout_w = if fit < 1.0 { content_w.ceil() } else { layout_width };
-    if fit < 1.0 {
+    let wide = content_w > layout_width + 1.0;
+    let fit = if wide { (layout_width / content_w).max(MIN_FIT) } else { 1.0 };
+    let layout_w = if wide { content_w.ceil() } else { layout_width };
+    let width = if wide && fit > layout_width / content_w { (content_w.ceil() * fit * zoom).ceil() as u32 } else { width };
+    if wide {
         doc.set_viewport(Viewport::new((layout_w * z) as u32, (800.0 * z) as u32, z, scheme(key.dark)));
         doc.resolve(0.0);
     }
-    let content_h = if fit < 1.0 { doc.try_root_element().map_or(content_h, |r| r.final_layout().size.height) } else { content_h };
+    let content_h = if wide { doc.try_root_element().map_or(content_h, |r| r.final_layout().size.height) } else { content_h };
     let height = content_h.clamp(1.0, MAX_HEIGHT);
     let paint = z * fit;
     let px_w = (width as f32 * scale).ceil() as u32;
@@ -803,6 +807,13 @@ mod tests {
         let edge = pixel(&r, 290.0, 10.0);
         assert!(edge[2] > 200 && edge[0] < 60, "right edge {edge:?}");
         assert!(r.height < 60.0 && r.height > 20.0, "height {}", r.height);
+    }
+
+    #[test]
+    fn a_very_wide_mail_stays_legible_and_overflows_the_pane_to_scroll() {
+        let r = shot(&body("<body style=\"margin:0\"><table width=\"1400\" cellspacing=0 cellpadding=0><tr><td style=\"background:#0000ff;height:60px\"></td></tr></table></body>"), 700, 1.0, false);
+        assert!(r.width > 900.0 && r.width < 1100.0, "width {}", r.width);
+        assert!(r.height > 40.0 && r.height < 50.0, "height {}", r.height);
     }
 
     #[test]

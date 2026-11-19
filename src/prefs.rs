@@ -205,7 +205,7 @@ pub const COMMANDS: [Command; 14] = [
     Command { id: "search", label: "search", default: egui::Key::Slash, hint: true },
     Command { id: "move", label: "move to folder", default: egui::Key::M, hint: true },
     Command { id: "compose", label: "compose", default: egui::Key::C, hint: true },
-    Command { id: "reader_width", label: "toggle reader width", default: egui::Key::W, hint: false },
+    Command { id: "reader_width", label: "reader width", default: egui::Key::W, hint: true },
 ];
 
 pub const FIXED: [(&str, &str, bool); 6] = [

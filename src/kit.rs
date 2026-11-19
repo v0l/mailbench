@@ -144,6 +144,7 @@ pub struct HtmlState {
     pub zoom: std::collections::HashMap<u64, u32>,
     pub dark: bool,
     pub default_zoom: u32,
+    pub shown_width: f32,
     pub find: Option<FindState>,
     pub selection: Option<(crate::htmlview::TextPos, crate::htmlview::TextPos)>,
     pub selection_for: Option<crate::htmlview::RenderKey>,
@@ -263,8 +264,18 @@ pub fn html_body(
         state.selection = None;
         state.selection_for = Some(page.key.clone());
     }
-    let shown = Vec2::new(page.width.min(ui.available_width()), page.height);
-    let (rect, resp) = ui.allocate_exact_size(shown, Sense::click_and_drag());
+    let overflow = page.width > ui.available_width() + 1.0;
+    state.shown_width = page.width;
+    let shown = Vec2::new(if overflow { page.width } else { page.width.min(ui.available_width()) }, page.height);
+    let (rect, resp) = if overflow {
+        egui::ScrollArea::horizontal()
+            .id_salt(("html-scroll", id))
+            .auto_shrink([false, true])
+            .show(ui, |ui| ui.allocate_exact_size(shown, Sense::click_and_drag()))
+            .inner
+    } else {
+        ui.allocate_exact_size(shown, Sense::click_and_drag())
+    };
     let painter = ui.painter_at(rect);
     let ratio = rect.width() / page.width;
     paint_tiles(ui, renderer, &page, rect, ratio);
