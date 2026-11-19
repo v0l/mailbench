@@ -376,6 +376,10 @@ pub struct AddForm {
     pub nostr: bool,
     pub publish_inbox: Option<bool>,
     pub relays: String,
+    app_key: String,
+    bunker_user: Option<(String, String)>,
+    bunker_rx: Option<Receiver<(String, Result<String, String>)>>,
+    bunker_error: Option<String>,
     pub provider: Option<Provider>,
     pub oauth: Option<(Provider, oauth::OAuthTokens)>,
     pub test: TestRun,
@@ -422,6 +426,10 @@ impl AddForm {
             nostr: false,
             publish_inbox: None,
             relays: String::new(),
+            app_key: crate::backend::new_app_key(),
+            bunker_user: None,
+            bunker_rx: None,
+            bunker_error: None,
             provider: None,
             oauth: None,
             test: TestRun::default(),
@@ -434,6 +442,24 @@ impl AddForm {
         }
     }
 
+    fn is_bunker(&self) -> bool {
+        self.password.trim().starts_with("bunker://")
+    }
+
+    fn start_bunker(&mut self, ctx: &egui::Context) {
+        let url = self.password.trim().to_string();
+        let app_key = self.app_key.clone();
+        let (tx, rx) = channel();
+        self.bunker_rx = Some(rx);
+        self.bunker_error = None;
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = crate::runtime::block_on(crate::backend::bunker_user(&url, &app_key)).map(|k| k.to_hex()).map_err(|e| e.to_string());
+            let _ = tx.send((url, result));
+            ctx.request_repaint();
+        });
+    }
+
     fn email(&self) -> String {
         self.email.trim().to_string()
     }
@@ -441,9 +467,19 @@ impl AddForm {
     pub fn config(&self) -> Result<AccountConfig, String> {
         if self.nostr {
             if self.password.trim().is_empty() {
-                return Err("Enter your nsec".into());
+                return Err("Enter your nsec or a bunker:// url".into());
             }
             let relays = self.relays.split([',', ' ', '\n']).map(str::trim).filter(|r| !r.is_empty()).map(String::from).collect();
+            if self.is_bunker() {
+                let url = self.password.trim().to_string();
+                let user = match &self.bunker_user {
+                    Some((for_url, user)) if *for_url == url => user.clone(),
+                    _ => return Err("Connect to the bunker first".into()),
+                };
+                let mut cfg = accounts::nostr_bunker_account(&url, &self.app_key, &user, relays).map_err(|e| e.to_string())?;
+                cfg.id = self.id.clone();
+                return Ok(cfg);
+            }
             let mut cfg = accounts::nostr_config(&self.password, relays).map_err(|_| "That is not a valid nsec".to_string())?;
             if let Credential::Nostr { publish_inbox, .. } = &mut cfg.credential {
                 *publish_inbox = self.publish_inbox == Some(true);
@@ -554,6 +590,20 @@ impl AddForm {
                 Err(TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(100)),
             }
         }
+        if let Some(rx) = &self.bunker_rx {
+            match rx.try_recv() {
+                Ok((url, Ok(user))) => {
+                    self.bunker_user = Some((url, user));
+                    self.bunker_rx = None;
+                }
+                Ok((_, Err(e))) => {
+                    self.bunker_error = Some(e);
+                    self.bunker_rx = None;
+                }
+                Err(TryRecvError::Disconnected) => self.bunker_rx = None,
+                Err(TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(100)),
+            }
+        }
         self.test.poll(ctx);
         let key = self.key();
         if key != self.test.for_key && !self.test.running() {
@@ -612,9 +662,24 @@ impl AddForm {
             section(ui, "add account", "your address first, the rest is looked up", |ui| {
                 ui.checkbox(&mut self.nostr, "nostr account (NIP-17 private messages)");
                 if self.nostr {
-                    row(ui, "nsec", |ui| {
+                    row(ui, "nsec or bunker", |ui| {
                         secret(ui, &mut self.password);
                     });
+                    if self.is_bunker() {
+                        let connected = matches!(&self.bunker_user, Some((u, _)) if *u == self.password.trim());
+                        if connected {
+                            status(ui, true, "Connected to the bunker. No nsec is stored.");
+                        } else if self.bunker_rx.is_some() {
+                            hint(ui, "Waiting for the bunker to approve. Check your signer app.");
+                        } else {
+                            if ui.add(Key::new("connect bunker").outline(VALUE).min_width(130.0)).clicked() {
+                                self.start_bunker(ui.ctx());
+                            }
+                            if let Some(e) = &self.bunker_error {
+                                status(ui, false, e);
+                            }
+                        }
+                    }
                     row(ui, "relays", |ui| {
                         field(ui, &mut self.relays, "wss://relay.example");
                     });

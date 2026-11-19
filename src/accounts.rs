@@ -18,6 +18,15 @@ pub enum Credential {
         #[serde(default)]
         publish_inbox: bool,
     },
+    NostrBunker {
+        url: String,
+        app_key: String,
+        user: String,
+        #[serde(default)]
+        relays: Vec<String>,
+        #[serde(default)]
+        publish_inbox: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +89,7 @@ pub fn auth_of(cfg: &AccountConfig) -> Auth {
             Auth::XOAuth2 { user: cfg.username.clone(), access_token: tokens.access_token.clone() }
         }
         Credential::Nostr { secret, .. } => Auth::Password { user: cfg.username.clone(), password: secret.clone() },
+        Credential::NostrBunker { app_key, .. } => Auth::Password { user: cfg.username.clone(), password: app_key.clone() },
     }
 }
 
@@ -200,8 +210,40 @@ pub fn nostr_backend(cfg: &AccountConfig) -> Result<NostrBackend> {
             c.publish_inbox = *publish_inbox;
             NostrBackend::new(c)
         }
+        Credential::NostrBunker { url, app_key, user, relays, publish_inbox } => {
+            let user = nostr_sdk::PublicKey::from_hex(user).map_err(|e| BackendError::Auth(format!("bad bunker user key: {e}")))?;
+            let mut c = NostrConfig::bunker(url, app_key, user, relays.clone());
+            c.publish_inbox = *publish_inbox;
+            NostrBackend::new(c)
+        }
         _ => Err(BackendError::Auth("not a nostr account".into())),
     }
+}
+
+pub async fn nostr_bunker_config(url: &str, relays: Vec<String>) -> Result<AccountConfig> {
+    let app_key = new_app_key();
+    let user = bunker_user(url, &app_key).await?;
+    nostr_bunker_account(url, &app_key, &user.to_hex(), relays)
+}
+
+pub fn nostr_bunker_account(url: &str, app_key: &str, user_hex: &str, relays: Vec<String>) -> Result<AccountConfig> {
+    let user = nostr_sdk::PublicKey::from_hex(user_hex).map_err(|e| BackendError::Auth(format!("bad bunker user key: {e}")))?;
+    let credential = Credential::NostrBunker { url: url.trim().to_string(), app_key: app_key.trim().to_string(), user: user.to_hex(), relays, publish_inbox: false };
+    let address = address_of(&user);
+    let none = ServerSettings::new("", 0, Security::Plain);
+    Ok(AccountConfig {
+        id: new_id(),
+        name: "nostr".into(),
+        display_name: String::new(),
+        signature: String::new(),
+        username: address.clone(),
+        address,
+        imap: none.clone(),
+        smtp: none,
+        credential,
+        backfill: Default::default(),
+        notify: Default::default(),
+    })
 }
 
 pub fn nostr_config(secret: &str, relays: Vec<String>) -> Result<AccountConfig> {
@@ -232,7 +274,7 @@ pub fn nostr_lacks_inbox_list(cfg: &AccountConfig) -> bool {
 
 pub fn setup_for(cfg: &AccountConfig, store: &Store) -> Result<AccountSetup> {
     let backend: Box<dyn Backend> = match cfg.credential {
-        Credential::Nostr { .. } => Box::new(nostr_backend(cfg)?),
+        Credential::Nostr { .. } | Credential::NostrBunker { .. } => Box::new(nostr_backend(cfg)?),
         Credential::Password(_) => Box::new(build_account(cfg)),
         Credential::OAuth { .. } => Box::new(Fresh { cfg: cfg.clone(), store_path: Some(store.try_clone()?), inner: None }),
     };
@@ -278,7 +320,7 @@ pub fn run_checks(cfg: &AccountConfig, mut report: impl FnMut(Step, std::result:
             }
         }
     }
-    if matches!(cfg.credential, Credential::Nostr { .. }) {
+    if matches!(cfg.credential, Credential::Nostr { .. } | Credential::NostrBunker { .. }) {
         let result = nostr_backend(&cfg).map_err(|e| e.to_string()).and_then(|mut b| crate::runtime::block_on(b.check()).map_err(|e| e.to_string()));
         report(Step::Imap, result.clone());
         if result.is_ok() {

@@ -38,7 +38,7 @@ Sync is token based. `sync_folder(folder, since)` returns a `FolderDelta`: the n
 
 ## Nostr (NIP-17)
 
-`NostrBackend` is a mail backend over Nostr private DMs. Add it from the add account screen with an nsec (hex also works). The secret is stored with the other credentials in the encrypted store. NIP-46 bunker signers are not supported yet (#865).
+`NostrBackend` is a mail backend over Nostr private DMs. Add it from the add account screen with an nsec (hex also works). The secret is stored with the other credentials in the encrypted store. Paste a `bunker://` URL instead of an nsec to use a NIP-46 remote signer: press connect bunker, approve in your signer app, and no nsec is stored. Mailbench keeps the bunker URL and a generated client app key in the encrypted store, and the bunker signs the gift wraps and decrypts the incoming ones.
 
 - Relays: the account's kind 10050 list, else its NIP-65 read relays, else the configured relays, else `DEFAULT_RELAYS`. `publish_inbox` publishes a kind 10050 when none exists.
 - Folders: Inbox (received), Sent (own messages, from the self copy gift wrap) and Archive (local only, empty).

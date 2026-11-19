@@ -9,6 +9,8 @@ use nostr_sdk::prelude::*;
 use nostr_sdk::Event as NostrEvent;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use nostr_connect::prelude::NostrConnectURI;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub const DOMAIN: &str = "nostr";
@@ -27,12 +29,46 @@ pub struct NostrConfig {
     pub secret: String,
     pub relays: Vec<String>,
     pub publish_inbox: bool,
+    pub bunker: Option<BunkerConfig>,
 }
+
+#[derive(Clone, Debug)]
+pub struct BunkerConfig {
+    pub url: String,
+    pub app_key: String,
+    pub user: PublicKey,
+}
+
+pub const BUNKER_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl NostrConfig {
     pub fn new(secret: &str, relays: Vec<String>) -> Self {
-        Self { secret: secret.trim().to_string(), relays, publish_inbox: false }
+        Self { secret: secret.trim().to_string(), relays, publish_inbox: false, bunker: None }
     }
+
+    pub fn bunker(url: &str, app_key: &str, user: PublicKey, relays: Vec<String>) -> Self {
+        Self {
+            secret: String::new(),
+            relays,
+            publish_inbox: false,
+            bunker: Some(BunkerConfig { url: url.trim().to_string(), app_key: app_key.trim().to_string(), user }),
+        }
+    }
+}
+
+pub fn new_app_key() -> String {
+    Keys::generate().secret_key().to_secret_hex()
+}
+
+fn bunker_signer(url: &str, app_key: &str) -> Result<nostr_connect::client::NostrConnect> {
+    let uri = NostrConnectURI::parse(url.trim()).map_err(|e| BackendError::Auth(format!("bad bunker url: {e}")))?;
+    let keys = Keys::parse(app_key.trim()).map_err(|e| BackendError::Auth(format!("bad app key: {e}")))?;
+    nostr_connect::client::NostrConnect::new(uri, keys, BUNKER_TIMEOUT, None).map_err(|e| BackendError::Auth(e.to_string()))
+}
+
+pub async fn bunker_user(url: &str, app_key: &str) -> Result<PublicKey> {
+    let signer = bunker_signer(url, app_key)?;
+    signer.get_public_key().await.map_err(|e| BackendError::Auth(format!("bunker refused: {e}")))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -135,7 +171,7 @@ pub fn encrypt_file(key: &[u8; 32], nonce: &[u8; 12], plain: &[u8]) -> Result<Ve
     aes.encrypt(Nonce::from_slice(nonce), plain).map_err(|_| BackendError::Protocol("file did not encrypt".into()))
 }
 
-pub async fn open_wrap(keys: &Keys, wrap: &NostrEvent) -> std::result::Result<Dm, Rejected> {
+pub async fn open_wrap<T: NostrSigner>(keys: &T, wrap: &NostrEvent) -> std::result::Result<Dm, Rejected> {
     if wrap.kind != Kind::GiftWrap {
         return Err(Rejected::NotGiftWrap);
     }
@@ -374,7 +410,8 @@ pub async fn resolve_nip05(identifier: &str) -> Option<PublicKey> {
 
 pub struct NostrBackend {
     cfg: NostrConfig,
-    keys: Keys,
+    signer: Arc<dyn NostrSigner>,
+    me: PublicKey,
     client: Option<Client>,
     msgs: BTreeMap<u32, Dm>,
     seen_wraps: HashSet<EventId>,
@@ -393,13 +430,20 @@ fn conn<E: std::fmt::Display>(e: E) -> BackendError {
 
 impl NostrBackend {
     pub fn new(cfg: NostrConfig) -> Result<Self> {
-        let keys = Keys::parse(&cfg.secret).map_err(|e| BackendError::Auth(format!("bad nostr key: {e}")))?;
+        let (signer, me): (Arc<dyn NostrSigner>, PublicKey) = match &cfg.bunker {
+            Some(b) => (Arc::new(bunker_signer(&b.url, &b.app_key)?), b.user),
+            None => {
+                let keys = Keys::parse(&cfg.secret).map_err(|e| BackendError::Auth(format!("bad nostr key: {e}")))?;
+                let me = keys.public_key();
+                (Arc::new(keys), me)
+            }
+        };
         let relays = if cfg.relays.is_empty() { DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect() } else { cfg.relays.clone() };
-        Ok(Self { cfg, keys, client: None, msgs: BTreeMap::new(), seen_wraps: HashSet::new(), newest_wrap: None, names: Names::default(), relays })
+        Ok(Self { cfg, signer, me, client: None, msgs: BTreeMap::new(), seen_wraps: HashSet::new(), newest_wrap: None, names: Names::default(), relays })
     }
 
     pub fn public_key(&self) -> PublicKey {
-        self.keys.public_key()
+        self.me
     }
 
     pub fn address(&self) -> String {
@@ -410,7 +454,7 @@ impl NostrBackend {
         if let Some(c) = &self.client {
             return Ok(c.clone());
         }
-        let client = Client::new(self.keys.clone());
+        let client = Client::new(self.signer.clone());
         for url in &self.relays {
             client.add_relay(url.as_str()).await.map_err(conn)?;
         }
@@ -437,7 +481,7 @@ impl NostrBackend {
 
     async fn publish_inbox_list(&self, client: &Client) -> Result<()> {
         let tags: Vec<Tag> = self.relays.iter().filter_map(|r| Tag::parse(["relay", r.as_str()]).ok()).collect();
-        let event = EventBuilder::new(Kind::InboxRelays, "").tags(tags).sign_with_keys(&self.keys).map_err(proto)?;
+        let event = EventBuilder::new(Kind::InboxRelays, "").tags(tags).sign(&self.signer).await.map_err(proto)?;
         client.send_event_to(self.relays.clone(), &event).await.map_err(conn)?;
         Ok(())
     }
@@ -518,7 +562,7 @@ impl NostrBackend {
                 continue;
             }
             self.newest_wrap = Some(self.newest_wrap.unwrap_or(0).max(wrap.created_at.as_secs()));
-            if let Ok(dm) = open_wrap(&self.keys, wrap).await {
+            if let Ok(dm) = open_wrap(&self.signer, wrap).await {
                 if self.insert(dm.clone()) {
                     added += 1;
                     people.extend(dm.participants());
@@ -658,7 +702,7 @@ impl Backend for NostrBackend {
         }
         targets.push((me, self.relays.clone()));
         for (who, relays) in targets {
-            let wrap = EventBuilder::gift_wrap(&self.keys, &who, rumor.clone(), []).await.map_err(proto)?;
+            let wrap = EventBuilder::gift_wrap(&self.signer, &who, rumor.clone(), []).await.map_err(proto)?;
             let out = client.send_event_to(relays, &wrap).await.map_err(conn)?;
             if out.success.is_empty() {
                 return Err(BackendError::Connection("no relay accepted the message".into()));

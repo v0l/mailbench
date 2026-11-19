@@ -1,3 +1,4 @@
+use mailbench::accounts::{self, AccountConfig, Credential};
 use mailbench::backend::*;
 use nostr_relay_builder::MockRelay;
 use nostr_sdk::prelude::*;
@@ -141,4 +142,62 @@ async fn a_dm_body_word_is_found_by_search_after_sync() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].0, "Inbox");
     assert!(sink.search_hits("nonexistentword").unwrap().is_empty());
+}
+
+struct ApproveAll;
+
+impl nostr_connect::prelude::NostrConnectSignerActions for ApproveAll {
+    fn approve(&self, _public_key: &PublicKey, _req: &nostr_connect::prelude::NostrConnectRequest) -> bool {
+        true
+    }
+}
+
+async fn mock_bunker(user: &Keys, relay: &str) -> String {
+    use nostr_connect::prelude::*;
+    let keys = NostrConnectKeys { signer: Keys::generate(), user: user.clone() };
+    let signer = NostrConnectRemoteSigner::new(keys, [relay], None, None).unwrap();
+    let uri = signer.bunker_uri().to_string();
+    tokio::spawn(async move {
+        let _ = signer.serve(ApproveAll).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    uri
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bunker_account_sends_and_opens_dms_without_an_nsec() {
+    let relay = MockRelay::run().await.unwrap();
+    let url = relay.url().await.to_string();
+    let alice_keys = Keys::parse(&secret(1)).unwrap();
+    let bunker = mock_bunker(&alice_keys, &url).await;
+
+    let cfg = accounts::nostr_bunker_config(&bunker, vec![url.clone()]).await.unwrap();
+    assert_eq!(cfg.address, address_of(&alice_keys.public_key()));
+    let Credential::NostrBunker { url: stored, app_key, .. } = &cfg.credential else { panic!("not a bunker credential") };
+    assert_eq!(stored, &bunker);
+    assert!(!app_key.is_empty() && *app_key != secret(1));
+    let json = serde_json::to_string(&cfg).unwrap();
+    assert!(!json.contains(&secret(1)));
+    let back: AccountConfig = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, cfg);
+
+    let mut alice = accounts::nostr_backend(&back).unwrap();
+    let mut bob = backend(2, &url).await;
+    assert_eq!(alice.public_key(), alice_keys.public_key());
+
+    alice.send(&mail(&alice, &bob, "Remote", "signed elsewhere", None)).await.unwrap();
+    let inbox = summaries(&mut bob, "Inbox").await;
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].subject.as_deref(), Some("Remote"));
+    assert_eq!(inbox[0].from[0].address, alice.address());
+
+    bob.send(&mail(&bob, &alice, "Re: Remote", "got it", None)).await.unwrap();
+    let back = summaries(&mut alice, "Inbox").await;
+    assert_eq!(back.len(), 1);
+    assert_eq!(back[0].subject.as_deref(), Some("Re: Remote"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bad_bunker_url_is_rejected() {
+    assert!(accounts::nostr_bunker_config("not a url", vec![]).await.is_err());
 }
