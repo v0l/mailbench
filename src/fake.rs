@@ -6,6 +6,7 @@ pub struct FakeStore {
     messages: Vec<Message>,
     next: u64,
     older: Vec<(u64, Vec<u64>)>,
+    stash: std::collections::HashMap<u64, Outgoing>,
 }
 
 fn sync_of(state: AccountState) -> SyncState {
@@ -60,6 +61,10 @@ fn concept_message(id: u64, i: usize, m: &crate::data::Msg, suffix: &str) -> Mes
         remote_images: if first { Some(BLOCKED_HOST.to_string()) } else { None },
         headers: if first { sample_headers() } else { Default::default() },
         body_state: Default::default(),
+        message_id: None,
+        references: Vec::new(),
+        to_full: Vec::new(),
+        cc_full: Vec::new(),
     }
 }
 
@@ -108,6 +113,10 @@ fn draft(id: u64, subject: &str, when: &str) -> Message {
         remote_images: None,
         headers: Default::default(),
         body_state: Default::default(),
+        message_id: None,
+        references: Vec::new(),
+        to_full: Vec::new(),
+        cc_full: Vec::new(),
     }
 }
 
@@ -122,6 +131,7 @@ impl FakeStore {
                 sync: sync_of(a.state),
                 detail: None,
                 indexed: None,
+                signature: String::new(),
             })
             .collect()
     }
@@ -132,7 +142,7 @@ impl FakeStore {
         let n = messages.len() as u64;
         messages.push(draft(n + 1, "Re: Firmware release notes for 2.4", "Wed"));
         messages.push(draft(n + 2, "Bench night checklist", "Tue"));
-        let mut store = FakeStore { accounts: Self::base_accounts(), messages, next: n + 3, older: Vec::new() };
+        let mut store = FakeStore { accounts: Self::base_accounts(), messages, next: n + 3, older: Vec::new(), stash: Default::default() };
         store.add_older(1, &[THREAD[0].clone(), THREAD[1].clone()]);
         store
     }
@@ -167,7 +177,7 @@ impl FakeStore {
     }
 
     pub fn empty() -> FakeStore {
-        FakeStore { accounts: Self::base_accounts(), messages: Vec::new(), next: 1, older: Vec::new() }
+        FakeStore { accounts: Self::base_accounts(), messages: Vec::new(), next: 1, older: Vec::new(), stash: Default::default() }
     }
 
     pub fn failed() -> FakeStore {
@@ -189,7 +199,7 @@ impl FakeStore {
                 m
             })
             .collect();
-        FakeStore { accounts: Self::base_accounts(), messages, next: count as u64 + 1, older: Vec::new() }
+        FakeStore { accounts: Self::base_accounts(), messages, next: count as u64 + 1, older: Vec::new(), stash: Default::default() }
     }
 
     fn matches(&self, m: &Message, q: &Query) -> bool {
@@ -318,10 +328,53 @@ impl MailStore for FakeStore {
         let mut m = draft(id.0, &message.subject, "09:58");
         m.folder = folder;
         m.summary.account = message.account;
-        m.to = vec![message.to];
-        m.cc = if message.cc.is_empty() { Vec::new() } else { vec![message.cc] };
+        m.to = vec![message.to.clone()];
+        m.cc = if message.cc.is_empty() { Vec::new() } else { vec![message.cc.clone()] };
         m.paragraphs = message.body.split("\n\n").map(|p| p.to_string()).collect();
+        m.attachments = message
+            .attachments
+            .iter()
+            .map(|a| AttachmentInfo { name: a.name.clone(), size: human_size(a.data.len()), mime: a.mime.clone() })
+            .collect();
+        m.message_id = message.message_id.clone();
+        m.references = message.references.clone();
+        self.stash.insert(id.0, message);
         self.messages.insert(0, m);
         Ok(id)
+    }
+
+    fn save_draft(&mut self, message: Outgoing) -> Result<String, StoreError> {
+        let mid = message.message_id.clone().unwrap_or_else(|| format!("draft-{}", self.next));
+        self.messages.retain(|m| !(m.folder == Folder::Drafts && m.message_id.as_deref() == Some(mid.as_str())));
+        let mut message = message;
+        message.message_id = Some(mid.clone());
+        self.append(Folder::Drafts, message)?;
+        Ok(mid)
+    }
+
+    fn open_draft(&mut self, id: MessageId) -> Result<Outgoing, StoreError> {
+        self.stash.get(&id.0).cloned().ok_or(StoreError::NotFound)
+    }
+
+    fn discard_draft(&mut self, _account: usize, message_id: &str) {
+        self.messages.retain(|m| !(m.folder == Folder::Drafts && m.message_id.as_deref() == Some(message_id)));
+    }
+
+    fn undo_send(&mut self, id: MessageId) -> Result<Option<Outgoing>, StoreError> {
+        let Some(out) = self.stash.remove(&id.0) else { return Ok(None) };
+        self.messages.retain(|m| m.summary.id != id);
+        Ok(Some(out))
+    }
+
+    fn suggest(&self, text: &str, limit: usize) -> Vec<Contact> {
+        let needle = text.to_lowercase();
+        let mut seen: Vec<Contact> = Vec::new();
+        for m in &self.messages {
+            let c = Contact { name: m.summary.from.clone(), address: m.from_address.clone() };
+            if m.summary.from != "me" && !seen.iter().any(|s| s.address == c.address) {
+                seen.push(c);
+            }
+        }
+        seen.into_iter().filter(|c| c.name.to_lowercase().contains(&needle) || c.address.to_lowercase().contains(&needle)).take(limit).collect()
     }
 }

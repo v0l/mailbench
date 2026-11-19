@@ -9,7 +9,7 @@ mod types;
 pub use error::{BackendError, Result};
 pub use imap::{ImapBackend, ImapConfig};
 pub use memory::MemorySink;
-pub use smtp::{SmtpBackend, SmtpConfig, SmtpSecurity};
+pub use smtp::{bracket, build_message, new_message_id_for, render_message, SmtpBackend, SmtpConfig, SmtpSecurity};
 pub use store_sink::StoreSink;
 pub use sync::{SyncReport, SyncSink, sync_account};
 pub use types::*;
@@ -94,6 +94,15 @@ pub trait Backend: Send {
 
     async fn append(&mut self, _folder: &str, _raw: &[u8]) -> Result<()> {
         Err(BackendError::Unsupported("append"))
+    }
+
+    async fn append_flagged(&mut self, folder: &str, flags: &Flags, raw: &[u8]) -> Result<()> {
+        let _ = flags;
+        self.append(folder, raw).await
+    }
+
+    fn sent_copy_by_server(&self) -> bool {
+        false
     }
 
     async fn delete_folder(&mut self, _name: &str) -> Result<()> {
@@ -185,6 +194,14 @@ impl Backend for Account {
 
     async fn append(&mut self, folder: &str, raw: &[u8]) -> Result<()> {
         self.mail.append(folder, raw).await
+    }
+
+    async fn append_flagged(&mut self, folder: &str, flags: &Flags, raw: &[u8]) -> Result<()> {
+        self.mail.append_flagged(folder, flags, raw).await
+    }
+
+    fn sent_copy_by_server(&self) -> bool {
+        self.mail.sent_copy_by_server()
     }
 
     async fn delete_folder(&mut self, name: &str) -> Result<()> {

@@ -3,7 +3,8 @@ use super::types::*;
 use super::Backend;
 use async_trait::async_trait;
 use lettre::message::header::{InReplyTo, MessageId, References};
-use lettre::message::{Mailbox, MessageBuilder};
+use lettre::message::{Attachment as MimeAttachment, Mailbox, MessageBuilder, MultiPart, SinglePart};
+use lettre::message::header::ContentType;
 use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::transport::smtp::client::{Tls, TlsParameters};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
@@ -79,7 +80,15 @@ fn mailbox(a: &Address) -> Result<Mailbox> {
     Ok(Mailbox::new(a.name.clone(), addr))
 }
 
-pub(crate) fn build_message(m: &OutgoingMessage) -> Result<Message> {
+pub fn build_message(m: &OutgoingMessage) -> Result<Message> {
+    build(m, false)
+}
+
+pub fn render_message(m: &OutgoingMessage, keep_bcc: bool) -> Result<Vec<u8>> {
+    Ok(build(m, keep_bcc)?.formatted())
+}
+
+fn build(m: &OutgoingMessage, keep_bcc: bool) -> Result<Message> {
     let mut b: MessageBuilder = Message::builder().from(mailbox(&m.from)?);
     for a in &m.to {
         b = b.to(mailbox(a)?);
@@ -90,16 +99,46 @@ pub(crate) fn build_message(m: &OutgoingMessage) -> Result<Message> {
     for a in &m.bcc {
         b = b.bcc(mailbox(a)?);
     }
-    b = b.header(MessageId::from(new_message_id(&m.from.address)));
+    if keep_bcc {
+        b = b.keep_bcc();
+    }
+    let id = m.message_id.clone().unwrap_or_else(|| new_message_id(&m.from.address));
+    b = b.header(MessageId::from(bracket(&id)));
     if let Some(id) = &m.in_reply_to {
-        b = b.header(InReplyTo::from(id.clone()));
+        b = b.header(InReplyTo::from(bracket(id)));
     }
     if !m.references.is_empty() {
-        b = b.header(References::from(m.references.join(" ")));
+        b = b.header(References::from(m.references.iter().map(|r| bracket(r)).collect::<Vec<_>>().join(" ")));
     }
-    b.subject(m.subject.clone())
-        .body(m.body.clone())
-        .map_err(|e| BackendError::Protocol(e.to_string()))
+    let mut b = b.subject(m.subject.clone());
+    if m.to.is_empty() && m.cc.is_empty() && m.bcc.is_empty() {
+        let from: lettre::Address = m
+            .from
+            .address
+            .parse()
+            .map_err(|e| BackendError::Protocol(format!("bad address {}: {e}", m.from.address)))?;
+        b = b.envelope(lettre::address::Envelope::new(Some(from.clone()), vec![from]).map_err(|e| BackendError::Protocol(e.to_string()))?);
+    }
+    let built = if m.attachments.is_empty() {
+        b.body(m.body.clone())
+    } else {
+        let mut mixed = MultiPart::mixed().singlepart(SinglePart::plain(m.body.clone()));
+        for a in &m.attachments {
+            let mime = ContentType::parse(&a.mime).unwrap_or_else(|_| ContentType::parse("application/octet-stream").expect("valid"));
+            mixed = mixed.singlepart(MimeAttachment::new(a.name.clone()).body(a.data.clone(), mime));
+        }
+        b.multipart(mixed)
+    };
+    built.map_err(|e| BackendError::Protocol(e.to_string()))
+}
+
+pub fn bracket(id: &str) -> String {
+    let id = id.trim();
+    if id.starts_with('<') { id.to_string() } else { format!("<{id}>") }
+}
+
+pub fn new_message_id_for(from: &str) -> String {
+    new_message_id(from)
 }
 
 fn new_message_id(from: &str) -> String {

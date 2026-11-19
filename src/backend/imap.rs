@@ -540,6 +540,18 @@ impl Backend for ImapBackend {
         timed!(self, async { s.append(folder, None, None, raw).await.map_err(BackendError::from) })
     }
 
+    async fn append_flagged(&mut self, folder: &str, flags: &Flags, raw: &[u8]) -> Result<()> {
+        self.ensure().await?;
+        let s = self.session();
+        let list = flag_list(flags);
+        timed!(self, async { s.append(folder, Some(list.as_str()), None, raw).await.map_err(BackendError::from) })
+    }
+
+    fn sent_copy_by_server(&self) -> bool {
+        let host = self.cfg.host.to_ascii_lowercase();
+        host.ends_with("gmail.com") || host.ends_with("googlemail.com")
+    }
+
     async fn watch(&mut self, folder: &str) -> Result<Watch> {
         if !self.ensure().await?.idle {
             return Err(BackendError::Unsupported("watch"));

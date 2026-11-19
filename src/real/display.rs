@@ -73,6 +73,51 @@ pub fn size(bytes: usize) -> String {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct Envelope {
+    pub message_id: Option<String>,
+    pub in_reply_to: Option<String>,
+    pub references: Vec<String>,
+    pub to: Vec<crate::mailstore::Contact>,
+    pub cc: Vec<crate::mailstore::Contact>,
+}
+
+fn contacts(list: Option<mail_parser::AddressList<'_>>) -> Vec<crate::mailstore::Contact> {
+    list.map(|l| {
+        l.mailboxes()
+            .filter_map(|m| {
+                Some(crate::mailstore::Contact { name: m.name().unwrap_or_default().to_string(), address: m.address()?.to_string() })
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+pub fn envelope(raw: &[u8]) -> Envelope {
+    let Some(msg) = MessageParser::default().parse(raw) else { return Envelope::default() };
+    let texts = |l: Option<mail_parser::TextList<'_>>| -> Vec<String> {
+        l.map(|l| l.iter().map(str::to_string).collect()).unwrap_or_default()
+    };
+    let mut references = texts(msg.references());
+    if references.is_empty() {
+        references = texts(msg.in_reply_to());
+    }
+    Envelope {
+        message_id: msg.message_id().map(str::to_string),
+        in_reply_to: texts(msg.in_reply_to()).into_iter().next(),
+        references,
+        to: contacts(msg.to()),
+        cc: contacts(msg.cc()),
+    }
+}
+
+pub fn plain_text(raw: &[u8]) -> String {
+    MessageParser::default()
+        .parse(raw)
+        .map(|m| m.text_bodies().map(|t| t.into_owned()).collect::<Vec<_>>().join("\n\n"))
+        .unwrap_or_default()
+}
+
 pub fn has_attachments(raw: &[u8]) -> bool {
     MessageParser::default().parse(raw).is_some_and(|m| m.attachments().any(|p| !is_inline_image(&p, &html_of(&m))))
 }

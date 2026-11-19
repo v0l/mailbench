@@ -65,6 +65,8 @@ pub enum Op {
     CreateFolder { account: String, name: String },
     RenameFolder { account: String, from: String, to: String },
     DeleteFolder { account: String, name: String },
+    Draft { account: String, local: String },
+    DropDraft { account: String, message_id: String },
 }
 
 impl Op {
@@ -75,7 +77,9 @@ impl Op {
             | Op::Send { account, .. }
             | Op::CreateFolder { account, .. }
             | Op::RenameFolder { account, .. }
-            | Op::DeleteFolder { account, .. } => account,
+            | Op::DeleteFolder { account, .. }
+            | Op::Draft { account, .. }
+            | Op::DropDraft { account, .. } => account,
         }
     }
 }
@@ -113,6 +117,10 @@ pub fn with_pending(folders: Vec<Remote>, ops: &[&Op]) -> Vec<(Option<String>, R
     out
 }
 
+fn yes() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LocalMsg {
     pub account: String,
@@ -122,6 +130,37 @@ pub struct LocalMsg {
     pub subject: String,
     pub body: String,
     pub date: i64,
+    #[serde(default)]
+    pub attachments: Vec<AttMeta>,
+    #[serde(default)]
+    pub in_reply_to: Option<String>,
+    #[serde(default)]
+    pub references: Vec<String>,
+    #[serde(default)]
+    pub message_id: Option<String>,
+    #[serde(default)]
+    pub hold_until_ms: i64,
+    #[serde(default)]
+    pub rev: u64,
+    #[serde(default = "yes")]
+    pub dirty: bool,
+    #[serde(default)]
+    pub sent_ok: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttMeta {
+    pub name: String,
+    pub mime: String,
+    pub size: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ContactRecord {
+    pub name: String,
+    pub address: String,
+    pub count: u32,
+    pub last: i64,
 }
 
 #[cfg(test)]

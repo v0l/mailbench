@@ -1,5 +1,5 @@
 use super::model::*;
-use super::Shared;
+use super::{Outbound, Shared};
 use crate::backend::*;
 use crate::mailstore::SyncState;
 use std::sync::Arc;
@@ -124,14 +124,73 @@ async fn push(shared: &Shared, backend: &mut dyn Backend, op: &Op, account: &str
         Op::RenameFolder { from, to, .. } => backend.rename_folder(from, to).await,
         Op::DeleteFolder { name, .. } => backend.delete_folder(name).await,
         Op::Send { local, .. } => {
-            let Some(message) = shared.outgoing(local) else { return Ok(()) };
-            backend.send(&message).await
+            let message = match shared.outgoing(local, false, true) {
+                Outbound::Ready(m) => m,
+                _ => return Ok(()),
+            };
+            if !shared.already_sent(local) {
+                backend.send(&message).await?;
+                shared.mark_sent(local, &message);
+            }
+            if !backend.sent_copy_by_server() {
+                let sent = shared.sent_folder(account);
+                let raw = render_message(&message, true)?;
+                let flags = Flags { seen: true, ..Default::default() };
+                match append_creating(backend, &sent, &flags, &raw).await {
+                    Err(e) if retryable(&e) => return Err(e),
+                    _ => {}
+                }
+            }
+            Ok(())
         }
+        Op::Draft { local, .. } => {
+            let Some(rev) = shared.local_rev(local) else { return Ok(()) };
+            let Outbound::Ready(message) = shared.outgoing(local, true, true) else { return Ok(()) };
+            let Some(mid) = message.message_id.clone() else { return Ok(()) };
+            let folder = shared.drafts_folder(account);
+            let old = drafts_with(backend, &folder, &mid).await;
+            let raw = render_message(&message, true)?;
+            let flags = Flags { draft: true, seen: true, ..Default::default() };
+            append_creating(backend, &folder, &flags, &raw).await?;
+            if !old.is_empty() {
+                backend.delete_messages(&folder, &old).await?;
+            }
+            shared.mark_pushed(local, rev);
+            Ok(())
+        }
+        Op::DropDraft { message_id, .. } => {
+            let folder = shared.drafts_folder(account);
+            let old = drafts_with(backend, &folder, message_id).await;
+            if !old.is_empty() {
+                backend.delete_messages(&folder, &old).await?;
+            }
+            Ok(())
+        }
+    }
+}
+
+async fn drafts_with(backend: &mut dyn Backend, folder: &str, message_id: &str) -> Vec<u32> {
+    let query = format!("HEADER Message-ID \"{}\"", message_id.trim_matches(['<', '>']));
+    backend.search(folder, &query).await.unwrap_or_default()
+}
+
+async fn append_creating(backend: &mut dyn Backend, folder: &str, flags: &Flags, raw: &[u8]) -> Result<()> {
+    match backend.append_flagged(folder, flags, raw).await {
+        Err(BackendError::Protocol(_)) => {
+            backend.create_folder(folder).await?;
+            backend.append_flagged(folder, flags, raw).await
+        }
+        other => other,
     }
 }
 
 async fn push_outbox(shared: &Shared, account: &str, backend: &mut dyn Backend, done: &mut Vec<String>) -> Result<()> {
     for (key, op) in shared.outbox(account) {
+        if let Op::Send { local, .. } = &op {
+            if shared.is_held(local) {
+                continue;
+            }
+        }
         match push(shared, backend, &op, account).await {
             Ok(()) => done.push(key),
             Err(e) if retryable(&e) => return Err(e),

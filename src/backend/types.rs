@@ -113,6 +113,13 @@ pub struct FolderDelta {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Attachment {
+    pub name: String,
+    pub mime: String,
+    pub data: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OutgoingMessage {
     pub from: Address,
     pub to: Vec<Address>,
@@ -122,6 +129,8 @@ pub struct OutgoingMessage {
     pub body: String,
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
+    pub attachments: Vec<Attachment>,
+    pub message_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

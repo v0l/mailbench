@@ -23,6 +23,9 @@ const OUTBOX: &str = "outbox";
 const QUICK_PAGE: usize = 500;
 const FETCH_RETRY: Duration = Duration::from_secs(5);
 const LOCAL: &str = "local";
+const ATTACH: &str = "attach";
+const CONTACT: &str = "contact";
+const DEFAULT_HOLD: Duration = Duration::from_secs(SEND_HOLD_SECS);
 
 pub struct AccountSetup {
     pub id: String,
@@ -64,6 +67,8 @@ struct Entry {
     thread_unread: bool,
     thread_flagged: bool,
     to_key: String,
+    message_id: Option<String>,
+    refs: Vec<String>,
 }
 
 fn people_key(to: &[Address], cc: &[Address]) -> String {
@@ -72,6 +77,31 @@ fn people_key(to: &[Address], cc: &[Address]) -> String {
         .map(|a| format!("{} {}", a.name.as_deref().unwrap_or_default(), a.address))
         .collect::<Vec<_>>()
         .join(" ")
+
+}
+
+fn note_seen(seen: &mut HashMap<String, SeenAddress>, a: &Address) {
+    note_seen_n(seen, a.name.as_deref().unwrap_or_default(), &a.address, 1);
+}
+
+fn note_seen_n(seen: &mut HashMap<String, SeenAddress>, name: &str, address: &str, count: u32) {
+    if !address.contains('@') {
+        return;
+    }
+    let key = address.to_lowercase();
+    let e = seen.entry(key).or_insert_with(|| SeenAddress {
+        name: name.trim().to_string(),
+        address: address.to_string(),
+        count: 0,
+        key: String::new(),
+    });
+    e.count += count;
+    if e.name.is_empty() && !name.trim().is_empty() {
+        e.name = name.trim().to_string();
+    }
+    if e.key.is_empty() || e.key.len() < e.address.len() + e.name.len() {
+        e.key = format!("{} {}", e.name, e.address).to_lowercase();
+    }
 }
 
 fn search_key(from: &str, address: &str, subject: &str) -> String {
@@ -121,6 +151,21 @@ struct Cache {
     inbox_unread: Vec<usize>,
     shape: Vec<TreeFolder>,
     validity: HashMap<(usize, String), u32>,
+    seen: HashMap<String, SeenAddress>,
+}
+
+#[derive(Clone)]
+struct SeenAddress {
+    name: String,
+    address: String,
+    count: u32,
+    key: String,
+}
+
+pub enum Outbound {
+    Gone,
+    Held,
+    Ready(OutgoingMessage),
 }
 
 impl Cache {
@@ -234,10 +279,52 @@ pub(crate) struct Shared {
     wake_lock: Mutex<()>,
     seq: AtomicU64,
     kicks: Mutex<Vec<tokio::sync::mpsc::UnboundedSender<()>>>,
+    contacts: Mutex<HashMap<String, ContactRecord>>,
+    hold: Mutex<Duration>,
+    signatures: Mutex<HashMap<String, String>>,
 }
 
 fn now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+fn address_of(c: &Contact) -> Address {
+    Address { name: Some(c.name.clone()).filter(|n| !n.trim().is_empty()), address: c.address.clone() }
+}
+
+fn recipients(list: &str, lenient: bool) -> Vec<Address> {
+    split_recipients(list)
+        .iter()
+        .map(|r| Contact::parse(r))
+        .filter(|c| !lenient || (c.address.contains('@') && !c.address.contains(' ')))
+        .map(|c| address_of(&c))
+        .collect()
+}
+
+fn thread_refs(m: &MessageSummary) -> Vec<String> {
+    let mut refs = m.references.clone();
+    for r in &m.in_reply_to {
+        if !refs.contains(r) {
+            refs.push(r.clone());
+        }
+    }
+    refs
+}
+
+fn draft_key(message_id: &str) -> String {
+    format!("d{:x}", stable_id(message_id))
+}
+
+fn attachment_key(local: &str, n: usize) -> String {
+    format!("{local}\0{n:04}")
+}
+
+fn fresh_message_id(address: &str) -> String {
+    new_message_id_for(address).trim_matches(['<', '>']).to_string()
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -375,6 +462,7 @@ impl Shared {
         };
         let body = display::parse_body(&raw);
         let headers = headers::parse_headers(&raw);
+        let envelope = display::envelope(&raw);
         let message = Message {
             summary: summary(e, now()),
             folder: e.folder.clone(),
@@ -389,6 +477,10 @@ impl Shared {
             remote_images: body.remote_images,
             headers,
             body_state: BodyState::Ready,
+            message_id: e.message_id.clone().or(envelope.message_id),
+            references: if e.refs.is_empty() { envelope.references } else { e.refs.clone() },
+            to_full: envelope.to,
+            cc_full: envelope.cc,
         };
         {
             let mut opened = lock(&self.opened);
@@ -502,29 +594,219 @@ impl Shared {
         Ok(())
     }
 
-    pub fn outgoing(&self, local: &str) -> Option<OutgoingMessage> {
-        let store = self.lock_store();
-        let raw = store.get(LOCAL, local).ok().flatten()?;
-        let msg: LocalMsg = serde_json::from_slice(&raw).ok()?;
-        let account = self.accounts.iter().find(|a| a.id == msg.account)?;
-        let list = |s: &str| {
-            s.split(',')
-                .map(str::trim)
-                .filter(|a| !a.is_empty())
-                .map(|a| Address { name: None, address: a.to_string() })
-                .collect::<Vec<_>>()
-        };
-        Some(OutgoingMessage {
+    pub fn outgoing(&self, local: &str, lenient: bool, ignore_hold: bool) -> Outbound {
+        let Some((msg, attachments)) = self.local_with_attachments(local) else { return Outbound::Gone };
+        if !ignore_hold && msg.hold_until_ms > now_ms() {
+            return Outbound::Held;
+        }
+        let Some(account) = self.accounts.iter().find(|a| a.id == msg.account) else { return Outbound::Gone };
+        Outbound::Ready(OutgoingMessage {
             from: Address {
                 name: Some(if account.sender.is_empty() { account.name.clone() } else { account.sender.clone() }),
                 address: account.address.clone(),
             },
-            to: list(&msg.to),
-            cc: list(&msg.cc),
+            to: recipients(&msg.to, lenient),
+            cc: recipients(&msg.cc, lenient),
             subject: msg.subject,
             body: msg.body,
+            in_reply_to: msg.in_reply_to,
+            references: msg.references,
+            message_id: msg.message_id,
+            attachments,
             ..Default::default()
         })
+    }
+
+    fn write_local(
+        &self,
+        key: &str,
+        account: &str,
+        folder: ms::Folder,
+        message: &Outgoing,
+        message_id: Option<String>,
+        hold: Duration,
+    ) -> Result<LocalMsg, StoreError> {
+        let message_id = message_id
+            .or_else(|| message.message_id.clone())
+            .or_else(|| self.accounts.get(message.account).map(|a| fresh_message_id(&a.address)));
+        let attachments = message
+            .attachments
+            .iter()
+            .map(|a| AttMeta { name: a.name.clone(), mime: a.mime.clone(), size: a.data.len() })
+            .collect();
+        let msg = LocalMsg {
+            account: account.to_string(),
+            folder: folder.name().to_string(),
+            to: message.to.clone(),
+            cc: message.cc.clone(),
+            subject: message.subject.clone(),
+            body: message.body.clone(),
+            date: now(),
+            attachments,
+            in_reply_to: message.in_reply_to.clone(),
+            references: message.references.clone(),
+            message_id,
+            hold_until_ms: if hold.is_zero() { 0 } else { now_ms() + hold.as_millis() as i64 },
+            rev: self.seq.fetch_add(1, Ordering::SeqCst) + 1,
+            dirty: true,
+            sent_ok: false,
+        };
+        let store = self.lock_store();
+        store.delete_prefix(ATTACH, &format!("{key}\0")).map_err(backend_err)?;
+        for (n, a) in message.attachments.iter().enumerate() {
+            store.put(ATTACH, &attachment_key(key, n), &a.data).map_err(backend_err)?;
+        }
+        store.put(LOCAL, key, &serde_json::to_vec(&msg).map_err(backend_err)?).map_err(backend_err)?;
+        Ok(msg)
+    }
+
+    fn local_entry(&self, id: u64, index: usize, folder: ms::Folder, key: &str, msg: &LocalMsg) -> Entry {
+        let address = self.accounts[index].address.clone();
+        Entry {
+            id,
+            account: index,
+            folder,
+            server_folder: String::new(),
+            uid: 0,
+            validity: 0,
+            local: Some(key.to_string()),
+            from: "me".into(),
+            from_address: address.clone(),
+            to: vec![msg.to.clone()],
+            cc: if msg.cc.is_empty() { Vec::new() } else { vec![msg.cc.clone()] },
+            search_key: search_key("me", &address, &msg.subject),
+            to_key: format!("{} {}", msg.to, msg.cc),
+            subject: msg.subject.clone(),
+            date: msg.date,
+            unread: false,
+            flagged: false,
+            attachments: !msg.attachments.is_empty(),
+            message_id: msg.message_id.clone(),
+            refs: msg.references.clone(),
+            thread: id,
+            head: true,
+            count: 1,
+            thread_unread: false,
+            thread_flagged: false,
+        }
+    }
+
+    fn remove_entry(&self, id: u64) {
+        let mut guard = lock(&self.cache);
+        let cache = Arc::make_mut(&mut guard);
+        cache.entries.retain(|e| e.id != id);
+        cache.by_id = cache.entries.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
+    }
+
+    fn local_outgoing(&self, local: &str, index: usize) -> Option<Outgoing> {
+        let (msg, attachments) = self.local_with_attachments(local)?;
+        Some(Outgoing {
+            account: index,
+            to: msg.to,
+            cc: msg.cc,
+            subject: msg.subject,
+            body: msg.body,
+            attachments,
+            in_reply_to: msg.in_reply_to,
+            references: msg.references,
+            message_id: msg.message_id,
+        })
+    }
+
+    fn local_with_attachments(&self, local: &str) -> Option<(LocalMsg, Vec<Attachment>)> {
+        let store = self.lock_store();
+        let raw = store.get(LOCAL, local).ok().flatten()?;
+        let msg: LocalMsg = serde_json::from_slice(&raw).ok()?;
+        let mut attachments = Vec::new();
+        for (n, meta) in msg.attachments.iter().enumerate() {
+            let data = store.get(ATTACH, &attachment_key(local, n)).ok().flatten()?;
+            attachments.push(Attachment { name: meta.name.clone(), mime: meta.mime.clone(), data: data.to_vec() });
+        }
+        Some((msg, attachments))
+    }
+
+    pub fn is_held(&self, local: &str) -> bool {
+        self.local_with_attachments_meta(local).is_some_and(|m| m.hold_until_ms > now_ms() && !m.sent_ok)
+    }
+
+    pub fn already_sent(&self, local: &str) -> bool {
+        self.local_with_attachments_meta(local).is_some_and(|m| m.sent_ok)
+    }
+
+    fn local_with_attachments_meta(&self, local: &str) -> Option<LocalMsg> {
+        let store = self.lock_store();
+        let raw = store.get(LOCAL, local).ok().flatten()?;
+        serde_json::from_slice(&raw).ok()
+    }
+
+    pub fn local_rev(&self, local: &str) -> Option<u64> {
+        let store = self.lock_store();
+        let raw = store.get(LOCAL, local).ok().flatten()?;
+        serde_json::from_slice::<LocalMsg>(&raw).ok().map(|m| m.rev)
+    }
+
+    pub fn mark_pushed(&self, local: &str, rev: u64) {
+        let store = self.lock_store();
+        let Some(raw) = store.get(LOCAL, local).ok().flatten() else { return };
+        let Ok(mut msg) = serde_json::from_slice::<LocalMsg>(&raw) else { return };
+        if msg.rev == rev {
+            msg.dirty = false;
+            if let Ok(raw) = serde_json::to_vec(&msg) {
+                let _ = store.put(LOCAL, local, &raw);
+            }
+        }
+    }
+
+    pub fn mark_sent(&self, local: &str, message: &OutgoingMessage) {
+        {
+            let store = self.lock_store();
+            if let Some(raw) = store.get(LOCAL, local).ok().flatten() {
+                if let Ok(mut msg) = serde_json::from_slice::<LocalMsg>(&raw) {
+                    msg.sent_ok = true;
+                    msg.dirty = false;
+                    if let Ok(raw) = serde_json::to_vec(&msg) {
+                        let _ = store.put(LOCAL, local, &raw);
+                    }
+                }
+            }
+        }
+        for a in message.to.iter().chain(&message.cc).chain(&message.bcc) {
+            self.remember_contact(&a.address, a.name.as_deref().unwrap_or_default());
+        }
+        self.refresh();
+    }
+
+    pub fn remember_contact(&self, address: &str, name: &str) {
+        let key = address.trim().to_lowercase();
+        if key.is_empty() {
+            return;
+        }
+        let record = {
+            let mut contacts = lock(&self.contacts);
+            let r = contacts.entry(key.clone()).or_insert_with(|| ContactRecord {
+                name: name.to_string(),
+                address: address.trim().to_string(),
+                count: 0,
+                last: 0,
+            });
+            if !name.trim().is_empty() {
+                r.name = name.trim().to_string();
+            }
+            r.count += 1;
+            r.last = now();
+            r.clone()
+        };
+        if let Ok(raw) = serde_json::to_vec(&record) {
+            let _ = self.lock_store().put(CONTACT, &key, &raw);
+        }
+    }
+
+    pub fn drafts_folder(&self, account: &str) -> String {
+        server_folder(&self.folders_of(account), &ms::Folder::Drafts).unwrap_or_else(|| default_name(&ms::Folder::Drafts).to_string())
+    }
+
+    pub fn sent_folder(&self, account: &str) -> String {
+        server_folder(&self.folders_of(account), &ms::Folder::Sent).unwrap_or_else(|| default_name(&ms::Folder::Sent).to_string())
     }
 
     fn build(&self, quick: bool) -> Cache {
@@ -532,6 +814,19 @@ impl Shared {
         let known = lock(&self.known_attachments).clone();
         let mut cache = Cache::default();
         let mut meta: Vec<(Option<String>, Vec<String>)> = Vec::new();
+        let mut server_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let local_drafts: std::collections::HashSet<String> = {
+            let store = self.lock_store();
+            store
+                .list(LOCAL)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|k| store.get(LOCAL, k).ok().flatten())
+                .filter_map(|r| serde_json::from_slice::<LocalMsg>(&r).ok())
+                .filter(|m| m.folder == ms::Folder::Drafts.name() && m.dirty)
+                .filter_map(|m| m.message_id.map(|id| id.to_lowercase()))
+                .collect()
+        };
         for (index, account) in self.accounts.iter().enumerate() {
             let stored = {
                 let store = self.lock_store();
@@ -580,18 +875,28 @@ impl Shared {
                     if m.flags.deleted {
                         continue;
                     }
+                    if ui == ms::Folder::Drafts && m.message_id.as_ref().is_some_and(|id| local_drafts.contains(&id.to_lowercase())) {
+                        continue;
+                    }
                     let id = stable_id(&format!("r\0{}\0{}\0{}\0{}", account.id, stored_name, validity, m.uid));
                     let shown = pending
                         .get(&(stored_name.clone(), m.uid))
                         .map(|to| folder_for(index, &folders, to))
                         .unwrap_or_else(|| ui.clone());
                     let attachments = known.get(&id).copied().unwrap_or(false);
+                    for a in m.from.iter().chain(&m.to).chain(&m.cc) {
+                        note_seen(&mut cache.seen, a);
+                    }
+                    if let Some(id) = &m.message_id {
+                        server_ids.insert(id.to_lowercase());
+                    }
                     let from: String = m.from.first().map(display::person).unwrap_or_default();
                     let from_address: String = m.from.first().map(|a| a.address.clone()).unwrap_or_default();
                     let subject: String = m.subject.clone().unwrap_or_default();
                     let mut refs = m.references;
                     refs.extend(m.in_reply_to);
-                    meta.push((m.message_id, refs));
+                    let message_id = m.message_id.clone();
+                    meta.push((m.message_id, refs.clone()));
                     cache.entries.push(Entry {
                         id,
                         account: index,
@@ -616,6 +921,8 @@ impl Shared {
                         count: 1,
                         thread_unread: false,
                         thread_flagged: false,
+                        message_id,
+                        refs,
                     });
                 }
                 if quick {
@@ -630,7 +937,15 @@ impl Shared {
             let Ok(msg) = serde_json::from_slice::<LocalMsg>(&raw) else { continue };
             let Some(index) = self.index_of(&msg.account) else { continue };
             let Some(folder) = folder_from_name(&msg.folder) else { continue };
-            meta.push((None, Vec::new()));
+            let on_server = msg.message_id.as_ref().is_some_and(|id| server_ids.contains(&id.to_lowercase()));
+            if on_server && (msg.sent_ok || (folder == ms::Folder::Drafts && !msg.dirty)) {
+                if !quick {
+                    let _ = store.delete(LOCAL, &key);
+                    let _ = store.delete_prefix(ATTACH, &format!("{key}\0"));
+                }
+                continue;
+            }
+            meta.push((msg.message_id.clone(), msg.references.clone()));
             let local_id = stable_id(&format!("l\0{key}"));
             cache.entries.push(Entry {
                 id: local_id,
@@ -655,7 +970,9 @@ impl Shared {
                 date: msg.date,
                 unread: false,
                 flagged: false,
-                attachments: false,
+                attachments: !msg.attachments.is_empty(),
+                message_id: msg.message_id.clone(),
+                refs: msg.references.clone(),
             });
         }
         let inputs: Vec<threads::Input> = cache
@@ -669,6 +986,10 @@ impl Shared {
         drop(inputs);
         for (e, t) in cache.entries.iter_mut().zip(assigned) {
             e.thread = t;
+        }
+        for (key, c) in lock(&self.contacts).iter() {
+            note_seen_n(&mut cache.seen, &c.name, &c.address, c.count + 1);
+            let _ = key;
         }
         cache.entries.sort_by(|a, b| b.date.cmp(&a.date).then(b.id.cmp(&a.id)));
         cache.index();
@@ -791,7 +1112,19 @@ impl RealStore {
             policies: Mutex::new(vec![Default::default(); accounts.len()]),
             progress: Mutex::new(vec![None; accounts.len()]),
             backfill_wake: Mutex::new(Vec::new()),
+            contacts: Mutex::new(HashMap::new()),
+            hold: Mutex::new(DEFAULT_HOLD),
+            signatures: Mutex::new(HashMap::new()),
         });
+        {
+            let store = shared.lock_store();
+            let mut contacts = lock(&shared.contacts);
+            for key in store.list(CONTACT).unwrap_or_default() {
+                if let Some(c) = store.get(CONTACT, &key).ok().flatten().and_then(|r| serde_json::from_slice::<ContactRecord>(&r).ok()) {
+                    contacts.insert(key, c);
+                }
+            }
+        }
         let mut threads = Vec::new();
         let mut tasks = Vec::new();
         let background = shared.clone();
@@ -847,6 +1180,15 @@ impl RealStore {
         ctx.request_repaint();
     }
 
+    pub fn set_signature(&self, account: &str, signature: &str) {
+        lock(&self.shared.signatures).insert(account.to_string(), signature.to_string());
+        self.shared.repaint();
+    }
+
+    pub fn set_send_hold(&self, hold: Duration) {
+        *lock(&self.shared.hold) = hold;
+    }
+
     pub fn pending(&self) -> usize {
         Shared::outbox_in(&self.shared.lock_store()).len()
     }
@@ -895,6 +1237,7 @@ impl MailStore for RealStore {
                     sync: states[i].0,
                     detail: states[i].1.clone(),
                     indexed: lock(&self.shared.progress)[i],
+                    signature: lock(&self.shared.signatures).get(&a.id).cloned().unwrap_or_default(),
                 })
                 .collect()
         })
@@ -979,6 +1322,7 @@ impl MailStore for RealStore {
 
     fn get(&self, id: MessageId) -> Result<Message, StoreError> {
         let e = self.entry(id)?;
+        let mut local_meta = (None, Vec::new());
         let body = if let Some(local) = &e.local {
             let store = self.shared.lock_store();
             let msg = store
@@ -987,9 +1331,15 @@ impl MailStore for RealStore {
                 .flatten()
                 .and_then(|r| serde_json::from_slice::<LocalMsg>(&r).ok())
                 .ok_or(StoreError::NotFound)?;
+            local_meta = (msg.message_id.clone(), msg.references.clone());
             (
                 display::Body {
                     paragraphs: msg.body.split("\n\n").map(|p| p.to_string()).collect(),
+                    attachments: msg
+                        .attachments
+                        .iter()
+                        .map(|a| AttachmentInfo { name: a.name.clone(), size: display::size(a.size), mime: a.mime.clone() })
+                        .collect(),
                     ..Default::default()
                 },
                 Headers::default(),
@@ -1025,13 +1375,21 @@ impl MailStore for RealStore {
             remote_images: body.remote_images,
             headers,
             body_state,
+            message_id: local_meta.0.or(e.message_id),
+            references: if local_meta.1.is_empty() { e.refs } else { local_meta.1 },
+            to_full: Vec::new(),
+            cc_full: Vec::new(),
         })
     }
 
     fn attachments(&self, id: MessageId) -> Result<Vec<AttachmentData>, StoreError> {
         let e = self.entry(id)?;
-        if e.local.is_some() {
-            return Ok(Vec::new());
+        if let Some(local) = &e.local {
+            return Ok(self
+                .shared
+                .local_with_attachments(local)
+                .map(|(_, a)| a.into_iter().map(|a| AttachmentData { name: a.name, mime: a.mime, data: Arc::new(a.data) }).collect())
+                .unwrap_or_default());
         }
         let raw = {
             let store = self.shared.lock_store();
@@ -1150,55 +1508,160 @@ impl MailStore for RealStore {
     }
 
     fn append(&mut self, folder: ms::Folder, message: Outgoing) -> Result<MessageId, StoreError> {
+        if folder == ms::Folder::Drafts {
+            let mid = self.save_draft(message)?;
+            return Ok(MessageId(stable_id(&format!("l\0{}", draft_key(&mid)))));
+        }
         let account = self.shared.accounts.get(message.account).ok_or(StoreError::NotFound)?.id.clone();
         let n = self.shared.seq.fetch_add(1, Ordering::SeqCst);
         let key = format!("{:x}{n:x}", SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
-        let msg = LocalMsg {
-            account: account.clone(),
-            folder: folder.name().to_string(),
-            to: message.to,
-            cc: message.cc,
-            subject: message.subject,
-            body: message.body,
-            date: now(),
-        };
+        let hold = if folder == ms::Folder::Sent { *lock(&self.shared.hold) } else { Duration::ZERO };
+        let msg = self.shared.write_local(&key, &account, folder.clone(), &message, None, hold)?;
         let id = {
             let store = self.shared.lock_store();
-            store.put(LOCAL, &key, &serde_json::to_vec(&msg).map_err(backend_err)?).map_err(backend_err)?;
             if folder == ms::Folder::Sent {
                 self.shared.enqueue(&store, &Op::Send { account, local: key.clone() })?;
             }
             stable_id(&format!("l\0{key}"))
         };
-        let index = message.account;
         self.shared.user_gen.fetch_add(1, Ordering::SeqCst);
-        self.shared.insert(Entry {
-            id,
-            account: index,
-            folder,
-            server_folder: String::new(),
-            uid: 0,
-            validity: 0,
-            local: Some(key),
-            from: "me".into(),
-            from_address: self.shared.accounts[index].address.clone(),
-            to: vec![msg.to.clone()],
-            cc: if msg.cc.is_empty() { Vec::new() } else { vec![msg.cc.clone()] },
-            search_key: search_key("me", &self.shared.accounts[index].address, &msg.subject),
-            to_key: format!("{} {}", msg.to, msg.cc),
-            subject: msg.subject.clone(),
-            date: msg.date,
-            unread: false,
-            flagged: false,
-            attachments: false,
-            thread: id,
-            head: true,
-            count: 1,
-            thread_unread: false,
-            thread_flagged: false,
-        });
+        let mut entry = self.shared.local_entry(id, message.account, folder.clone(), &key, &msg);
+        entry.thread = id;
+        self.shared.insert(entry);
         self.shared.refresh();
         self.shared.kick(message.account);
+        if !hold.is_zero() {
+            let shared = self.shared.clone();
+            let index = message.account;
+            crate::runtime::spawn(async move {
+                tokio::time::sleep(hold + Duration::from_millis(100)).await;
+                shared.kick(index);
+            });
+        }
         Ok(MessageId(id))
+    }
+
+    fn save_draft(&mut self, message: Outgoing) -> Result<String, StoreError> {
+        let account = self.shared.accounts.get(message.account).ok_or(StoreError::NotFound)?.id.clone();
+        let mid = message.message_id.clone().unwrap_or_else(|| fresh_message_id(&self.shared.accounts[message.account].address));
+        let key = draft_key(&mid);
+        let msg = self.shared.write_local(&key, &account, ms::Folder::Drafts, &message, Some(mid.clone()), Duration::ZERO)?;
+        {
+            let store = self.shared.lock_store();
+            for (k, op) in Shared::outbox_in(&store) {
+                if matches!(&op, Op::Draft { local, .. } if *local == key) {
+                    let _ = store.delete(OUTBOX, &k);
+                }
+            }
+            self.shared.enqueue(&store, &Op::Draft { account, local: key.clone() })?;
+        }
+        let id = stable_id(&format!("l\0{key}"));
+        self.shared.user_gen.fetch_add(1, Ordering::SeqCst);
+        self.shared.remove_entry(id);
+        self.shared.insert(self.shared.local_entry(id, message.account, ms::Folder::Drafts, &key, &msg));
+        self.shared.refresh();
+        self.shared.kick(message.account);
+        Ok(mid)
+    }
+
+    fn open_draft(&mut self, id: MessageId) -> Result<Outgoing, StoreError> {
+        let e = self.entry(id)?;
+        if let Some(local) = &e.local {
+            return self.shared.local_outgoing(local, e.account).ok_or(StoreError::NotFound);
+        }
+        let account = self.shared.accounts[e.account].id.clone();
+        let raw = {
+            let store = self.shared.lock_store();
+            StoreSink::new(&store, &account, true).body(&e.server_folder, e.uid).ok().flatten()
+        };
+        let Some(raw) = raw else {
+            self.shared.queue_parse(&e);
+            return Err(StoreError::NotFound);
+        };
+        let env = display::envelope(&raw);
+        let join = |list: &[Contact]| list.iter().map(Contact::formatted).collect::<Vec<_>>().join(", ");
+        let subject = e.subject.clone();
+        Ok(Outgoing {
+            account: e.account,
+            to: join(&env.to),
+            cc: join(&env.cc),
+            subject,
+            body: display::plain_text(&raw).trim_end().to_string(),
+            attachments: display::extract_attachments(&raw).into_iter().map(|a| OutAttachment { name: a.name, mime: a.mime, data: a.data.to_vec() }).collect(),
+            in_reply_to: env.in_reply_to,
+            references: env.references,
+            message_id: env.message_id,
+        })
+    }
+
+    fn discard_draft(&mut self, account: usize, message_id: &str) {
+        let Some(meta) = self.shared.accounts.get(account) else { return };
+        let account_id = meta.id.clone();
+        let key = draft_key(message_id);
+        {
+            let store = self.shared.lock_store();
+            for (k, op) in Shared::outbox_in(&store) {
+                if matches!(&op, Op::Draft { local, .. } if *local == key) {
+                    let _ = store.delete(OUTBOX, &k);
+                }
+            }
+            let _ = store.delete(LOCAL, &key);
+            let _ = store.delete_prefix(ATTACH, &format!("{key}\0"));
+            let _ = self.shared.enqueue(&store, &Op::DropDraft { account: account_id, message_id: message_id.to_string() });
+        }
+        let id = stable_id(&format!("l\0{key}"));
+        self.shared.user_gen.fetch_add(1, Ordering::SeqCst);
+        self.shared.remove_entry(id);
+        self.shared.refresh();
+        self.shared.kick(account);
+    }
+
+    fn undo_send(&mut self, id: MessageId) -> Result<Option<Outgoing>, StoreError> {
+        let e = self.entry(id)?;
+        let Some(local) = e.local.clone() else { return Ok(None) };
+        let held = {
+            let store = self.shared.lock_store();
+            store
+                .get(LOCAL, &local)
+                .ok()
+                .flatten()
+                .and_then(|r| serde_json::from_slice::<LocalMsg>(&r).ok())
+                .is_some_and(|m| m.hold_until_ms > now_ms() && !m.sent_ok)
+        };
+        if !held {
+            return Ok(None);
+        }
+        let Some(out) = self.shared.local_outgoing(&local, e.account) else { return Ok(None) };
+        {
+            let store = self.shared.lock_store();
+            for (k, op) in Shared::outbox_in(&store) {
+                if matches!(&op, Op::Send { local: l, .. } if *l == local) {
+                    let _ = store.delete(OUTBOX, &k);
+                }
+            }
+            let _ = store.delete(LOCAL, &local);
+            let _ = store.delete_prefix(ATTACH, &format!("{local}\0"));
+        }
+        self.shared.user_gen.fetch_add(1, Ordering::SeqCst);
+        self.shared.remove_entry(id.0);
+        self.shared.refresh();
+        Ok(Some(out))
+    }
+
+    fn suggest(&self, text: &str, limit: usize) -> Vec<Contact> {
+        let needle = text.trim().to_lowercase();
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let mut hits: Vec<SeenAddress> = self.shared.with_cache(|c| c.seen.values().filter(|s| s.key.contains(&needle)).cloned().collect());
+        hits.sort_by(|a, b| {
+            let starts = |s: &SeenAddress| s.address.to_lowercase().starts_with(&needle) || s.name.to_lowercase().starts_with(&needle);
+            starts(b).cmp(&starts(a)).then(b.count.cmp(&a.count)).then(a.address.cmp(&b.address))
+        });
+        hits.into_iter().take(limit).map(|s| Contact { name: s.name, address: s.address }).collect()
+    }
+
+    fn send_hold(&self) -> Duration {
+        *lock(&self.shared.hold)
     }
 }

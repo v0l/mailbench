@@ -163,6 +163,18 @@ impl Backend for Fresh {
     async fn search(&mut self, folder: &str, query: &str) -> Result<Vec<u32>> {
         self.ready().await?.search(folder, query).await
     }
+    async fn append(&mut self, folder: &str, raw: &[u8]) -> Result<()> {
+        self.ready().await?.append(folder, raw).await
+    }
+    async fn append_flagged(&mut self, folder: &str, flags: &Flags, raw: &[u8]) -> Result<()> {
+        self.ready().await?.append_flagged(folder, flags, raw).await
+    }
+    fn sent_copy_by_server(&self) -> bool {
+        self.inner.as_ref().map(|a| a.sent_copy_by_server()).unwrap_or_else(|| {
+            let h = self.cfg.imap.host.to_ascii_lowercase();
+            h.ends_with("gmail.com") || h.ends_with("googlemail.com")
+        })
+    }
     async fn send(&mut self, message: &OutgoingMessage) -> Result<()> {
         self.ready().await?.send(message).await
     }

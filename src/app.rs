@@ -4,6 +4,10 @@ use crate::mailstore::*;
 use egui::{Margin, Ui};
 use egui_bench::prelude::*;
 use std::collections::HashSet;
+use std::sync::mpsc::{Receiver, TryRecvError};
+use std::time::{Duration, Instant};
+
+const AUTOSAVE: Duration = Duration::from_secs(4);
 
 pub const ROW_H: f32 = 25.0;
 const LIST_W: f32 = 540.0;
@@ -70,9 +74,64 @@ pub struct Draft {
     pub account: usize,
     pub to: String,
     pub cc: String,
+    pub to_input: String,
+    pub cc_input: String,
     pub subject: String,
     pub body: String,
     pub saved: bool,
+    pub attachments: Vec<OutAttachment>,
+    pub in_reply_to: Option<String>,
+    pub references: Vec<String>,
+    pub message_id: Option<String>,
+    pub signature: String,
+    fingerprint: u64,
+    changed_at: Option<std::time::Instant>,
+}
+
+pub fn signature_block(signature: &str) -> String {
+    if signature.trim().is_empty() { String::new() } else { format!("\n\n-- \n{}", signature.trim_end()) }
+}
+
+pub fn guess_mime(name: &str) -> &'static str {
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "txt" | "log" | "md" => "text/plain",
+        "html" | "htm" => "text/html",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "gz" | "tgz" => "application/gzip",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "mp4" => "video/mp4",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        _ => "application/octet-stream",
+    }
+}
+
+fn quote_lines(text: &str) -> String {
+    text.lines()
+        .map(|l| if l.starts_with('>') { format!(">{l}") } else { format!("> {l}").trim_end().to_string() })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn sender_contact(m: &Message) -> Contact {
+    let name = if m.summary.from == m.from_address { String::new() } else { m.summary.from.clone() };
+    Contact { name, address: m.from_address.clone() }
+}
+
+fn joined(list: &[Contact]) -> String {
+    list.iter().map(Contact::formatted).collect::<Vec<_>>().join(", ")
 }
 
 impl Draft {
@@ -82,42 +141,217 @@ impl Draft {
             account: 0,
             to: String::new(),
             cc: String::new(),
+            to_input: String::new(),
+            cc_input: String::new(),
             subject: String::new(),
             body: String::new(),
             saved: false,
+            attachments: Vec::new(),
+            in_reply_to: None,
+            references: Vec::new(),
+            message_id: None,
+            signature: String::new(),
+            fingerprint: 0,
+            changed_at: None,
         }
     }
 
-    pub fn reply(m: &Message, mode: Reply) -> Draft {
+    pub fn blank_for(account: usize, signature: &str) -> Draft {
+        let mut d = Draft::blank();
+        d.account = account;
+        d.signature = signature.to_string();
+        d.body = signature_block(signature);
+        d.fingerprint = d.content_hash();
+        d
+    }
+
+    pub fn reply(m: &Message, mode: Reply, signature: &str, own: &[String], attachments: Vec<OutAttachment>) -> Draft {
         let (prefix, title) = match mode {
             Reply::Forward => ("Fwd: ", "forward"),
             _ => ("Re: ", "reply to"),
         };
-        let subject = if m.summary.subject.starts_with(prefix) {
+        let subject = if m.summary.subject.to_lowercase().starts_with(&prefix.to_lowercase()) {
             m.summary.subject.clone()
         } else {
             format!("{prefix}{}", m.summary.subject)
         };
-        let to = if mode == Reply::Forward { String::new() } else { m.summary.from.clone() };
+        let sender = sender_contact(m);
+        let is_own = |c: &Contact| own.iter().any(|o| o.eq_ignore_ascii_case(&c.address));
+        let to = if mode == Reply::Forward { String::new() } else { sender.formatted() };
         let cc = if mode == Reply::All {
-            m.to.iter().filter(|t| t.as_str() != "me").cloned().collect::<Vec<_>>().join(", ")
+            let mut others: Vec<Contact> = if m.to_full.is_empty() && m.cc_full.is_empty() {
+                m.to.iter().filter(|t| t.as_str() != "me").map(|t| Contact::parse(t)).collect()
+            } else {
+                m.to_full.iter().chain(&m.cc_full).cloned().collect()
+            };
+            others.retain(|c| !is_own(c) && !c.address.eq_ignore_ascii_case(&sender.address));
+            joined(&others)
         } else {
             String::new()
         };
+        let text = m.paragraphs.join("\n\n");
         let body = if mode == Reply::Forward {
-            format!("\n\nForwarded message from {}:\n\n{}", m.summary.from, m.paragraphs.join("\n\n"))
+            let mut head = vec![
+                "---------- Forwarded message ----------".to_string(),
+                format!("From: {}", sender.formatted()),
+                format!("Date: {}", m.sent),
+                format!("Subject: {}", m.summary.subject),
+            ];
+            if !m.to.is_empty() {
+                let to = if m.to_full.is_empty() { m.to.join(", ") } else { joined(&m.to_full) };
+                head.push(format!("To: {to}"));
+            }
+            if !m.cc.is_empty() {
+                let cc = if m.cc_full.is_empty() { m.cc.join(", ") } else { joined(&m.cc_full) };
+                head.push(format!("Cc: {cc}"));
+            }
+            format!("{}\n\n{}\n\n{text}", signature_block(signature), head.join("\n"))
         } else {
-            String::new()
+            format!("{}\n\nOn {}, {} wrote:\n{}", signature_block(signature), m.sent, sender.formatted(), quote_lines(&text))
         };
-        Draft {
+        let (in_reply_to, references) = match (&m.message_id, mode) {
+            (Some(id), Reply::One | Reply::All) => {
+                let mut refs = m.references.clone();
+                if !refs.contains(id) {
+                    refs.push(id.clone());
+                }
+                (Some(id.clone()), refs)
+            }
+            _ => (None, Vec::new()),
+        };
+        let mut d = Draft {
             title: format!("{title} {}", m.summary.from),
             account: m.summary.account,
             to,
             cc,
-            subject,
             body,
-            saved: false,
+            subject,
+            attachments: if mode == Reply::Forward { attachments } else { Vec::new() },
+            in_reply_to,
+            references,
+            signature: signature.to_string(),
+            ..Draft::blank()
+        };
+        d.fingerprint = d.content_hash();
+        d
+    }
+
+    pub fn from_outgoing(out: Outgoing, signature: &str) -> Draft {
+        let mut d = Draft {
+            title: "draft".into(),
+            account: out.account,
+            to: out.to,
+            cc: out.cc,
+            subject: out.subject,
+            body: out.body,
+            attachments: out.attachments,
+            in_reply_to: out.in_reply_to,
+            references: out.references,
+            message_id: out.message_id,
+            signature: signature.to_string(),
+            ..Draft::blank()
+        };
+        d.saved = d.message_id.is_some();
+        d.fingerprint = d.content_hash();
+        d
+    }
+
+    pub fn recipients(list: &str, input: &str) -> String {
+        let mut all = split_recipients(list);
+        all.extend(split_recipients(input));
+        all.join(", ")
+    }
+
+    pub fn commit_inputs(&mut self) {
+        self.to = Draft::recipients(&self.to, &self.to_input);
+        self.cc = Draft::recipients(&self.cc, &self.cc_input);
+        self.to_input.clear();
+        self.cc_input.clear();
+    }
+
+    pub fn has_recipient(&self) -> bool {
+        !self.to.trim().is_empty() || !self.to_input.trim().is_empty() || !self.cc.trim().is_empty() || !self.cc_input.trim().is_empty()
+    }
+
+    pub fn outgoing(&self) -> Outgoing {
+        Outgoing {
+            account: self.account,
+            to: Draft::recipients(&self.to, &self.to_input),
+            cc: Draft::recipients(&self.cc, &self.cc_input),
+            subject: self.subject.clone(),
+            body: self.body.clone(),
+            attachments: self.attachments.clone(),
+            in_reply_to: self.in_reply_to.clone(),
+            references: self.references.clone(),
+            message_id: self.message_id.clone(),
         }
+    }
+
+    pub fn attach_bytes(&mut self, name: &str, data: Vec<u8>) {
+        let name = if name.is_empty() { "attachment" } else { name };
+        self.attachments.push(OutAttachment { name: name.to_string(), mime: guess_mime(name).to_string(), data });
+    }
+
+    pub fn attach_path(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let data = std::fs::read(path).map_err(|e| format!("Could not read {}: {e}", path.display()))?;
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        self.attach_bytes(&name, data);
+        Ok(())
+    }
+
+    pub fn set_account(&mut self, account: usize, signature: &str) {
+        if account == self.account && signature == self.signature {
+            return;
+        }
+        let old = signature_block(&self.signature);
+        let new = signature_block(signature);
+        if !old.is_empty() && self.body.contains(&old) {
+            self.body = self.body.replacen(&old, &new, 1);
+        } else if old.is_empty() && !new.is_empty() {
+            self.body = format!("{}{new}", self.body.trim_end());
+        }
+        self.account = account;
+        self.signature = signature.to_string();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        let untouched = signature_block(&self.signature);
+        self.to.trim().is_empty()
+            && self.cc.trim().is_empty()
+            && self.to_input.trim().is_empty()
+            && self.cc_input.trim().is_empty()
+            && self.subject.trim().is_empty()
+            && self.attachments.is_empty()
+            && (self.body.trim().is_empty() || self.body.trim() == untouched.trim())
+    }
+
+    fn content_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (&self.to, &self.cc, &self.to_input, &self.cc_input, &self.subject, &self.body, self.account).hash(&mut h);
+        for a in &self.attachments {
+            (&a.name, a.data.len()).hash(&mut h);
+        }
+        h.finish()
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.content_hash() != self.fingerprint
+    }
+
+    pub fn mark_saved(&mut self) {
+        self.fingerprint = self.content_hash();
+        self.changed_at = None;
+        self.saved = true;
+    }
+
+    pub fn due_for_autosave(&mut self, after: std::time::Duration) -> bool {
+        if !self.is_dirty() || self.is_empty() {
+            self.changed_at = None;
+            return false;
+        }
+        let since = *self.changed_at.get_or_insert_with(std::time::Instant::now);
+        since.elapsed() >= after
     }
 }
 
@@ -179,6 +413,13 @@ fn unsubscribe(u: Unsubscribe) -> String {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct PendingSend {
+    pub id: MessageId,
+    pub until: Instant,
+    pub to: String,
+}
+
 pub struct App {
     pub store: Box<dyn MailStore>,
     pub folder: Folder,
@@ -210,6 +451,9 @@ pub struct App {
     pub opener: Box<dyn FnMut(&std::path::Path) -> bool>,
     previews: Option<(MessageId, Vec<Option<egui::TextureHandle>>)>,
     pub viewing: Option<usize>,
+    pub autosave: Duration,
+    pub pending_send: Option<PendingSend>,
+    picker: Option<Receiver<Vec<std::path::PathBuf>>>,
     html: crate::htmlview::Renderer,
 }
 
@@ -251,6 +495,9 @@ impl App {
             opener: Box::new(|p| open::that(p).is_ok()),
             previews: None,
             viewing: None,
+            autosave: AUTOSAVE,
+            pending_send: None,
+            picker: None,
             html: crate::htmlview::Renderer::default(),
         }
     }
@@ -418,6 +665,11 @@ impl App {
                     self.selected = self.selected.saturating_sub(1);
                     self.scroll_to_selected = true;
                 }
+                Action::Open if v.current.as_ref().is_some_and(|m| m.folder == Folder::Drafts) => {
+                    if let Some(m) = &v.current {
+                        self.open_draft(m.summary.id);
+                    }
+                }
                 Action::Open => {
                     if let Some(f) = self.thread_focus.take().filter(|_| self.reader_focus) {
                         self.expanded = Some(f);
@@ -451,11 +703,20 @@ impl App {
                     }
                 }
                 Action::Reply(mode) => {
-                    if let Some(m) = &v.current {
-                        self.draft = Some(Draft::reply(m, mode));
+                    let focused = self.thread_focus.filter(|f| v.thread.iter().any(|t| t.summary.id == *f)).and_then(|f| self.store.get(f).ok());
+                    if let Some(m) = focused.as_ref().or(v.current.as_ref()) {
+                        let accounts = self.store.accounts();
+                        let own: Vec<String> = accounts.iter().map(|a| a.address.clone()).collect();
+                        let signature = accounts.get(m.summary.account).map(|a| a.signature.clone()).unwrap_or_default();
+                        let attachments = if mode == Reply::Forward { self.store.attachments(m.summary.id).unwrap_or_default().into_iter().map(|a| OutAttachment { name: a.name, mime: a.mime, data: a.data.to_vec() }).collect() } else { Vec::new() };
+                        self.draft = Some(Draft::reply(m, mode, &signature, &own, attachments));
                     }
                 }
-                Action::Compose => self.draft = Some(Draft::blank()),
+                Action::Compose => {
+                    let account = v.current.as_ref().map(|m| m.summary.account).unwrap_or(0);
+                    let signature = self.store.accounts().get(account).map(|a| a.signature.clone()).unwrap_or_default();
+                    self.draft = Some(Draft::blank_for(account, &signature));
+                }
                 Action::Search => {
                     if let Some(id) = self.search_id {
                         ctx.memory_mut(|m| m.request_focus(id));
@@ -678,6 +939,7 @@ impl App {
         self.viewer(&ctx, &mut actions);
         self.move_picker(&ctx, v.current.as_ref(), &mut actions);
         self.folder_dialog(&ctx);
+        self.undo_toast(&ctx);
         self.apply(&ctx, actions);
     }
 
@@ -1340,65 +1602,299 @@ impl App {
         });
     }
 
-    fn composer(&mut self, ctx: &egui::Context, accounts: &[AccountInfo]) {
+    fn open_draft(&mut self, id: MessageId) {
+        match self.store.open_draft(id) {
+            Ok(out) => {
+                let signature = self.store.accounts().get(out.account).map(|a| a.signature.clone()).unwrap_or_default();
+                self.draft = Some(Draft::from_outgoing(out, &signature));
+            }
+            Err(_) => self.notice = Some("The draft is still loading, try again in a moment".into()),
+        }
+    }
+
+    fn save_draft(&mut self, said: Option<&str>) {
+        let Some(d) = self.draft.as_mut() else { return };
+        let out = d.outgoing();
+        match self.store.save_draft(out) {
+            Ok(mid) => {
+                d.message_id = Some(mid);
+                d.mark_saved();
+                if let Some(said) = said {
+                    self.notice = Some(said.into());
+                }
+            }
+            Err(e) => self.notice = Some(format!("Could not save: {e:?}")),
+        }
+    }
+
+    fn send_draft(&mut self) {
+        let Some(mut d) = self.draft.take() else { return };
+        d.commit_inputs();
+        let to = d.to.clone();
+        match self.store.append(Folder::Sent, d.outgoing()) {
+            Ok(id) => {
+                if let Some(mid) = &d.message_id {
+                    self.store.discard_draft(d.account, mid);
+                }
+                self.notice = Some("Sent".into());
+                self.pending_send = Some(PendingSend { id, until: Instant::now() + self.store.send_hold(), to });
+            }
+            Err(e) => {
+                self.notice = Some(format!("Could not send: {e:?}"));
+                self.draft = Some(d);
+            }
+        }
+    }
+
+    fn discard_draft(&mut self) {
+        if let Some(d) = self.draft.take() {
+            if let Some(mid) = &d.message_id {
+                self.store.discard_draft(d.account, mid);
+            }
+        }
+    }
+
+    pub fn undo_send(&mut self) {
+        let Some(p) = self.pending_send.take() else { return };
+        match self.store.undo_send(p.id) {
+            Ok(Some(out)) => {
+                let signature = self.store.accounts().get(out.account).map(|a| a.signature.clone()).unwrap_or_default();
+                let mut d = Draft::from_outgoing(out, &signature);
+                d.title = "message".into();
+                self.draft = Some(d);
+                self.notice = Some("Send cancelled".into());
+            }
+            Ok(None) => self.notice = Some("Too late to undo, the message is on its way".into()),
+            Err(e) => self.notice = Some(format!("Could not undo: {e:?}")),
+        }
+    }
+
+    fn pick_files(&mut self, ctx: &egui::Context) {
+        if self.picker.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let files = rfd::FileDialog::new().set_title("Attach files").pick_files().unwrap_or_default();
+            let _ = tx.send(files);
+            ctx.request_repaint();
+        });
+        self.picker = Some(rx);
+    }
+
+    fn collect_attachments(&mut self, ctx: &egui::Context) {
         let Some(draft) = self.draft.as_mut() else { return };
-        let (mut send, mut save, mut discard) = (false, false, false);
+        let mut errors = Vec::new();
+        let mut picked = Vec::new();
+        if let Some(rx) = &self.picker {
+            match rx.try_recv() {
+                Ok(files) => {
+                    picked = files;
+                    self.picker = None;
+                }
+                Err(TryRecvError::Disconnected) => self.picker = None,
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        for path in picked {
+            if let Err(e) = draft.attach_path(&path) {
+                errors.push(e);
+            }
+        }
+        for f in ctx.input(|i| i.raw.dropped_files.clone()) {
+            let name = f.path().file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            match f.bytes() {
+                Ok(bytes) => draft.attach_bytes(&name, bytes),
+                Err(e) => errors.push(format!("Could not read {name}: {e}")),
+            }
+        }
+        if let Some(e) = errors.into_iter().next() {
+            self.notice = Some(e);
+        }
+    }
+
+    fn composer(&mut self, ctx: &egui::Context, accounts: &[AccountInfo]) {
+        if self.draft.is_none() {
+            return;
+        }
+        self.collect_attachments(ctx);
+        let hovering = egui_bench::drop::hovering(ctx).is_some();
+        let store: &dyn MailStore = self.store.as_ref();
+        let Some(draft) = self.draft.as_mut() else { return };
+        let (mut send, mut save, mut discard, mut attach) = (false, false, false, false);
         let r = egui::Modal::new(egui::Id::new("compose"))
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .show(ctx, |ui| {
                 ui.set_width(640.0);
                 modal_title(ui, &draft.title);
                 row(ui, "to", |ui| {
-                    field(ui, &mut draft.to, "name or address");
+                    recipients(ui, "to", &mut draft.to, &mut draft.to_input, "name or address", store);
                 });
                 row(ui, "cc", |ui| {
-                    field(ui, &mut draft.cc, "copy to");
+                    recipients(ui, "cc", &mut draft.cc, &mut draft.cc_input, "copy to", store);
                 });
                 row(ui, "subject", |ui| {
                     field(ui, &mut draft.subject, "subject");
                 });
-                row(ui, "from", |ui| {
-                    ui.allocate_ui(egui::vec2(260.0, KEY_H), |ui| {
-                        choice(ui, "from", &mut draft.account, accounts.iter().enumerate().map(|(i, a)| (i, a.address.clone())));
+                if accounts.len() > 1 {
+                    row(ui, "from", |ui| {
+                        ui.allocate_ui(egui::vec2(260.0, KEY_H), |ui| {
+                            let mut picked = draft.account;
+                            let changed = choice(ui, "from", &mut picked, accounts.iter().enumerate().map(|(i, a)| (i, a.address.clone())));
+                            if changed {
+                                let signature = accounts.get(picked).map(|a| a.signature.clone()).unwrap_or_default();
+                                draft.set_account(picked, &signature);
+                            }
+                        });
                     });
-                });
+                }
                 ui.add_space(6.0);
                 body_editor(ui, &mut draft.body, 9);
                 ui.add_space(4.0);
+                if !draft.attachments.is_empty() {
+                    ui.horizontal_wrapped(|ui| {
+                        let mut remove = None;
+                        for (i, a) in draft.attachments.iter().enumerate() {
+                            let r = attachment(ui, &a.name, &human_size(a.data.len()));
+                            let label = format!("remove {}", a.name);
+                            r.widget_info(move || egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label.clone()));
+                            if r.on_hover_text("click to remove").clicked() {
+                                remove = Some(i);
+                            }
+                        }
+                        if let Some(i) = remove {
+                            draft.attachments.remove(i);
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
                 ui.horizontal(|ui| {
+                    attach = ui.add(Key::new("attach").outline(VALUE).min_width(90.0)).clicked();
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let note = if draft.saved { "Saved to drafts, encrypted" } else { "Not saved yet" };
+                        let note = if draft.saved && !draft.is_dirty() { "Saved to drafts, encrypted" } else { "Not saved yet" };
                         Line::new().note(note).size(11.0).show(ui);
                     });
                 });
                 form_footer(ui, |ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        send = ui.add(Key::new("send").solid(READOUT).min_width(100.0).enabled(!draft.to.trim().is_empty())).clicked();
+                        send = ui.add(Key::new("send").solid(READOUT).min_width(100.0).enabled(draft.has_recipient())).clicked();
                         save = ui.add(Key::new("save draft").outline(VALUE).min_width(100.0)).clicked();
                         discard = ui.add(Key::new("discard").outline(FAULT).min_width(90.0)).clicked();
                     });
                 });
             });
+        if hovering {
+            egui_bench::drop::overlay(ctx, None, "drop to attach", "files are encrypted while queued", READOUT);
+        }
         if r.should_close() {
             discard = true;
         }
-        if send || save {
-            let d = self.draft.clone().unwrap();
-            let out = Outgoing { account: d.account, to: d.to, cc: d.cc, subject: d.subject, body: d.body };
-            let (folder, said) = if send { (Folder::Sent, "Sent") } else { (Folder::Drafts, "Saved to drafts") };
-            match self.store.append(folder, out) {
-                Ok(_) => self.notice = Some(said.into()),
-                Err(e) => self.notice = Some(format!("Could not save: {e:?}")),
-            }
-            if send {
-                self.draft = None;
-            } else if let Some(d) = self.draft.as_mut() {
-                d.saved = true;
-            }
+        if attach {
+            self.pick_files(ctx);
+        }
+        if send {
+            self.send_draft();
+        } else if save {
+            self.save_draft(Some("Saved to drafts"));
         } else if discard {
-            self.draft = None;
+            self.discard_draft();
+        } else if let Some(d) = self.draft.as_mut() {
+            if d.due_for_autosave(self.autosave) {
+                self.save_draft(None);
+            }
+            if self.draft.as_ref().is_some_and(|d| d.is_dirty()) {
+                ctx.request_repaint_after(Duration::from_millis(500));
+            }
         }
     }
+
+    fn undo_toast(&mut self, ctx: &egui::Context) {
+        let Some(p) = self.pending_send.clone() else { return };
+        if Instant::now() >= p.until {
+            self.pending_send = None;
+            return;
+        }
+        let left = p.until.saturating_duration_since(Instant::now()).as_secs() + 1;
+        let mut undo = false;
+        egui::Area::new(egui::Id::new("undo-send"))
+            .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(20.0, -52.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::NONE
+                    .fill(PANEL)
+                    .stroke(egui::Stroke::new(1.0, READOUT))
+                    .inner_margin(Margin::symmetric(14, 8))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            Line::new().note(format!("Sending to {} in {left}s", p.to)).show(ui);
+                            undo = ui.add(Key::new("undo").outline(VALUE).min_width(70.0)).clicked();
+                        });
+                    });
+            });
+        if undo {
+            self.undo_send();
+        }
+        ctx.request_repaint_after(Duration::from_millis(250));
+    }
+}
+
+fn recipients(ui: &mut Ui, id: &str, list: &mut String, input: &mut String, hint: &str, store: &dyn MailStore) {
+    ui.vertical(|ui| {
+        let chips = split_recipients(list);
+        if !chips.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                let mut keep = Vec::new();
+                for c in &chips {
+                    let contact = Contact::parse(c);
+                    let shown = if contact.name.is_empty() { contact.address.clone() } else { contact.name.clone() };
+                    if !chip_button(ui, &shown, VALUE).on_hover_text(format!("{} (click to remove)", contact.address)).clicked() {
+                        keep.push(c.clone());
+                    }
+                }
+                if keep.len() != chips.len() {
+                    *list = keep.join(", ");
+                }
+            });
+        }
+        let out = egui::Frame::NONE
+            .fill(WELL)
+            .stroke(egui::Stroke::new(1.0, ETCH))
+            .corner_radius(2)
+            .inner_margin(Margin { left: 6, right: 6, top: 3, bottom: 3 })
+            .show(ui, |ui| {
+                let edit = egui::TextEdit::singleline(input)
+                    .frame(egui::Frame::NONE)
+                    .font(egui_bench::theme::figure(12.5))
+                    .text_color(VALUE)
+                    .hint_text(egui::RichText::new(hint).font(egui_bench::theme::figure(12.5)).color(LEGEND.gamma_multiply(0.6)))
+                    .desired_width(ui.available_width() - 12.0);
+                egui::CompletionPopup::new(ui.make_persistent_id(("recipient", id)))
+                    .word_boundary(|c| c == ',' || c == ';')
+                    .align(egui::RectAlign::BOTTOM_START)
+                    .show(ui, edit, |q| {
+                        store
+                            .suggest(q.word.trim(), 6)
+                            .into_iter()
+                            .map(|c| {
+                                let shown = c.formatted();
+                                egui::Suggestion::new(format!("{shown}, ")).content(shown)
+                            })
+                            .collect()
+                    })
+            })
+            .inner;
+        let edit_id = out.text_edit.response.id;
+        ui.ctx().accesskit_node_builder(edit_id, |node| node.set_label(hint));
+        let pending_split = split_recipients(input);
+        let finished = input.ends_with([',', ';']) || out.text_edit.response.lost_focus();
+        if finished && !pending_split.is_empty() {
+            let mut all = split_recipients(list);
+            all.extend(pending_split);
+            *list = all.join(", ");
+            input.clear();
+        }
+    });
 }
 
 fn paint_row(p: &egui::Painter, rect: egui::Rect, m: &Summary, selected: bool, hovered: bool, account: Option<&str>, marks: &[String]) {

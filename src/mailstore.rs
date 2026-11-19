@@ -53,6 +53,7 @@ pub struct AccountInfo {
     pub sync: SyncState,
     pub detail: Option<String>,
     pub indexed: Option<(usize, usize)>,
+    pub signature: String,
 }
 
 #[derive(Clone, Debug)]
@@ -207,6 +208,10 @@ pub struct Message {
     pub remote_images: Option<String>,
     pub headers: Headers,
     pub body_state: BodyState,
+    pub message_id: Option<String>,
+    pub references: Vec<String>,
+    pub to_full: Vec<Contact>,
+    pub cc_full: Vec<Contact>,
 }
 
 #[derive(Clone, Debug)]
@@ -215,20 +220,86 @@ pub struct ThreadItem {
     pub folder: Folder,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Contact {
+    pub name: String,
+    pub address: String,
+}
+
+impl Contact {
+    pub fn of(a: &crate::backend::Address) -> Contact {
+        Contact { name: a.name.clone().unwrap_or_default(), address: a.address.clone() }
+    }
+}
+
+impl Contact {
+    pub fn formatted(&self) -> String {
+        if self.name.trim().is_empty() || self.name == self.address {
+            self.address.clone()
+        } else {
+            let name = self.name.trim();
+            if name.contains([',', ';', '"', '<', '>']) {
+                format!("\"{}\" <{}>", name.replace('"', ""), self.address)
+            } else {
+                format!("{name} <{}>", self.address)
+            }
+        }
+    }
+
+    pub fn parse(text: &str) -> Contact {
+        let text = text.trim();
+        match (text.rfind('<'), text.rfind('>')) {
+            (Some(a), Some(b)) if a < b => Contact {
+                name: text[..a].trim().trim_matches('"').to_string(),
+                address: text[a + 1..b].trim().to_string(),
+            },
+            _ => Contact { name: String::new(), address: text.to_string() },
+        }
+    }
+}
+
+pub fn split_recipients(list: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for c in list.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                current.push(c);
+            }
+            ',' | ';' if !quoted => {
+                out.push(std::mem::take(&mut current));
+            }
+            _ => current.push(c),
+        }
+    }
+    out.push(current);
+    out.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+}
+
+pub use crate::backend::Attachment as OutAttachment;
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FlagChange {
     pub unread: Option<bool>,
     pub flagged: Option<bool>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Outgoing {
     pub account: usize,
     pub to: String,
     pub cc: String,
     pub subject: String,
     pub body: String,
+    pub attachments: Vec<OutAttachment>,
+    pub in_reply_to: Option<String>,
+    pub references: Vec<String>,
+    pub message_id: Option<String>,
 }
+
+pub const SEND_HOLD_SECS: u64 = 10;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoreError {
@@ -270,5 +341,39 @@ pub trait MailStore {
 
     fn delete_folder(&mut self, _folder: &Folder) -> Result<(), StoreError> {
         Err(StoreError::Backend("folders cannot be deleted here".into()))
+    }
+
+    fn save_draft(&mut self, message: Outgoing) -> Result<String, StoreError> {
+        let kept = message.message_id.clone();
+        let id = self.append(Folder::Drafts, message)?;
+        Ok(kept.unwrap_or_else(|| id.0.to_string()))
+    }
+
+    fn open_draft(&mut self, _id: MessageId) -> Result<Outgoing, StoreError> {
+        Err(StoreError::NotFound)
+    }
+
+    fn discard_draft(&mut self, _account: usize, _message_id: &str) {}
+
+    fn undo_send(&mut self, _id: MessageId) -> Result<Option<Outgoing>, StoreError> {
+        Ok(None)
+    }
+
+    fn suggest(&self, _text: &str, _limit: usize) -> Vec<Contact> {
+        Vec::new()
+    }
+
+    fn send_hold(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(SEND_HOLD_SECS)
+    }
+}
+
+pub fn human_size(bytes: usize) -> String {
+    if bytes >= 1_000_000 {
+        format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+    } else if bytes >= 1000 {
+        format!("{} KB", bytes / 1000)
+    } else {
+        format!("{bytes} B")
     }
 }

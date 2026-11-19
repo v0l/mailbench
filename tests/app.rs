@@ -124,8 +124,9 @@ fn c_opens_the_composer_and_reply_prefills() {
     h.run();
     h.run();
     let d = h.state().1.draft.clone().unwrap();
-    assert_eq!(d.to, "Tomás Rivera");
+    assert_eq!(d.to, "Tomás Rivera <tomás.rivera@example.test>");
     assert_eq!(d.subject, "Re: Rev C stencil quote and lead time");
+    assert!(d.body.contains("wrote:\n> "), "{}", d.body);
 }
 
 #[test]
@@ -351,4 +352,221 @@ fn open_disabled_writes_nothing() {
     h.run();
     assert!(!open_dir.exists());
     assert!(h.state().1.notice.as_ref().unwrap().contains("turned off"));
+}
+
+#[test]
+fn reply_quotes_the_original_with_an_attribution_line() {
+    let h = harness(FakeStore::concept());
+    let m = h.state().1.store.get(h.state().1.store.list(&Query::new(Folder::Inbox), 0, 1).items[0].id).unwrap();
+    let d = mailbench::app::Draft::reply(&m, mailbench::app::Reply::One, "", &[], Vec::new());
+    assert!(d.body.contains(&format!("On {}, ", m.sent)));
+    assert!(d.body.contains(" wrote:\n> "));
+    for line in d.body.lines().skip_while(|l| !l.ends_with("wrote:")).skip(1) {
+        assert!(line.starts_with('>'), "{line}");
+    }
+}
+
+#[test]
+fn reply_sets_threading_headers_and_forward_does_not() {
+    let h = harness(FakeStore::concept());
+    let mut m = h.state().1.store.get(h.state().1.store.list(&Query::new(Folder::Inbox), 0, 1).items[0].id).unwrap();
+    m.message_id = Some("orig@x.test".into());
+    m.references = vec!["root@x.test".into()];
+    let r = mailbench::app::Draft::reply(&m, mailbench::app::Reply::One, "", &[], Vec::new());
+    assert_eq!(r.in_reply_to.as_deref(), Some("orig@x.test"));
+    assert_eq!(r.references, vec!["root@x.test", "orig@x.test"]);
+    let f = mailbench::app::Draft::reply(&m, mailbench::app::Reply::Forward, "", &[], Vec::new());
+    assert!(f.in_reply_to.is_none());
+    assert!(f.body.contains("---------- Forwarded message ----------"));
+    assert!(f.body.contains("Subject: "));
+    assert!(f.body.contains("From: "));
+}
+
+#[test]
+fn forward_carries_the_original_attachments() {
+    let mut h = harness(FakeStore::concept());
+    h.key_press(egui::Key::F);
+    h.run();
+    h.run();
+    let d = h.state().1.draft.clone().unwrap();
+    assert!(!d.attachments.is_empty());
+}
+
+#[test]
+fn signature_is_added_and_follows_the_from_identity() {
+    let mut d = mailbench::app::Draft::blank_for(0, "Mara\nKestrel");
+    assert!(d.body.contains("-- \nMara\nKestrel"));
+    d.set_account(1, "Mara at home");
+    assert!(d.body.contains("-- \nMara at home"));
+    assert!(!d.body.contains("Kestrel"));
+}
+
+#[test]
+fn recipients_become_chips_and_autocomplete_fills_from_seen_addresses() {
+    let mut h = harness(FakeStore::concept());
+    h.key_press(egui::Key::C);
+    h.run();
+    h.run();
+    {
+        let d = h.state_mut().1.draft.as_mut().unwrap();
+        d.to = "a@x.test, \"Rivera, Tomás\" <t@x.test>".into();
+    }
+    h.run();
+    h.run();
+    h.get_by_label_contains("a@x.test");
+    h.get_by_label_contains("Rivera, Tomás");
+    assert_eq!(split_recipients("a@x.test, \"Rivera, Tomás\" <t@x.test>").len(), 2);
+    assert!(!h.state().1.store.suggest("rivera", 5).is_empty());
+}
+
+#[test]
+fn attachments_are_listed_with_sizes_and_can_be_removed() {
+    let mut h = harness(FakeStore::concept());
+    h.key_press(egui::Key::C);
+    h.run();
+    h.run();
+    h.state_mut().1.draft.as_mut().unwrap().attach_bytes("board.pdf", vec![1; 2500]);
+    h.run();
+    h.run();
+    h.get_by_label_contains("board.pdf");
+    assert_eq!(human_size(2500), "2 KB");
+    h.get_by_label("remove board.pdf").click();
+    h.run();
+    h.run();
+    assert!(h.state().1.draft.as_ref().unwrap().attachments.is_empty());
+}
+
+#[test]
+fn autosave_files_a_draft_and_resaves_in_place() {
+    let mut h = harness(FakeStore::concept());
+    let before = h.state().1.store.counts(&Query::new(Folder::Drafts)).all;
+    h.state_mut().1.autosave = std::time::Duration::ZERO;
+    h.key_press(egui::Key::C);
+    h.run();
+    h.run();
+    h.state_mut().1.draft.as_mut().unwrap().subject = "autosaved".into();
+    h.run();
+    h.run();
+    h.run();
+    assert_eq!(h.state().1.store.counts(&Query::new(Folder::Drafts)).all, before + 1);
+    assert!(h.state().1.draft.as_ref().unwrap().saved);
+    h.state_mut().1.draft.as_mut().unwrap().subject = "autosaved again".into();
+    h.run();
+    h.run();
+    h.run();
+    assert_eq!(h.state().1.store.counts(&Query::new(Folder::Drafts)).all, before + 1);
+}
+
+#[test]
+fn discarding_a_saved_draft_removes_it() {
+    let mut h = harness(FakeStore::concept());
+    let before = h.state().1.store.counts(&Query::new(Folder::Drafts)).all;
+    h.key_press(egui::Key::C);
+    h.run();
+    h.run();
+    h.state_mut().1.draft.as_mut().unwrap().subject = "gone".into();
+    h.get_by_label("save draft").click();
+    h.run();
+    h.run();
+    assert_eq!(h.state().1.store.counts(&Query::new(Folder::Drafts)).all, before + 1);
+    h.get_by_label("discard").click();
+    h.run();
+    h.run();
+    assert_eq!(h.state().1.store.counts(&Query::new(Folder::Drafts)).all, before);
+}
+
+#[test]
+fn undo_send_brings_the_message_back_into_the_composer() {
+    let mut h = harness(FakeStore::concept());
+    h.key_press(egui::Key::R);
+    h.run();
+    h.run();
+    h.get_by_label("send").click();
+    h.run();
+    h.run();
+    assert!(h.state().1.draft.is_none());
+    assert!(h.state().1.pending_send.is_some());
+    h.get_by_label("undo").click();
+    h.run();
+    h.run();
+    let app = &h.state().1;
+    assert!(app.draft.is_some());
+    assert_eq!(app.store.list(&Query::new(Folder::Sent), 0, 10).items.len(), 0);
+}
+
+#[test]
+fn reply_from_a_thread_quotes_the_focused_message() {
+    let mut h = harness(FakeStore::concept());
+    let head = inbox_ids(&h.state().1)[0];
+    let thread = h.state().1.store.thread(head);
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.key_press(egui::Key::K);
+    h.run();
+    h.key_press(egui::Key::K);
+    h.run();
+    assert_eq!(h.state().1.thread_focus, Some(thread[0].summary.id));
+    let older = h.state().1.store.get(thread[0].summary.id).unwrap();
+    h.key_press(egui::Key::R);
+    h.run();
+    h.run();
+    let d = h.state().1.draft.clone().unwrap();
+    assert!(d.body.contains(&format!("On {}, ", older.sent)), "{}", d.body);
+    assert!(d.body.contains(&format!("> {}", older.paragraphs[0].lines().next().unwrap())), "{}", d.body);
+}
+
+#[test]
+fn dropped_files_are_attached_with_their_size_and_sent() {
+    #[derive(Debug)]
+    struct Dropped(std::path::PathBuf);
+    impl egui::DroppedFile for Dropped {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            std::fs::read(&self.0).map_err(|e| e.to_string())
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("coupon.bin");
+    std::fs::write(&path, vec![7u8; 2500]).unwrap();
+    let mut h = harness(FakeStore::concept());
+    h.key_press(egui::Key::R);
+    h.run();
+    h.run();
+    h.input_mut().dropped_files.push(std::sync::Arc::new(Dropped(path)));
+    h.run();
+    h.run();
+    h.get_by_label_contains("coupon.bin");
+    let d = h.state().1.draft.clone().unwrap();
+    assert_eq!(d.attachments.len(), 1);
+    assert_eq!(human_size(d.attachments[0].data.len()), "2 KB");
+    h.get_by_label("send").click();
+    h.run();
+    h.run();
+    let sent = h.state().1.store.list(&Query::new(Folder::Sent), 0, 10).items[0].id;
+    assert_eq!(h.state().1.store.get(sent).unwrap().attachments[0].name, "coupon.bin");
+}
+
+#[test]
+fn tab_completes_an_address_from_suggestions() {
+    let mut h = harness(FakeStore::concept());
+    h.key_press(egui::Key::C);
+    h.run();
+    h.run();
+    let to = h.get_by_role_and_label(egui::accesskit::Role::TextInput, "name or address");
+    to.click();
+    h.run();
+    h.get_by_role_and_label(egui::accesskit::Role::TextInput, "name or address").type_text("rivera");
+    h.run();
+    h.run();
+    h.key_press(egui::Key::Tab);
+    h.run();
+    h.run();
+    h.key_press(egui::Key::Tab);
+    h.run();
+    h.run();
+    let d = h.state().1.draft.clone().unwrap();
+    let all = format!("{} {}", d.to, d.to_input);
+    assert!(all.contains("rivera") && all.contains('@'), "{all}");
 }

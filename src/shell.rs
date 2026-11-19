@@ -1094,6 +1094,7 @@ impl Shell {
         let real = RealStore::open(clone, setups);
         for c in &configs {
             real.set_backfill(&c.id, c.backfill);
+            real.set_signature(&c.id, &c.signature);
         }
         self.screen = Screen::Main(Box::new(Main { app: App::with_store(Box::new(real)) }));
         self.apply_open_settings();
