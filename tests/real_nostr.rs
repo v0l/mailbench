@@ -123,3 +123,42 @@ fn archiving_moves_a_dm_to_the_local_archive_folder() {
         assert_eq!(h.state().1.store.counts(&q).all, 0);
     });
 }
+
+#[test]
+fn a_sender_picture_is_blocked_until_images_are_allowed_and_nip05_needs_proof() {
+    mailbench::runtime::block_on(async {
+        let relay = MockRelay::run().await.unwrap();
+        let url = relay.url().await.to_string();
+        let mut alice = nostr(1, &url);
+        let bob = nostr(2, &url);
+        let keys = nostr_sdk::Keys::parse(&secret(1)).unwrap();
+        let client = nostr_sdk::Client::new(keys.clone());
+        client.add_relay(url.as_str()).await.unwrap();
+        client.connect().await;
+        let meta = nostr_sdk::Metadata::new().name("Alice").picture(nostr_sdk::Url::parse("https://img.example.test/a.png").unwrap()).nip05("alice@127.0.0.1.invalid");
+        client.send_event_builder(nostr_sdk::EventBuilder::metadata(&meta)).await.unwrap();
+        alice.send(&dm(&alice, &bob, "Plans")).await.unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::create(&dir.path().join("mail.db"), None, Some(("pw", KdfParams::fast()))).unwrap();
+        let real = RealStore::open(store, vec![setup(bob)]);
+        let mut h = harness(real);
+        until(&mut h, "dm in inbox", |a| a.store.counts(&Query::new(ms::Folder::Inbox)).all == 1);
+        let id = h.state().1.store.list(&Query::new(ms::Folder::Inbox), 0, 10).items[0].id;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            h.run();
+            if let Ok(m) = h.state().1.store.get(id) {
+                if m.body_state == ms::BodyState::Ready && m.remote_images.is_some() {
+                    assert_eq!(m.remote_images.as_deref(), Some("img.example.test"));
+                    assert!(m.headers.all.iter().any(|(k, v)| k == "X-Nostr-Picture" && v == "https://img.example.test/a.png"));
+                    assert!(!m.headers.all.iter().any(|(k, _)| k == "X-Nostr-Nip05"));
+                    assert!(!h.state().1.images_loaded.contains(&id));
+                    return;
+                }
+            }
+            assert!(Instant::now() < deadline, "picture header never appeared");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    });
+}

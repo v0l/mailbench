@@ -1774,10 +1774,21 @@ impl App {
                 to = "nobody".into();
             }
             sender_line(ui, &m.summary.from, &to, &m.sent);
+            let picture = crate::real::display::header_value(&m.headers.all, "X-Nostr-Picture");
+            if let Some(url) = picture.filter(|_| self.images_loaded.contains(&m.summary.id)) {
+                let avatar = crate::htmlview::HtmlBody {
+                    html: format!("<img src=\"{}\" width=\"48\" height=\"48\">", url.replace('"', "")),
+                    inline: Vec::new(),
+                };
+                let _ = html_body(ui, &self.html, m.summary.id.0 ^ 0xA7A7, &avatar, true);
+            }
             ui.horizontal(|ui| {
                 chip(ui, account, LEGEND, false);
                 if m.summary.new {
                     chip(ui, "new", TRACE, true);
+                }
+                if let Some(id) = crate::real::display::header_value(&m.headers.all, "X-Nostr-Nip05") {
+                    chip(ui, &format!("nip-05 verified {id}"), READOUT, true);
                 }
                 if m.summary.flagged {
                     chip(ui, "flagged", READOUT, true);

@@ -200,15 +200,36 @@ impl Dm {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Profile {
+    pub name: Option<String>,
+    pub picture: Option<String>,
+    pub nip05: Option<String>,
+}
+
 #[derive(Default)]
-struct Names {
-    map: HashMap<PublicKey, (Option<String>, Instant)>,
+pub struct Names {
+    map: HashMap<PublicKey, (Profile, Instant)>,
 }
 
 impl Names {
-    fn get(&self, key: &PublicKey) -> Option<Option<String>> {
-        self.map.get(key).filter(|(_, at)| at.elapsed() < PROFILE_TTL).map(|(n, _)| n.clone())
+    fn fresh(&self, key: &PublicKey) -> Option<&Profile> {
+        self.map.get(key).filter(|(_, at)| at.elapsed() < PROFILE_TTL).map(|(p, _)| p)
     }
+
+    fn get(&self, key: &PublicKey) -> Option<Option<String>> {
+        self.fresh(key).map(|p| p.name.clone())
+    }
+
+    pub fn set(&mut self, key: PublicKey, profile: Profile) {
+        self.map.insert(key, (profile, Instant::now()));
+    }
+}
+
+pub fn nip05_matches(body: &[u8], identifier: &str, key: &PublicKey) -> bool {
+    let Some((name, _)) = identifier.trim().split_once('@') else { return false };
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) else { return false };
+    json.get("names").and_then(|n| n.get(name)).and_then(|v| v.as_str()).and_then(|v| PublicKey::parse(v).ok()) == Some(*key)
 }
 
 fn summary_of(dm: &Dm, me: &PublicKey, names: &Names) -> MessageSummary {
@@ -286,6 +307,14 @@ pub(crate) fn render(dm: &Dm, names: &Names, file: Option<(&FileRef, Vec<u8>)>) 
         h.push_str(&format!("In-Reply-To: <{}>\r\n", message_id_of(r)));
     }
     h.push_str(&format!("References: {}\r\n", dm.references().iter().map(|r| format!("<{r}>")).collect::<Vec<_>>().join(" ")));
+    if let Some(profile) = names.fresh(&dm.sender) {
+        if let Some(pic) = profile.picture.as_deref().filter(|p| p.starts_with("https://") && !p.contains(['\r', '\n', ' '])) {
+            h.push_str(&format!("X-Nostr-Picture: {pic}\r\n"));
+        }
+        if let Some(id) = profile.nip05.as_deref().filter(|p| !p.contains(['\r', '\n'])) {
+            h.push_str(&format!("X-Nostr-Nip05: {id}\r\n"));
+        }
+    }
     h.push_str("MIME-Version: 1.0\r\n");
     let text = if dm.file.is_some() { String::new() } else { dm.content.clone() };
     match file {
@@ -324,6 +353,15 @@ fn fetch_url(url: &str) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     std::io::Read::read_to_end(&mut std::io::Read::take(response.into_reader(), MAX_FILE_BYTES), &mut out)?;
     Ok(out)
+}
+
+pub async fn verify_nip05(identifier: &str, key: &PublicKey) -> bool {
+    let Some((name, domain)) = identifier.trim().split_once('@') else { return false };
+    let url = format!("https://{domain}/.well-known/nostr.json?name={name}");
+    match tokio::task::spawn_blocking(move || fetch_url(&url)).await {
+        Ok(Ok(body)) => nip05_matches(&body, identifier, key),
+        _ => false,
+    }
 }
 
 pub async fn resolve_nip05(identifier: &str) -> Option<PublicKey> {
@@ -443,19 +481,26 @@ impl NostrBackend {
         }
         let filter = Filter::new().authors(stale.clone()).kind(Kind::Metadata);
         let events = client.fetch_events_from(self.relays.clone(), filter, FETCH_TIMEOUT).await;
-        let mut found: HashMap<PublicKey, String> = HashMap::new();
+        let mut found: HashMap<PublicKey, Profile> = HashMap::new();
         if let Ok(events) = events {
             for ev in events.iter() {
-                if let Ok(meta) = Metadata::from_json(&ev.content) {
-                    let label = meta.display_name.filter(|s| !s.is_empty()).or(meta.name).filter(|s| !s.is_empty());
-                    if let Some(l) = label {
-                        found.insert(ev.pubkey, l);
+                let Ok(meta) = Metadata::from_json(&ev.content) else { continue };
+                let non_empty = |s: Option<String>| s.filter(|s| !s.trim().is_empty());
+                let mut profile = Profile {
+                    name: non_empty(meta.display_name).or(non_empty(meta.name)),
+                    picture: non_empty(meta.picture),
+                    nip05: None,
+                };
+                if let Some(id) = non_empty(meta.nip05) {
+                    if verify_nip05(&id, &ev.pubkey).await {
+                        profile.nip05 = Some(id);
                     }
                 }
+                found.insert(ev.pubkey, profile);
             }
         }
         for k in stale {
-            self.names.map.insert(k, (found.remove(&k), Instant::now()));
+            self.names.set(k, found.remove(&k).unwrap_or_default());
         }
     }
 
@@ -721,6 +766,30 @@ mod tests {
         assert_eq!(parse_key(&k.to_hex()), Some(k));
         assert_eq!(parse_key(&format!("nostr:{}", k.to_bech32().unwrap())), Some(k));
         assert_eq!(parse_key("alice@example.com"), None);
+    }
+
+    #[test]
+    fn nip05_only_verifies_the_matching_key() {
+        let (a, b) = (keys(1).public_key(), keys(2).public_key());
+        let body = format!("{{\"names\":{{\"bob\":\"{}\"}}}}", a.to_hex());
+        assert!(nip05_matches(body.as_bytes(), "bob@example.com", &a));
+        assert!(!nip05_matches(body.as_bytes(), "bob@example.com", &b));
+        assert!(!nip05_matches(body.as_bytes(), "eve@example.com", &a));
+        assert!(!nip05_matches(b"not json", "bob@example.com", &a));
+    }
+
+    #[tokio::test]
+    async fn profile_picture_and_verified_nip05_become_headers() {
+        let (a, b) = (keys(1), keys(2));
+        let rumor = EventBuilder::new(Kind::PrivateDirectMessage, "hi").tags([Tag::public_key(b.public_key())]);
+        let dm = open_wrap(&b, &wrap(&a, &b, rumor).await).await.unwrap();
+        let mut names = Names::default();
+        names.set(a.public_key(), Profile { name: Some("Alice".into()), picture: Some("https://img.example/a.png".into()), nip05: Some("alice@example.com".into()) });
+        let raw = String::from_utf8(render(&dm, &names, None)).unwrap();
+        assert!(raw.contains("X-Nostr-Picture: https://img.example/a.png\r\n"));
+        assert!(raw.contains("X-Nostr-Nip05: alice@example.com\r\n"));
+        let plain = String::from_utf8(render(&dm, &Names::default(), None)).unwrap();
+        assert!(!plain.contains("X-Nostr-"));
     }
 
     #[test]

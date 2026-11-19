@@ -13,6 +13,16 @@ pub struct Body {
     pub remote_images: Option<String>,
 }
 
+pub fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str()).filter(|v| !v.is_empty())
+}
+
+pub fn avatar_host(headers: &[(String, String)]) -> Option<String> {
+    let url = header_value(headers, "X-Nostr-Picture")?.strip_prefix("https://")?;
+    let host: String = url.chars().take_while(|c| !matches!(c, '/' | '?' | ':' | '#')).collect();
+    Some(host).filter(|h| !h.is_empty())
+}
+
 pub fn person(a: &Address) -> String {
     match a.name.as_deref() {
         Some(n) if !n.trim().is_empty() => n.trim().to_string(),
@@ -256,6 +266,14 @@ mod tests {
         let b = parse_body(raw);
         assert_eq!(b.paragraphs, vec!["Hello there\nsecond line", "Bye"]);
         assert_eq!(b.quoted, vec!["> old one", "> old two"]);
+    }
+
+    #[test]
+    fn avatar_host_is_read_only_from_https_picture_headers() {
+        let h = |v: &str| vec![("X-Nostr-Picture".to_string(), v.to_string())];
+        assert_eq!(avatar_host(&h("https://img.example.com/a.png")).as_deref(), Some("img.example.com"));
+        assert_eq!(avatar_host(&h("http://img.example.com/a.png")), None);
+        assert_eq!(avatar_host(&[]), None);
     }
 
     #[test]

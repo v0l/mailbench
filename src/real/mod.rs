@@ -1,5 +1,5 @@
 mod backfill;
-mod display;
+pub mod display;
 mod headers;
 mod model;
 pub(crate) mod threads;
@@ -562,7 +562,7 @@ impl Shared {
             html: body.html,
             quoted: body.quoted,
             attachments: body.attachments,
-            remote_images: body.remote_images,
+            remote_images: body.remote_images.or_else(|| display::avatar_host(&headers.all)),
             headers,
             body_state: BodyState::Ready,
             message_id: e.message_id.clone().or(envelope.message_id),
@@ -1616,7 +1616,7 @@ impl MailStore for RealStore {
             html: body.html,
             quoted: body.quoted,
             attachments: body.attachments,
-            remote_images: body.remote_images,
+            remote_images: body.remote_images.or_else(|| display::avatar_host(&headers.all)),
             headers,
             body_state,
             message_id: local_meta.0.or(e.message_id),

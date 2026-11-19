@@ -38,14 +38,16 @@ Sync is token based. `sync_folder(folder, since)` returns a `FolderDelta`: the n
 
 ## Nostr (NIP-17)
 
-`NostrBackend` is a mail backend over Nostr private DMs. Add it from the add account screen with an nsec (hex also works). The secret is stored with the other credentials in the encrypted store. NIP-46 bunker signers are not supported yet.
+`NostrBackend` is a mail backend over Nostr private DMs. Add it from the add account screen with an nsec (hex also works). The secret is stored with the other credentials in the encrypted store. NIP-46 bunker signers are not supported yet (#865).
 
 - Relays: the account's kind 10050 list, else its NIP-65 read relays, else the configured relays, else `DEFAULT_RELAYS`. `publish_inbox` publishes a kind 10050 when none exists.
 - Folders: Inbox (received), Sent (own messages, from the self copy gift wrap) and Archive (local only, empty).
 - Sync: kind 1059 events tagged with the account's key, going back 2 days from the newest wrap seen (wrap times are randomised), capped at `BACKFILL_CAP` events. Wraps are opened with NIP-44, the seal and rumor authors must match, and messages dedupe by rumor id.
 - Mapping: kind 14 becomes a plain text mail, kind 15 a mail with the decrypted file attached. `From` and `To` are `<npub>@nostr` with kind 0 names, refreshed daily. The thread key (participants plus normalised subject) goes in `References`, and `e` tags become `In-Reply-To`.
 - Send: one kind 14 gift wrap per recipient on that recipient's 10050 relays, plus a self copy. Recipients can be an npub, hex key or NIP-05 name.
-- Capabilities: no server flags, folder changes, search, move or delete. Unread state is local.
+- Capabilities: `server_folders`, `server_search` and `server_flags` are false, so the UI hides folder create and rename, the server search fallback and the flag action. Unread state and moves to Archive are kept in the local store only.
+- Profiles: kind 0 name, picture and NIP-05 are cached for a day. The picture shows only after the user allows remote images for that message. A NIP-05 badge needs `/.well-known/nostr.json` to return the sender's key.
+- When the account has no kind 10050 list, the add account screen asks whether to publish one before saving.
 
 Tests: `tests/backend_nostr.rs` uses rust-nostr's in-process `MockRelay`, never a public relay.
 
