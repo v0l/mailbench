@@ -390,6 +390,23 @@ impl Store {
         Ok(())
     }
 
+    pub fn size_of(&self, kind: &str, id: &str) -> Result<u64> {
+        let n: Option<i64> = self
+            .conn
+            .prepare_cached("SELECT LENGTH(blob) FROM records WHERE kind = ?1 AND id = ?2")?
+            .query_row(params![kind, id], |r| r.get(0))
+            .optional()?;
+        Ok(n.unwrap_or(0).max(0) as u64)
+    }
+
+    pub fn bytes_of(&self, kind: &str) -> Result<u64> {
+        let n: Option<i64> = self
+            .conn
+            .prepare_cached("SELECT SUM(LENGTH(blob)) FROM records WHERE kind = ?1")?
+            .query_row(params![kind], |r| r.get(0))?;
+        Ok(n.unwrap_or(0).max(0) as u64)
+    }
+
     pub fn list(&self, kind: &str) -> Result<Vec<String>> {
         let mut st = self.conn.prepare_cached("SELECT id FROM records WHERE kind = ?1 ORDER BY id")?;
         let rows = st.query_map(params![kind], |r| r.get::<_, String>(0))?;

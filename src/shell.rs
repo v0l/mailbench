@@ -450,6 +450,7 @@ impl AddForm {
             imap: ServerSettings::new(self.imap_host.trim(), port(&self.imap_port, "incoming")?, self.imap_security.clone()),
             smtp: ServerSettings::new(self.smtp_host.trim(), port(&self.smtp_port, "outgoing")?, self.smtp_security.clone()),
             credential,
+            backfill: Default::default(),
         })
     }
 
@@ -831,6 +832,13 @@ impl SettingsForm {
                                     if ui.add(Key::new("remove").outline(FAULT).id_salt(("remove", i))).clicked() {
                                         remove = Some(i);
                                     }
+                                    ui.checkbox(&mut draft.backfill.enabled, "index bodies offline");
+                                    if draft.backfill.enabled {
+                                        let r = ui.add(egui::DragValue::new(&mut draft.backfill.days).range(0..=36500).speed(5.0).suffix(" days"));
+                                        ui.ctx().accesskit_node_builder(r.id, |node| node.set_label("keep days, 0 for all"));
+                                        let r = ui.add(egui::DragValue::new(&mut draft.backfill.megabytes).range(0..=1_000_000).speed(20.0).suffix(" MB"));
+                                        ui.ctx().accesskit_node_builder(r.id, |node| node.set_label("size cap, 0 for none"));
+                                    }
                                 });
                             });
                             ui.add_space(8.0);
@@ -1083,7 +1091,11 @@ impl Shell {
         }
         let setups: Vec<_> = configs.iter().filter_map(|c| accounts::setup_for(c, store).ok()).collect();
         let Ok(clone) = store.try_clone() else { return };
-        self.screen = Screen::Main(Box::new(Main { app: App::with_store(Box::new(RealStore::open(clone, setups))) }));
+        let real = RealStore::open(clone, setups);
+        for c in &configs {
+            real.set_backfill(&c.id, c.backfill);
+        }
+        self.screen = Screen::Main(Box::new(Main { app: App::with_store(Box::new(real)) }));
         self.apply_open_settings();
         self.attach();
     }

@@ -24,6 +24,8 @@ pub struct AccountConfig {
     pub imap: ServerSettings,
     pub smtp: ServerSettings,
     pub credential: Credential,
+    #[serde(default)]
+    pub backfill: crate::search::BackfillPolicy,
 }
 
 pub fn new_id() -> String {
@@ -274,7 +276,16 @@ mod tests {
             imap: ServerSettings::new(host, 993, Security::Tls),
             smtp: ServerSettings::new(host, 465, Security::Tls),
             credential: Credential::Password("x".into()),
+            backfill: Default::default(),
         }
+    }
+
+    #[test]
+    fn old_saved_accounts_load_with_backfill_off() {
+        let mut v = serde_json::to_value(cfg("x.test")).unwrap();
+        v.as_object_mut().unwrap().remove("backfill");
+        let back: AccountConfig = serde_json::from_value(v).unwrap();
+        assert!(!back.backfill.enabled);
     }
 
     #[test]

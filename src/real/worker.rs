@@ -209,6 +209,30 @@ pub(super) async fn serve_fetches(
     }
 }
 
+pub(super) struct SearchRequest {
+    pub text: String,
+    pub folder: String,
+    pub query: String,
+}
+
+pub(super) async fn serve_searches(
+    shared: Arc<Shared>,
+    index: usize,
+    mut backend: Box<dyn Backend>,
+    mut requests: UnboundedReceiver<SearchRequest>,
+) {
+    while let Some(req) = requests.recv().await {
+        if shared.stop.load(Ordering::Relaxed) {
+            return;
+        }
+        let found = match backend.search(&req.folder, &req.query).await {
+            Err(BackendError::Connection(_)) => backend.search(&req.folder, &req.query).await,
+            other => other,
+        };
+        shared.finish_remote(index, &req.text, &req.folder, found.unwrap_or_default());
+    }
+}
+
 pub(super) async fn run(
     shared: Arc<Shared>,
     index: usize,

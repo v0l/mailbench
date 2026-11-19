@@ -46,6 +46,7 @@ fn concept_message(id: u64, i: usize, m: &crate::data::Msg, suffix: &str) -> Mes
             attachments: m.attach,
             account: m.account,
             thread: m.count as u32,
+            remote: false,
         },
         folder: Folder::Inbox,
         from_address: format!("{}@example.test", m.from.to_lowercase().replace(' ', ".")),
@@ -93,6 +94,7 @@ fn draft(id: u64, subject: &str, when: &str) -> Message {
             attachments: false,
             account: 0,
             thread: 1,
+            remote: false,
         },
         folder: Folder::Drafts,
         from_address: "mara.ilves@kestrel-instruments.example".into(),
@@ -119,6 +121,7 @@ impl FakeStore {
                 unread: 0,
                 sync: sync_of(a.state),
                 detail: None,
+                indexed: None,
             })
             .collect()
     }

@@ -73,3 +73,19 @@ async fn sync_into_encrypted_store_leaves_no_plaintext_on_disk() {
     let sink = StoreSink::new(&reopened, "acct", true);
     assert_eq!(sink.messages("INBOX").unwrap().len(), 1);
 }
+
+#[test]
+fn a_stored_body_is_indexed_and_dropping_it_keeps_the_subject_searchable() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::create(&dir.path().join("mail.db"), None, Some(("pw", KdfParams::fast()))).unwrap();
+    let mut sink = StoreSink::new(&store, "acct", true);
+    sink.put_folders(&[Folder { name: "INBOX".into(), delimiter: None, role: Some(FolderRole::Inbox), selectable: true }]).unwrap();
+    let summary = MessageSummary { uid: 4, subject: Some("Quarterly budget".into()), ..Default::default() };
+    sink.put_summaries("INBOX", &[summary]).unwrap();
+    sink.put_body("INBOX", 4, b"From: a@b.test\r\nSubject: Quarterly budget\r\n\r\nthe xylophone invoice\r\n").unwrap();
+    assert_eq!(sink.search_hits("xylophone").unwrap(), vec![("INBOX".to_string(), 4)]);
+    assert_eq!(sink.search_hits("budget").unwrap().len(), 1);
+    sink.drop_body("INBOX", 4).unwrap();
+    assert!(sink.search_hits("xylophone").unwrap().is_empty());
+    assert_eq!(sink.search_hits("budget").unwrap().len(), 1);
+}

@@ -26,6 +26,27 @@ fn decode<T: DeserializeOwned>(raw: &[u8]) -> Result<T> {
     serde_json::from_slice(raw).map_err(|e| BackendError::Store(e.to_string()))
 }
 
+fn summary_text(m: &MessageSummary) -> String {
+    let mut text = m.subject.clone().unwrap_or_default();
+    for a in &m.from {
+        text.push(' ');
+        text.push_str(a.name.as_deref().unwrap_or_default());
+        text.push(' ');
+        text.push_str(&a.address);
+    }
+    text
+}
+
+fn plain_text(raw: &[u8]) -> String {
+    let Some(msg) = mail_parser::MessageParser::default().parse(raw) else { return String::new() };
+    let mut text = String::new();
+    for i in 0..msg.text_body().len() {
+        text.push(' ');
+        text.push_str(&msg.body_text(i).unwrap_or_default());
+    }
+    text
+}
+
 impl<'a> StoreSink<'a> {
     pub fn new(store: &'a Store, account: &str, keep_bodies: bool) -> Self {
         Self {
@@ -115,6 +136,63 @@ impl<'a> StoreSink<'a> {
             .collect())
     }
 
+    pub fn body_uids(&self, folder: &str) -> Result<Vec<u32>> {
+        let prefix = self.folder_prefix(folder)?;
+        Ok(self
+            .store
+            .list_prefix(BODY, &prefix)?
+            .iter()
+            .filter_map(|id| id.strip_prefix(&prefix).and_then(|u| u.parse().ok()))
+            .collect())
+    }
+
+    pub fn body_size(&self, folder: &str, uid: u32) -> Result<u64> {
+        Ok(self.store.size_of(BODY, &self.message_id(folder, uid)?)?)
+    }
+
+    pub fn drop_body(&self, folder: &str, uid: u32) -> Result<()> {
+        let id = self.message_id(folder, uid)?;
+        self.store.delete(BODY, &id)?;
+        if let Some(raw) = self.store.get(MESSAGE, &id)? {
+            self.index(&id, &summary_text(&decode(&raw)?))?;
+        }
+        Ok(())
+    }
+
+    pub fn search_hits(&self, query: &str) -> Result<Vec<(String, u32)>> {
+        let prefix = format!("{}\0", self.account);
+        let names: BTreeMap<u32, String> = match self.store.get(FOLDER_IDS, &self.account)? {
+            Some(raw) => decode::<BTreeMap<String, u32>>(&raw)?.into_iter().map(|(n, i)| (i, n)).collect(),
+            None => return Ok(Vec::new()),
+        };
+        let mut out = Vec::new();
+        for id in self.store.search(query)? {
+            let Some(rest) = id.strip_prefix(&prefix) else { continue };
+            let Some((folder, uid)) = rest.split_once('\0') else { continue };
+            let number = folder.strip_prefix('f').and_then(|n| n.parse::<u32>().ok());
+            if let (Some(name), Ok(uid)) = (number.and_then(|n| names.get(&n)), uid.parse::<u32>()) {
+                out.push((name.clone(), uid));
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn searchable_text(&self, folder: &str, uid: u32) -> Result<String> {
+        let mut text = match self.summary(folder, uid)? {
+            Some(m) => summary_text(&m),
+            None => String::new(),
+        };
+        if let Some(raw) = self.body(folder, uid)? {
+            text.push(' ');
+            text.push_str(&plain_text(&raw));
+        }
+        Ok(text.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" "))
+    }
+
+    pub fn body_text(&self, folder: &str, uid: u32) -> Result<Option<String>> {
+        Ok(self.body(folder, uid)?.map(|raw| plain_text(&raw)))
+    }
+
     fn index(&self, id: &str, text: &str) -> Result<()> {
         self.store.index_text(id, text)?;
         Ok(())
@@ -160,14 +238,7 @@ impl SyncSink for StoreSink<'_> {
             for m in messages {
                 let id = format!("{prefix}{:010}", m.uid);
                 self.store.put(MESSAGE, &id, &encode(m)?)?;
-                let mut text = m.subject.clone().unwrap_or_default();
-                for a in &m.from {
-                    text.push(' ');
-                    text.push_str(a.name.as_deref().unwrap_or_default());
-                    text.push(' ');
-                    text.push_str(&a.address);
-                }
-                self.index(&id, &text)?;
+                self.index(&id, &summary_text(m))?;
             }
             Ok(())
         })
@@ -222,14 +293,18 @@ impl SyncSink for StoreSink<'_> {
     fn put_body(&mut self, folder: &str, uid: u32, raw: &[u8]) -> Result<()> {
         let id = self.message_id(folder, uid)?;
         self.store.put(BODY, &id, raw)?;
+        let mut text = match self.store.get(MESSAGE, &id)? {
+            Some(m) => summary_text(&decode(&m)?),
+            None => String::new(),
+        };
+        text.push_str(&plain_text(raw));
         if let Some(msg) = mail_parser::MessageParser::default().parse(raw) {
-            let mut text = msg.subject().unwrap_or_default().to_string();
-            for i in 0..msg.text_body().len() {
+            for p in msg.attachments() {
                 text.push(' ');
-                text.push_str(&msg.body_text(i).unwrap_or_default());
+                text.push_str(p.attachment_name().unwrap_or_default());
             }
-            self.index(&id, &text)?;
         }
+        self.index(&id, &text)?;
         Ok(())
     }
 }

@@ -771,7 +771,12 @@ impl App {
                 SyncState::Failed => "sign in",
             };
             let col = if a.sync == SyncState::Failed { FAULT } else { LEGEND };
-            put(p, rect.left() + 22.0, 140.0, rect.top() + 28.0, status, legend_font(9.5), col);
+            let status = match a.indexed {
+                Some((done, total)) if a.sync != SyncState::Failed && done < total => format!("{status}, indexing {done} of {total}"),
+                Some(_) if a.sync == SyncState::Idle => format!("{status}, indexed"),
+                _ => status.to_string(),
+            };
+            put(p, rect.left() + 22.0, 150.0, rect.top() + 28.0, &status, legend_font(9.5), col);
             if a.unread > 0 {
                 put_right(p, rect.right() - 6.0, rect.top() + 13.0, &a.unread.to_string(), figure(11.0), READOUT);
             }
@@ -1150,6 +1155,7 @@ impl App {
             let page = self.store.list(&v.query, first, last.saturating_sub(first));
             let origin = ui.min_rect().min;
             let width = ui.available_width();
+            let marks = crate::search::Parsed::parse(&v.query.text).highlights();
             for (n, s) in page.items.iter().enumerate() {
                 let i = first + n;
                 let rect = egui::Rect::from_min_size(
@@ -1158,7 +1164,7 @@ impl App {
                 );
                 let resp = ui.interact(rect, ui.id().with(("row", i)), egui::Sense::click());
                 let name = accounts.get(s.account).map(|a| a.name.as_str());
-                paint_row(&ui.painter_at(rect), rect, s, i == selected, resp.hovered(), name);
+                paint_row(&ui.painter_at(rect), rect, s, i == selected, resp.hovered(), name, &marks);
                 ui.ctx().accesskit_node_builder(resp.id, |node| {
                     node.set_label(format!("{} {}", s.from, s.subject));
                 });
@@ -1395,7 +1401,7 @@ impl App {
     }
 }
 
-fn paint_row(p: &egui::Painter, rect: egui::Rect, m: &Summary, selected: bool, hovered: bool, account: Option<&str>) {
+fn paint_row(p: &egui::Painter, rect: egui::Rect, m: &Summary, selected: bool, hovered: bool, account: Option<&str>, marks: &[String]) {
     use egui::Pos2;
     if selected {
         selection(p, rect);
@@ -1411,7 +1417,7 @@ fn paint_row(p: &egui::Painter, rect: egui::Rect, m: &Summary, selected: bool, h
     let (name_font, name_col, subj_col) =
         if m.unread { (body_strong(13.0), VALUE, VALUE) } else { (body(13.0), LEGEND, LEGEND) };
     let mut x = rect.left() + 26.0;
-    put(p, x, 140.0, cy, &m.from, name_font, name_col);
+    marked(p, x, 140.0, cy, &m.from, name_font, name_col, marks);
     x += 150.0;
     let right = rect.right() - 10.0;
     put_right(p, right, cy, &m.when, figure(11.0), if m.new { TRACE } else { LEGEND });
@@ -1434,7 +1440,43 @@ fn paint_row(p: &egui::Painter, rect: egui::Rect, m: &Summary, selected: bool, h
         p.galley(Pos2::new(tail - w, cy - g.size().y / 2.0), g, LEGEND);
         tail -= w + 14.0;
     }
-    put(p, x, (tail - x).max(10.0), cy, &m.subject, body(13.0), subj_col);
+    if m.remote {
+        let g = p.layout_no_wrap("SERVER".into(), legend_font(9.5), TRACE);
+        let w = g.size().x;
+        p.galley(Pos2::new(tail - w, cy - g.size().y / 2.0), g, TRACE);
+        tail -= w + 14.0;
+    }
+    marked(p, x, (tail - x).max(10.0), cy, &m.subject, body(13.0), subj_col, marks);
+}
+
+fn marked(p: &egui::Painter, x: f32, w: f32, cy: f32, text: &str, font: egui::FontId, col: egui::Color32, marks: &[String]) {
+    let spans = crate::search::spans(text, marks);
+    if spans.is_empty() {
+        put(p, x, w, cy, text, font, col);
+        return;
+    }
+    let clip = egui::Rect::from_min_max(egui::pos2(x, cy - 20.0), egui::pos2(x + w, cy + 20.0)).intersect(p.clip_rect());
+    let p = p.with_clip_rect(clip);
+    let mut at = x;
+    let mut last = 0;
+    let mut piece = |p: &egui::Painter, s: &str, hit: bool| {
+        if s.is_empty() {
+            return;
+        }
+        let g = p.layout_no_wrap(s.to_string(), font.clone(), if hit { VALUE } else { col });
+        let size = g.size();
+        if hit {
+            p.rect_filled(egui::Rect::from_min_size(egui::pos2(at, cy - size.y / 2.0), size), 2.0, READOUT.gamma_multiply(0.35));
+        }
+        p.galley(egui::pos2(at, cy - size.y / 2.0), g, col);
+        at += size.x;
+    };
+    for (s, e) in spans {
+        piece(&p, &text[last..s], false);
+        piece(&p, &text[s..e], true);
+        last = e;
+    }
+    piece(&p, &text[last..], false);
 }
 
 impl eframe::App for App {

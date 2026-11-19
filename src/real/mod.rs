@@ -1,7 +1,9 @@
+mod backfill;
 mod display;
 mod headers;
 mod model;
 mod threads;
+mod search;
 mod worker;
 
 use crate::backend::Folder as Remote;
@@ -61,6 +63,15 @@ struct Entry {
     count: u32,
     thread_unread: bool,
     thread_flagged: bool,
+    to_key: String,
+}
+
+fn people_key(to: &[Address], cc: &[Address]) -> String {
+    to.iter()
+        .chain(cc)
+        .map(|a| format!("{} {}", a.name.as_deref().unwrap_or_default(), a.address))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn search_key(from: &str, address: &str, subject: &str) -> String {
@@ -109,6 +120,7 @@ struct Cache {
     folder_counts: HashMap<ms::Folder, Counts>,
     inbox_unread: Vec<usize>,
     shape: Vec<TreeFolder>,
+    validity: HashMap<(usize, String), u32>,
 }
 
 impl Cache {
@@ -211,6 +223,13 @@ pub(crate) struct Shared {
     parse_pending: Mutex<std::collections::HashSet<u64>>,
     parser: Mutex<Option<std::sync::mpsc::Sender<Entry>>>,
     fetchers: Mutex<Vec<tokio::sync::mpsc::UnboundedSender<worker::FetchRequest>>>,
+    searchers: Mutex<Vec<tokio::sync::mpsc::UnboundedSender<worker::SearchRequest>>>,
+    search: Mutex<search::SearchState>,
+    search_tx: Mutex<Option<std::sync::mpsc::Sender<search::SearchJob>>>,
+    index_epoch: AtomicU64,
+    policies: Mutex<Vec<crate::search::BackfillPolicy>>,
+    progress: Mutex<Vec<Option<(usize, usize)>>>,
+    backfill_wake: Mutex<Vec<Arc<tokio::sync::Notify>>>,
     wake: Condvar,
     wake_lock: Mutex<()>,
     seq: AtomicU64,
@@ -320,6 +339,7 @@ impl Shared {
         }
         lock(&self.parse_pending).remove(&id);
         if let Some(a) = has_attachments {
+            self.index_epoch.fetch_add(1, Ordering::SeqCst);
             lock(&self.known_attachments).insert(id, a);
             self.patch(id, |e| e.attachments = a);
             let entry = {
@@ -386,6 +406,17 @@ impl Shared {
         if let Some(ctx) = lock(&self.ctx).as_ref() {
             ctx.request_repaint();
         }
+    }
+
+    fn entry_id(&self, index: usize, folder: &str, uid: u32) -> Option<u64> {
+        self.with_cache(|c| {
+            c.entries.iter().find(|e| e.account == index && e.uid == uid && e.server_folder == folder).map(|e| e.id)
+        })
+    }
+
+    pub fn note_attachments(&self, id: u64, has: bool) {
+        lock(&self.known_attachments).insert(id, has);
+        self.patch(id, |e| e.attachments = has);
     }
 
     fn kick(&self, account: usize) {
@@ -535,6 +566,7 @@ impl Shared {
                     let store = self.lock_store();
                     StoreSink::new(&store, &account.id, true).sync_token(stored_name).ok().flatten().map(|t| t.uid_validity).unwrap_or(0)
                 };
+                cache.validity.insert((index, folder.name.clone()), validity);
                 let mut after: Option<String> = None;
                 loop {
                 let page = {
@@ -569,6 +601,7 @@ impl Shared {
                         validity,
                         local: None,
                         search_key: search_key(&from, &from_address, &subject),
+                        to_key: people_key(&m.to, &m.cc),
                         from,
                         from_address,
                         to: display::people(&m.to),
@@ -618,6 +651,7 @@ impl Shared {
                 cc: if msg.cc.is_empty() { Vec::new() } else { vec![msg.cc.clone()] },
                 subject: msg.subject.clone(),
                 search_key: search_key("me", &self.accounts[index].address, &msg.subject),
+                to_key: format!("{} {}", msg.to, msg.cc),
                 date: msg.date,
                 unread: false,
                 flagged: false,
@@ -700,21 +734,10 @@ pub struct RealStore {
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
-fn matches(e: &Entry, q: &Query, needle: &str) -> bool {
-    if !e.head {
-        return false;
-    }
-    match q.filter {
-        Filter::All => {}
-        Filter::Unread if !e.thread_unread => return false,
-        Filter::Flagged if !e.thread_flagged => return false,
-        _ => {}
-    }
-    needle.is_empty() || e.search_key.contains(needle)
-}
 
-fn summary(e: &Entry, now: i64) -> Summary {
+fn summary_from(e: &Entry, now: i64, remote: bool) -> Summary {
     Summary {
+        remote,
         id: MessageId(e.id),
         from: e.from.clone(),
         subject: e.subject.clone(),
@@ -728,8 +751,12 @@ fn summary(e: &Entry, now: i64) -> Summary {
     }
 }
 
-fn row(e: &Entry, now: i64) -> Summary {
-    Summary { unread: e.thread_unread, new: e.thread_unread, flagged: e.thread_flagged, ..summary(e, now) }
+fn summary(e: &Entry, now: i64) -> Summary {
+    summary_from(e, now, false)
+}
+
+fn row(e: &Entry, now: i64, remote: bool) -> Summary {
+    Summary { unread: e.thread_unread, new: e.thread_unread, flagged: e.thread_flagged, ..summary_from(e, now, remote) }
 }
 
 impl RealStore {
@@ -757,6 +784,13 @@ impl RealStore {
             wake_lock: Mutex::new(()),
             seq: AtomicU64::new(0),
             kicks: Mutex::new(Vec::new()),
+            searchers: Mutex::new(Vec::new()),
+            search: Mutex::new(search::SearchState::default()),
+            search_tx: Mutex::new(None),
+            index_epoch: AtomicU64::new(0),
+            policies: Mutex::new(vec![Default::default(); accounts.len()]),
+            progress: Mutex::new(vec![None; accounts.len()]),
+            backfill_wake: Mutex::new(Vec::new()),
         });
         let mut threads = Vec::new();
         let mut tasks = Vec::new();
@@ -773,17 +807,39 @@ impl RealStore {
                 parsing.parse_one(&e);
             }
         }));
+        let (job_tx, job_rx) = channel();
+        *lock(&shared.search_tx) = Some(job_tx);
+        let searching = shared.clone();
+        threads.push(std::thread::spawn(move || search::serve(searching, job_rx)));
         for (index, setup) in accounts.into_iter().enumerate() {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             lock(&shared.kicks).push(tx);
             let (fetch_tx, fetch_rx) = tokio::sync::mpsc::unbounded_channel();
             lock(&shared.fetchers).push(fetch_tx);
+            let wake = Arc::new(tokio::sync::Notify::new());
+            lock(&shared.backfill_wake).push(wake.clone());
             if let Some(reader) = setup.backend.fork() {
                 tasks.push(crate::runtime::spawn(worker::serve_fetches(shared.clone(), index, reader, fetch_rx)));
+            }
+            let (remote_tx, remote_rx) = tokio::sync::mpsc::unbounded_channel();
+            lock(&shared.searchers).push(remote_tx);
+            if let Some(seeker) = setup.backend.fork() {
+                tasks.push(crate::runtime::spawn(worker::serve_searches(shared.clone(), index, seeker, remote_rx)));
+            }
+            if let Some(filler) = setup.backend.fork() {
+                tasks.push(crate::runtime::spawn(backfill::run(shared.clone(), index, filler, wake)));
             }
             tasks.push(crate::runtime::spawn(worker::run(shared.clone(), index, setup.backend, rx)));
         }
         RealStore { shared, threads, tasks }
+    }
+
+    pub fn set_backfill(&self, account: &str, policy: crate::search::BackfillPolicy) {
+        let Some(i) = self.shared.index_of(account) else { return };
+        lock(&self.shared.policies)[i] = policy;
+        if let Some(w) = lock(&self.shared.backfill_wake).get(i) {
+            w.notify_one();
+        }
     }
 
     pub fn attach(&self, ctx: &egui::Context) {
@@ -812,7 +868,9 @@ impl Drop for RealStore {
         self.shared.wake.notify_all();
         lock(&self.shared.kicks).clear();
         lock(&self.shared.fetchers).clear();
+        lock(&self.shared.searchers).clear();
         *lock(&self.shared.parser) = None;
+        *lock(&self.shared.search_tx) = None;
         for t in self.tasks.drain(..) {
             t.abort();
         }
@@ -836,6 +894,7 @@ impl MailStore for RealStore {
                     unread: c.inbox_unread.get(i).copied().unwrap_or(0),
                     sync: states[i].0,
                     detail: states[i].1.clone(),
+                    indexed: lock(&self.shared.progress)[i],
                 })
                 .collect()
         })
@@ -862,14 +921,14 @@ impl MailStore for RealStore {
     }
 
     fn counts(&self, query: &Query) -> Counts {
-        let needle = query.text.to_lowercase();
+        let view = self.shared.search_view(query);
         self.shared.with_cache(|c| {
-            if needle.is_empty() {
+            if view.is_plain() {
                 return c.folder_counts.get(&query.folder).copied().unwrap_or_default();
             }
             let base = Query { filter: Filter::All, ..query.clone() };
             let mut out = Counts::default();
-            for e in c.by_folder.get(&query.folder).into_iter().flatten().map(|i| &c.entries[*i]).filter(|e| matches(e, &base, &needle)) {
+            for e in c.by_folder.get(&query.folder).into_iter().flatten().map(|i| &c.entries[*i]).filter(|e| search::matches_row(c, e, &base, &view)) {
                 out.all += 1;
                 out.unread += e.thread_unread as usize;
                 out.flagged += e.thread_flagged as usize;
@@ -880,20 +939,20 @@ impl MailStore for RealStore {
 
     fn list(&self, query: &Query, offset: usize, limit: usize) -> Page {
         let now = now();
-        let needle = query.text.to_lowercase();
+        let view = self.shared.search_view(query);
         self.shared.with_cache(|c| {
             let Some(index) = c.by_folder.get(&query.folder) else {
                 return Page { offset, total: 0, items: Vec::new() };
             };
-            if needle.is_empty() && query.filter == Filter::All {
-                let items = index.iter().skip(offset).take(limit).map(|i| row(&c.entries[*i], now)).collect();
+            if view.is_plain() && query.filter == Filter::All {
+                let items = index.iter().skip(offset).take(limit).map(|i| row(&c.entries[*i], now, false)).collect();
                 return Page { offset, total: index.len(), items };
             }
             let mut total = 0;
             let mut items = Vec::new();
-            for e in index.iter().map(|i| &c.entries[*i]).filter(|e| matches(e, query, &needle)) {
+            for e in index.iter().map(|i| &c.entries[*i]).filter(|e| search::matches_row(c, e, query, &view)) {
                 if total >= offset && items.len() < limit {
-                    items.push(row(e, now));
+                    items.push(row(e, now, view.is_remote(e.id)));
                 }
                 total += 1;
             }
@@ -912,6 +971,10 @@ impl MailStore for RealStore {
                 .map(|m| ThreadItem { summary: summary(&c.entries[*m], now), folder: c.entries[*m].folder.clone() })
                 .collect()
         })
+    }
+
+    fn searching(&self, query: &Query) -> bool {
+        self.shared.searching(query)
     }
 
     fn get(&self, id: MessageId) -> Result<Message, StoreError> {
@@ -1122,6 +1185,7 @@ impl MailStore for RealStore {
             to: vec![msg.to.clone()],
             cc: if msg.cc.is_empty() { Vec::new() } else { vec![msg.cc.clone()] },
             search_key: search_key("me", &self.shared.accounts[index].address, &msg.subject),
+            to_key: format!("{} {}", msg.to, msg.cc),
             subject: msg.subject.clone(),
             date: msg.date,
             unread: false,

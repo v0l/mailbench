@@ -52,6 +52,7 @@ pub struct AccountInfo {
     pub unread: usize,
     pub sync: SyncState,
     pub detail: Option<String>,
+    pub indexed: Option<(usize, usize)>,
 }
 
 #[derive(Clone, Debug)]
@@ -113,6 +114,7 @@ pub struct Summary {
     pub attachments: bool,
     pub account: usize,
     pub thread: u32,
+    pub remote: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -240,6 +242,9 @@ pub trait MailStore {
     fn labels(&self) -> Vec<LabelInfo>;
     fn counts(&self, query: &Query) -> Counts;
     fn list(&self, query: &Query, offset: usize, limit: usize) -> Page;
+    fn searching(&self, _query: &Query) -> bool {
+        false
+    }
     fn get(&self, id: MessageId) -> Result<Message, StoreError>;
     fn thread(&self, id: MessageId) -> Vec<ThreadItem> {
         self.get(id).map(|m| vec![ThreadItem { summary: m.summary, folder: m.folder }]).unwrap_or_default()
