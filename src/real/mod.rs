@@ -290,6 +290,7 @@ pub(crate) struct Shared {
     batchers: Mutex<Vec<Batcher>>,
     notifier: Mutex<Option<Arc<dyn Notifier>>>,
     focus: Mutex<Option<u64>>,
+    built: AtomicU64,
 }
 
 fn now() -> i64 {
@@ -1186,6 +1187,7 @@ fn builder(shared: Arc<Shared>) {
         }
         if !first {
             seen = generation;
+            shared.built.store(generation, Ordering::SeqCst);
         }
         first = false;
         if let Some(ctx) = lock(&shared.ctx).as_ref() {
@@ -1286,6 +1288,7 @@ impl RealStore {
             batchers: Mutex::new((0..accounts.len()).map(|_| Batcher::default()).collect()),
             notifier: Mutex::new(None),
             focus: Mutex::new(None),
+            built: AtomicU64::new(0),
         });
         {
             let store = shared.lock_store();
@@ -1382,6 +1385,22 @@ impl RealStore {
         for i in 0..self.shared.accounts.len() {
             self.shared.kick(i);
         }
+    }
+
+    pub fn settled(&self) -> bool {
+        let idle = lock(&self.shared.states).iter().all(|(s, _)| *s != SyncState::Syncing);
+        idle && self.shared.built.load(Ordering::SeqCst) >= self.shared.generation.load(Ordering::SeqCst)
+    }
+
+    pub fn raw(&self, id: MessageId) -> Result<Option<Vec<u8>>, StoreError> {
+        let e = self.entry(id)?;
+        if e.local.is_some() {
+            return Ok(None);
+        }
+        let store = self.shared.lock_store();
+        StoreSink::new(&store, &self.shared.accounts[e.account].id, true)
+            .body(&e.server_folder, e.uid)
+            .map_err(backend_err)
     }
 
     fn entry(&self, id: MessageId) -> Result<Entry, StoreError> {

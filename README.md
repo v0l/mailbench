@@ -22,6 +22,18 @@ Sign in with Google or Microsoft needs an OAuth client id at build or run time (
 
 Data lives in one encrypted file, `~/.local/share/mailbench/mail.db` on Linux (the platform data dir elsewhere, or `$MAILBENCH_DATA/mail.db`). To reset everything, quit the app and delete that file. The keychain entry (service `mailbench`) is then unused and can be removed with your keychain tool.
 
+## Command line
+
+```
+mailbench list --unread --json
+mailbench read <id> --text
+mailbench search "from:acme has:attachment" --json
+mailbench send --to a@b.c --subject Hi --body-file note.txt
+mailbench archive|flag|mark-read|unread <id>...
+```
+
+The CLI opens the same encrypted store as the app (WAL, so both can run at once). It unlocks with the keychain, then `MAILBENCH_PASSWORD`, then a prompt. The agent skill is in `skills/mailbench/SKILL.md`.
+
 ## Keys
 
 | key | does |
