@@ -142,6 +142,41 @@ async fn push(shared: &Shared, backend: &mut dyn Backend, op: &Op, account: &str
             shared.forget_snooze(account, key);
             Ok(())
         }
+        Op::FlagsSet { folder, uids, uid_validity, seen, flagged, .. } => {
+            if shared.validity(account, folder) != Some(*uid_validity) {
+                return Ok(());
+            }
+            let mut add = Flags::default();
+            let mut remove = Flags::default();
+            if let Some(v) = seen {
+                if *v { add.seen = true } else { remove.seen = true }
+            }
+            if let Some(v) = flagged {
+                if *v { add.flagged = true } else { remove.flagged = true }
+            }
+            if add != Flags::default() {
+                backend.set_flags(folder, uids, &FlagUpdate::Add(add)).await?;
+            }
+            if remove != Flags::default() {
+                backend.set_flags(folder, uids, &FlagUpdate::Remove(remove)).await?;
+            }
+            for uid in uids {
+                shared.apply_flags(account, folder, *uid, *seen, *flagged);
+            }
+            Ok(())
+        }
+        Op::MoveSet { folder, uids, uid_validity, to, .. } => {
+            if shared.validity(account, folder) != Some(*uid_validity) {
+                return Ok(());
+            }
+            match backend.move_messages(folder, uids, to).await {
+                Err(BackendError::Protocol(_)) => {
+                    backend.create_folder(to).await?;
+                    backend.move_messages(folder, uids, to).await
+                }
+                other => other,
+            }
+        }
         Op::CreateFolder { name, .. } => backend.create_folder(name).await,
         Op::RenameFolder { from, to, .. } => backend.rename_folder(from, to).await,
         Op::DeleteFolder { name, .. } => backend.delete_folder(name).await,

@@ -570,3 +570,63 @@ fn tab_completes_an_address_from_suggestions() {
     let all = format!("{} {}", d.to, d.to_input);
     assert!(all.contains("rivera") && all.contains('@'), "{all}");
 }
+
+fn press(h: &mut Harness<'static, (bool, App)>, key: egui::Key, modifiers: egui::Modifiers) {
+    h.key_press_modifiers(modifiers, key);
+    h.run();
+}
+
+#[test]
+fn shift_j_extends_the_marked_range_and_star_a_n_select_all_and_none() {
+    let mut h = harness(FakeStore::concept());
+    press(&mut h, egui::Key::J, egui::Modifiers::SHIFT);
+    press(&mut h, egui::Key::J, egui::Modifiers::SHIFT);
+    assert_eq!(h.state().1.marked.iter().copied().collect::<Vec<_>>(), vec![0, 1, 2]);
+    press(&mut h, egui::Key::K, egui::Modifiers::SHIFT);
+    assert_eq!(h.state().1.marked.iter().copied().collect::<Vec<_>>(), vec![0, 1]);
+    h.key_press(egui::Key::Escape);
+    h.state_mut().1.marked.clear();
+    h.event(egui::Event::Text("*".into()));
+    h.run();
+    h.key_press(egui::Key::A);
+    h.run();
+    assert_eq!(h.state().1.marked.len(), 30);
+    h.event(egui::Event::Text("*".into()));
+    h.run();
+    h.key_press(egui::Key::N);
+    h.run();
+    assert!(h.state().1.marked.is_empty());
+}
+
+#[test]
+fn archiving_three_marked_rows_and_undoing_brings_them_back() {
+    let mut h = harness(FakeStore::concept());
+    let ids = inbox_ids(&h.state().1);
+    h.state_mut().1.marked = [0usize, 2, 4].into_iter().collect();
+    h.key_press(egui::Key::E);
+    h.run();
+    let app = &h.state().1;
+    assert_eq!(app.store.counts(&Query::new(Folder::Inbox)).all, 27);
+    assert_eq!(app.store.counts(&Query::new(Folder::Archive)).all, 3);
+    assert!(app.marked.is_empty());
+    h.key_press(egui::Key::Z);
+    h.run();
+    let app = &h.state().1;
+    assert_eq!(app.store.counts(&Query::new(Folder::Inbox)).all, 30);
+    assert_eq!(app.store.counts(&Query::new(Folder::Archive)).all, 0);
+    let _ = ids;
+}
+
+#[test]
+fn flagging_marked_rows_is_undone_by_z() {
+    let mut h = harness(FakeStore::concept());
+    let before = h.state().1.store.counts(&Query::new(Folder::Inbox)).flagged;
+    h.state_mut().1.marked = [1usize, 3, 5].into_iter().collect();
+    h.key_press(egui::Key::X);
+    h.run();
+    let after = h.state().1.store.counts(&Query::new(Folder::Inbox)).flagged;
+    assert_ne!(before, after);
+    h.key_press(egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().1.store.counts(&Query::new(Folder::Inbox)).flagged, before);
+}

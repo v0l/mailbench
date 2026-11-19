@@ -390,6 +390,64 @@ impl Shared {
         }
     }
 
+    fn patch_many(&self, ids: &[u64], f: impl Fn(&mut Entry)) {
+        let mut guard = lock(&self.cache);
+        let cache = Arc::make_mut(&mut guard);
+        let mut threads = std::collections::HashSet::new();
+        for id in ids {
+            if let Some(i) = cache.by_id.get(id).copied() {
+                f(&mut cache.entries[i]);
+                threads.insert(cache.entries[i].thread);
+            }
+        }
+        for t in threads {
+            cache.reindex(t);
+        }
+        cache.index_folders();
+    }
+
+    fn cancel_pending(&self, account: &str, folder: &str, wanted: u32, moves: bool) -> bool {
+        let store = self.lock_store();
+        let mut cancelled = false;
+        for (key, op) in Self::outbox_in(&store) {
+            if op.account() != account {
+                continue;
+            }
+            match op {
+                Op::Move { folder: f, uid, .. } if moves && f == folder && uid == wanted => {
+                    let _ = store.delete(OUTBOX, &key);
+                    cancelled = true;
+                }
+                Op::Flags { folder: f, uid, .. } if !moves && f == folder && uid == wanted => {
+                    let _ = store.delete(OUTBOX, &key);
+                    cancelled = true;
+                }
+                Op::MoveSet { folder: f, mut uids, uid_validity, to, account } if moves && f == folder && uids.contains(&wanted) => {
+                    uids.retain(|u| *u != wanted);
+                    cancelled = true;
+                    let _ = store.delete(OUTBOX, &key);
+                    if !uids.is_empty() {
+                        if let Ok(raw) = serde_json::to_vec(&Op::MoveSet { account, folder: f, uids, uid_validity, to }) {
+                            let _ = store.put(OUTBOX, &key, &raw);
+                        }
+                    }
+                }
+                Op::FlagsSet { folder: f, mut uids, uid_validity, seen, flagged, account } if !moves && f == folder && uids.contains(&wanted) => {
+                    uids.retain(|u| *u != wanted);
+                    cancelled = true;
+                    let _ = store.delete(OUTBOX, &key);
+                    if !uids.is_empty() {
+                        if let Ok(raw) = serde_json::to_vec(&Op::FlagsSet { account, folder: f, uids, uid_validity, seen, flagged }) {
+                            let _ = store.put(OUTBOX, &key, &raw);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        cancelled
+    }
+
     fn insert(&self, entry: Entry) {
         let mut guard = lock(&self.cache);
         let cache = Arc::make_mut(&mut guard);
@@ -928,6 +986,18 @@ impl Shared {
             }
             for (_, op) in &ops {
                 match op {
+                    Op::FlagsSet { account: a, folder, uids, seen, flagged, .. } if *a == account.id => {
+                        for uid in uids {
+                            let e = flag_ops.entry((folder.clone(), *uid)).or_default();
+                            e.0 = seen.or(e.0);
+                            e.1 = flagged.or(e.1);
+                        }
+                    }
+                    Op::MoveSet { account: a, folder, uids, to, .. } if *a == account.id => {
+                        for uid in uids {
+                            pending.insert((folder.clone(), *uid), to.clone());
+                        }
+                    }
                     Op::Move { account: a, folder, uid, to, .. } if *a == account.id => {
                         pending.insert((folder.clone(), *uid), to.clone());
                     }
@@ -1627,6 +1697,172 @@ impl MailStore for RealStore {
     fn create_folder(&mut self, account: usize, name: &str) -> Result<(), StoreError> {
         let id = self.shared.accounts.get(account).ok_or(StoreError::NotFound)?.id.clone();
         self.shared.queue_folder_op(account, Op::CreateFolder { account: id, name: name.to_string() })
+    }
+
+    fn bulk_flags(&mut self, ids: &[MessageId], change: FlagChange) -> Result<(), StoreError> {
+        let mut groups: HashMap<(usize, String), (u32, Vec<u32>)> = HashMap::new();
+        let mut touched = Vec::new();
+        for id in ids {
+            let Ok(e) = self.entry(*id) else { continue };
+            if e.local.is_some() {
+                continue;
+            }
+            let differs = change.unread.is_some_and(|u| u != e.unread) || change.flagged.is_some_and(|f| f != e.flagged);
+            if !differs {
+                continue;
+            }
+            let account = self.shared.accounts[e.account].id.clone();
+            let validity = self.shared.validity(&account, &e.server_folder).unwrap_or(e.validity);
+            groups.entry((e.account, e.server_folder.clone())).or_insert((validity, Vec::new())).1.push(e.uid);
+            touched.push(e.id);
+        }
+        if touched.is_empty() {
+            return Ok(());
+        }
+        let seen = change.unread.map(|u| !u);
+        {
+            let store = self.shared.lock_store();
+            for ((account, folder), (uid_validity, uids)) in groups.iter() {
+                self.shared.enqueue(
+                    &store,
+                    &Op::FlagsSet {
+                        account: self.shared.accounts[*account].id.clone(),
+                        folder: folder.clone(),
+                        uids: uids.clone(),
+                        uid_validity: *uid_validity,
+                        seen,
+                        flagged: change.flagged,
+                    },
+                )?;
+            }
+        }
+        self.shared.user_gen.fetch_add(1, Ordering::SeqCst);
+        self.shared.patch_many(&touched, |x| {
+            if let Some(u) = change.unread {
+                x.unread = u;
+            }
+            if let Some(f) = change.flagged {
+                x.flagged = f;
+            }
+        });
+        self.shared.refresh();
+        for (account, _) in groups.keys() {
+            self.shared.kick(*account);
+        }
+        Ok(())
+    }
+
+    fn bulk_move(&mut self, ids: &[MessageId], folder: ms::Folder) -> Result<(), StoreError> {
+        let mut groups: HashMap<(usize, String), (u32, Vec<u32>)> = HashMap::new();
+        let mut touched = Vec::new();
+        for id in ids {
+            let Ok(e) = self.entry(*id) else { continue };
+            if e.folder == folder {
+                continue;
+            }
+            if matches!(&folder, ms::Folder::Other(a, _) if *a != e.account) {
+                return Err(StoreError::Backend("a message cannot move to another account".into()));
+            }
+            if e.local.is_some() {
+                self.move_to(*id, folder.clone())?;
+                continue;
+            }
+            let account = self.shared.accounts[e.account].id.clone();
+            let validity = self.shared.validity(&account, &e.server_folder).unwrap_or(e.validity);
+            groups.entry((e.account, e.server_folder.clone())).or_insert((validity, Vec::new())).1.push(e.uid);
+            touched.push(e.id);
+        }
+        if touched.is_empty() {
+            return Ok(());
+        }
+        let mut ops = Vec::new();
+        for ((account, server), (uid_validity, uids)) in groups.iter() {
+            let account_id = self.shared.accounts[*account].id.clone();
+            let folders = self.shared.folders_of(&account_id);
+            let to = match &folder {
+                ms::Folder::Other(_, name) => name.clone(),
+                _ => server_folder(&folders, &folder).unwrap_or_else(|| default_name(&folder).to_string()),
+            };
+            ops.push(Op::MoveSet { account: account_id, folder: server.clone(), uids: uids.clone(), uid_validity: *uid_validity, to });
+        }
+        {
+            let store = self.shared.lock_store();
+            for op in &ops {
+                self.shared.enqueue(&store, op)?;
+            }
+        }
+        self.shared.user_gen.fetch_add(1, Ordering::SeqCst);
+        self.shared.patch_many(&touched, |x| x.folder = folder.clone());
+        self.shared.refresh();
+        for (account, _) in groups.keys() {
+            self.shared.kick(*account);
+        }
+        Ok(())
+    }
+
+    fn mark_all_read(&mut self, folder: &ms::Folder) -> Result<Vec<Restore>, StoreError> {
+        let ids: Vec<MessageId> = self.shared.with_cache(|c| {
+            c.entries.iter().filter(|e| e.folder == *folder && e.unread && e.local.is_none()).map(|e| MessageId(e.id)).collect()
+        });
+        let before = self.snapshot(&ids);
+        self.bulk_flags(&ids, FlagChange { unread: Some(false), flagged: None })?;
+        Ok(before)
+    }
+
+    fn restore(&mut self, items: &[Restore]) -> Result<(), StoreError> {
+        let mut reverse: Vec<MessageId> = Vec::new();
+        let mut back_to: Option<ms::Folder> = None;
+        let mut flag_groups: HashMap<(bool, bool), Vec<MessageId>> = HashMap::new();
+        for r in items {
+            let found = self.entry(r.id).ok().filter(|e| r.moved_to.as_ref().is_none_or(|t| e.folder == *t)).or_else(|| {
+                let wanted = r.message_id.as_ref()?.to_lowercase();
+                let target = r.moved_to.clone().unwrap_or_else(|| r.folder.clone());
+                self.shared.with_cache(|c| {
+                    c.entries
+                        .iter()
+                        .find(|e| e.account == r.account && e.folder == target && e.message_id.as_ref().is_some_and(|m| m.to_lowercase() == wanted))
+                        .cloned()
+                })
+            });
+            let Some(e) = found else { continue };
+            let account = self.shared.accounts[e.account].id.clone();
+            if r.moved_to.is_some() {
+                if e.local.is_none() && self.shared.cancel_pending(&account, &e.server_folder, e.uid, true) {
+                    self.shared.patch(e.id, |x| x.folder = r.folder.clone());
+                } else {
+                    reverse.push(MessageId(e.id));
+                    back_to = Some(r.folder.clone());
+                }
+                continue;
+            }
+            if e.local.is_some() {
+                continue;
+            }
+            if e.unread == r.unread && e.flagged == r.flagged {
+                continue;
+            }
+            if self.shared.cancel_pending(&account, &e.server_folder, e.uid, false) {
+                let stored = self.shared.stored_flags(&account, &e.server_folder, e.uid).unwrap_or_default();
+                self.shared.patch(e.id, |x| {
+                    x.unread = !stored.seen;
+                    x.flagged = stored.flagged;
+                });
+            }
+            flag_groups.entry((r.unread, r.flagged)).or_default().push(MessageId(e.id));
+        }
+        self.shared.user_gen.fetch_add(1, Ordering::SeqCst);
+        self.shared.refresh();
+        for ((unread, flagged), ids) in flag_groups {
+            self.bulk_flags(&ids, FlagChange { unread: Some(unread), flagged: Some(flagged) })?;
+        }
+        if let Some(folder) = back_to {
+            self.bulk_move(&reverse, folder)?;
+        }
+        Ok(())
+    }
+
+    fn pending_ops(&self) -> usize {
+        self.pending()
     }
 
     fn rename_folder(&mut self, folder: &ms::Folder, name: &str) -> Result<(), StoreError> {

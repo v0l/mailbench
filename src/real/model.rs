@@ -69,6 +69,8 @@ pub enum Op {
     Wake { account: String, folder: String, uid: u32, uid_validity: u32, to: String, key: String },
     Draft { account: String, local: String },
     DropDraft { account: String, message_id: String },
+    MoveSet { account: String, folder: String, uids: Vec<u32>, uid_validity: u32, to: String },
+    FlagsSet { account: String, folder: String, uids: Vec<u32>, uid_validity: u32, seen: Option<bool>, flagged: Option<bool> },
 }
 
 impl Op {
@@ -82,7 +84,9 @@ impl Op {
             | Op::DeleteFolder { account, .. }
             | Op::Wake { account, .. }
             | Op::Draft { account, .. }
-            | Op::DropDraft { account, .. } => account,
+            | Op::DropDraft { account, .. }
+            | Op::MoveSet { account, .. }
+            | Op::FlagsSet { account, .. } => account,
         }
     }
 }

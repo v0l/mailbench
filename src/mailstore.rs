@@ -278,6 +278,17 @@ pub fn split_recipients(list: &str) -> Vec<String> {
     out.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
 }
 
+#[derive(Clone, Debug)]
+pub struct Restore {
+    pub id: MessageId,
+    pub message_id: Option<String>,
+    pub account: usize,
+    pub folder: Folder,
+    pub moved_to: Option<Folder>,
+    pub unread: bool,
+    pub flagged: bool,
+}
+
 pub use crate::backend::Attachment as OutAttachment;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -322,6 +333,51 @@ pub trait MailStore {
     }
     fn set_flags(&mut self, id: MessageId, change: FlagChange) -> Result<(), StoreError>;
     fn move_to(&mut self, id: MessageId, folder: Folder) -> Result<(), StoreError>;
+    fn bulk_flags(&mut self, ids: &[MessageId], change: FlagChange) -> Result<(), StoreError> {
+        for id in ids {
+            self.set_flags(*id, change)?;
+        }
+        Ok(())
+    }
+    fn bulk_move(&mut self, ids: &[MessageId], folder: Folder) -> Result<(), StoreError> {
+        for id in ids {
+            self.move_to(*id, folder.clone())?;
+        }
+        Ok(())
+    }
+    fn snapshot(&self, ids: &[MessageId]) -> Vec<Restore> {
+        ids.iter()
+            .filter_map(|id| self.get(*id).ok())
+            .map(|m| Restore {
+                id: m.summary.id,
+                message_id: m.message_id.clone(),
+                account: m.summary.account,
+                folder: m.folder.clone(),
+                moved_to: None,
+                unread: m.summary.unread,
+                flagged: m.summary.flagged,
+            })
+            .collect()
+    }
+    fn mark_all_read(&mut self, folder: &Folder) -> Result<Vec<Restore>, StoreError> {
+        let query = Query { filter: Filter::Unread, ..Query::new(folder.clone()) };
+        let ids: Vec<MessageId> = self.list(&query, 0, usize::MAX).items.iter().map(|s| s.id).collect();
+        let before = self.snapshot(&ids);
+        self.bulk_flags(&ids, FlagChange { unread: Some(false), flagged: None })?;
+        Ok(before)
+    }
+    fn restore(&mut self, items: &[Restore]) -> Result<(), StoreError> {
+        for r in items {
+            if r.moved_to.is_some() {
+                self.move_to(r.id, r.folder.clone())?;
+            }
+            self.set_flags(r.id, FlagChange { unread: Some(r.unread), flagged: Some(r.flagged) })?;
+        }
+        Ok(())
+    }
+    fn pending_ops(&self) -> usize {
+        0
+    }
     fn append(&mut self, folder: Folder, message: Outgoing) -> Result<MessageId, StoreError>;
     fn snooze(&mut self, id: MessageId, _wake_at: i64) -> Result<(), StoreError> {
         self.move_to(id, Folder::Snoozed)

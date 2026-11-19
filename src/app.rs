@@ -55,6 +55,12 @@ pub enum Action {
     NewFolder(usize, String),
     RenameFolder(Folder, String),
     DeleteFolder(Folder),
+    ExtendNext,
+    ExtendPrevious,
+    SelectAll,
+    SelectNone,
+    Undo,
+    MarkAllRead(Folder),
 }
 
 pub type SavePicker = Box<dyn FnMut(&str, &str) -> Option<std::path::PathBuf>>;
@@ -433,6 +439,10 @@ pub struct App {
     pub filter: Filter,
     pub search: String,
     pub selected: usize,
+    pub marked: std::collections::BTreeSet<usize>,
+    anchor: usize,
+    star_pending: bool,
+    undo: Option<Vec<Restore>>,
     pub draft: Option<Draft>,
     pub notice: Option<String>,
     pub images_loaded: HashSet<MessageId>,
@@ -478,6 +488,10 @@ impl App {
             filter: Filter::All,
             search: String::new(),
             selected: 0,
+            marked: Default::default(),
+            anchor: 0,
+            star_pending: false,
+            undo: None,
             draft: None,
             notice: None,
             images_loaded: HashSet::new(),
@@ -585,6 +599,37 @@ impl App {
             (K::Slash, Action::Search),
         ];
         let mut out = Vec::new();
+        if self.star_pending {
+            if ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. }))) {
+                self.star_pending = false;
+                if Self::pressed(ctx, K::A) {
+                    return vec![Action::SelectAll];
+                }
+                if Self::pressed(ctx, K::N) {
+                    return vec![Action::SelectNone];
+                }
+            }
+        } else if ctx.input(|i| {
+            i.events.iter().any(|e| match e {
+                egui::Event::Text(t) => t == "*",
+                egui::Event::Key { key: K::Num8, pressed: true, modifiers, .. } => modifiers.shift,
+                _ => false,
+            })
+        }) {
+            self.star_pending = true;
+            return out;
+        }
+        if !ctx.input(|i| i.modifiers.shift) && Self::pressed(ctx, K::Z) {
+            return vec![Action::Undo];
+        }
+        if !plain {
+            if Self::pressed(ctx, K::J) || Self::pressed(ctx, K::ArrowDown) {
+                return vec![Action::ExtendNext];
+            }
+            if Self::pressed(ctx, K::K) || Self::pressed(ctx, K::ArrowUp) {
+                return vec![Action::ExtendPrevious];
+            }
+        }
         if self.go_pending {
             if ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. }))) {
                 self.go_pending = false;
@@ -601,6 +646,9 @@ impl App {
         }
         for (key, action) in table {
             if key == K::S && !plain {
+                continue;
+            }
+            if !plain && matches!(key, K::J | K::K | K::ArrowDown | K::ArrowUp) {
                 continue;
             }
             if Self::pressed(ctx, key) {
@@ -632,16 +680,79 @@ impl App {
         v.current.iter().map(|m| (m.summary.id, m.folder.clone())).collect()
     }
 
-    fn move_current(&mut self, v: &View, to: Folder, done: &str, whole: bool) {
-        for (id, folder) in Self::targets(v, whole, true) {
-            if folder == to {
-                continue;
+    fn marked_ids(&self, v: &View) -> Vec<MessageId> {
+        let mut ids = Vec::new();
+        for i in &self.marked {
+            let Some(row) = self.store.list(&v.query, *i, 1).items.into_iter().next() else { continue };
+            let thread = self.store.thread(row.id);
+            if thread.is_empty() {
+                ids.push(row.id);
             }
-            match self.store.move_to(id, to.clone()) {
-                Ok(()) => self.notice = Some(done.into()),
-                Err(e) => self.notice = Some(format!("Could not move the message: {e:?}")),
+            for t in thread.iter().filter(|t| t.folder == v.query.folder) {
+                if !ids.contains(&t.summary.id) {
+                    ids.push(t.summary.id);
+                }
             }
         }
+        ids
+    }
+
+    fn act_ids(&self, v: &View, whole: bool, same_folder: bool) -> Vec<MessageId> {
+        if !self.marked.is_empty() {
+            return self.marked_ids(v);
+        }
+        Self::targets(v, whole, same_folder).into_iter().map(|(id, _)| id).collect()
+    }
+
+    fn move_current(&mut self, v: &View, to: Folder, done: &str, whole: bool) {
+        let ids = self.act_ids(v, whole, true);
+        let mut before = self.store.snapshot(&ids);
+        before.retain(|r| r.folder != to);
+        let moving: Vec<MessageId> = before.iter().map(|r| r.id).collect();
+        if moving.is_empty() {
+            return;
+        }
+        for r in before.iter_mut() {
+            r.moved_to = Some(to.clone());
+        }
+        match self.store.bulk_move(&moving, to) {
+            Ok(()) => {
+                self.notice = Some(if moving.len() > 1 { format!("{done} ({})", moving.len()) } else { done.into() });
+                self.undo = Some(before);
+                self.marked.clear();
+            }
+            Err(e) => self.notice = Some(format!("Could not move the message: {e:?}")),
+        }
+    }
+
+    fn change_flags(&mut self, ids: &[MessageId], change: FlagChange, said: &str) {
+        let before = self.store.snapshot(ids);
+        if self.store.bulk_flags(ids, change).is_ok() {
+            self.undo = Some(before);
+            self.notice = Some(said.into());
+        }
+    }
+
+    fn undo_last(&mut self) {
+        let Some(items) = self.undo.take() else {
+            self.notice = Some("Nothing to undo".into());
+            return;
+        };
+        self.notice = Some(match self.store.restore(&items) {
+            Ok(()) => "Undone".into(),
+            Err(e) => format!("Could not undo: {e:?}"),
+        });
+        self.marked.clear();
+    }
+
+    fn extend_to(&mut self, to: usize) {
+        if self.marked.is_empty() {
+            self.anchor = self.selected;
+        }
+        self.selected = to;
+        let (a, b) = (self.anchor.min(to), self.anchor.max(to));
+        self.marked = (a..=b).collect();
+        self.scroll_to_selected = true;
     }
 
     fn apply(&mut self, ctx: &egui::Context, actions: Vec<Action>) {
@@ -688,6 +799,25 @@ impl App {
                     }
                     self.reader_focus = true;
                 }
+                Action::ExtendNext => {
+                    let to = (self.selected + 1).min(v.total.saturating_sub(1));
+                    self.extend_to(to);
+                }
+                Action::ExtendPrevious => self.extend_to(self.selected.saturating_sub(1)),
+                Action::SelectAll => {
+                    self.marked = (0..v.total).collect();
+                    self.anchor = 0;
+                    self.notice = Some(format!("{} selected", v.total));
+                }
+                Action::SelectNone => self.marked.clear(),
+                Action::Undo => self.undo_last(),
+                Action::MarkAllRead(f) => match self.store.mark_all_read(&f) {
+                    Ok(before) => {
+                        self.notice = Some(format!("Marked {} as read", before.len()));
+                        self.undo = Some(before);
+                    }
+                    Err(e) => self.notice = Some(format!("Could not mark as read: {e:?}")),
+                },
                 Action::Archive => self.move_current(&v, Folder::Archive, "Archived", whole),
                 Action::Snooze => {
                     if v.current.is_some() {
@@ -712,19 +842,16 @@ impl App {
                     let current = if whole { v.head.as_ref() } else { v.current.as_ref().map(|m| &m.summary) };
                     if let Some(s) = current {
                         let on = !s.flagged;
-                        for (id, _) in Self::targets(&v, whole, false) {
-                            let _ = self.store.set_flags(id, FlagChange { unread: None, flagged: Some(on) });
-                        }
-                        self.notice = Some(if on { "Flagged".into() } else { "Flag removed".into() });
+                        let ids = self.act_ids(&v, whole, false);
+                        self.change_flags(&ids, FlagChange { unread: None, flagged: Some(on) }, if on { "Flagged" } else { "Flag removed" });
                     }
                 }
                 Action::ToggleUnread => {
                     let current = if whole { v.head.as_ref() } else { v.current.as_ref().map(|m| &m.summary) };
                     if let Some(s) = current {
                         let unread = !s.unread;
-                        for (id, _) in Self::targets(&v, whole, false) {
-                            let _ = self.store.set_flags(id, FlagChange { unread: Some(unread), flagged: None });
-                        }
+                        let ids = self.act_ids(&v, whole, false);
+                        self.change_flags(&ids, FlagChange { unread: Some(unread), flagged: None }, if unread { "Marked unread" } else { "Marked read" });
                     }
                 }
                 Action::Reply(mode) => {
@@ -1016,24 +1143,30 @@ impl App {
                 Some(n) => (n.as_str(), READOUT),
                 None => ("synced 09:41", TRACE),
             };
-            keycap_bar(
-                ui,
-                &[
-                    ("j k", "move"),
-                    ("Enter", "open"),
-                    ("e", "archive"),
-                    ("r", "reply"),
-                    ("s", "snooze"),
-                    ("x", "flag"),
-                    ("/", "search"),
-                    ("m", "move"),
-                    ("c", "compose"),
-                    ("o", "open file"),
-                    ("S", "save files"),
-                    ("Esc", "back"),
-                ],
-                Some((text, tint)),
-            );
+            let count = self.marked.len().to_string();
+            let mut items: Vec<(&str, &str)> = Vec::new();
+            if !self.marked.is_empty() {
+                items.push((&count, "selected"));
+            }
+            items.extend([
+                ("j k", "move"),
+                ("J K", "extend"),
+                ("*a", "all"),
+                ("*n", "none"),
+                ("z", "undo"),
+                ("Enter", "open"),
+                ("e", "archive"),
+                ("r", "reply"),
+                ("s", "snooze"),
+                ("x", "flag"),
+                ("/", "search"),
+                ("m", "move"),
+                ("c", "compose"),
+                ("o", "open file"),
+                ("S", "save files"),
+                ("Esc", "back"),
+            ]);
+            keycap_bar(ui, &items, Some((text, tint)));
         });
     }
 
@@ -1530,14 +1663,21 @@ impl App {
                 );
                 let resp = ui.interact(rect, ui.id().with(("row", i)), egui::Sense::click());
                 let name = accounts.get(s.account).map(|a| a.name.as_str());
-                paint_row(&ui.painter_at(rect), rect, s, i == selected, resp.hovered(), name, &marks);
+                paint_row(&ui.painter_at(rect), rect, s, i == selected, self.marked.contains(&i), resp.hovered(), name, &marks);
                 ui.ctx().accesskit_node_builder(resp.id, |node| {
                     node.set_label(format!("{} {}", s.from, s.subject));
                 });
                 painted += 1;
                 if resp.clicked() {
-                    clicked = Some(i);
+                    let m = ui.input(|inp| inp.modifiers);
+                    clicked = Some((i, m.shift, m.command));
                 }
+                resp.context_menu(|ui| {
+                    if ui.button("Mark all as read").clicked() {
+                        actions.push(Action::MarkAllRead(v.query.folder.clone()));
+                        ui.close();
+                    }
+                });
                 if resp.double_clicked() {
                     opened = Some(i);
                 }
@@ -1551,8 +1691,22 @@ impl App {
             }
         });
         self.rendered_rows = painted;
-        if let Some(i) = clicked {
-            self.selected = i;
+        if let Some((i, shift, command)) = clicked {
+            if shift {
+                self.extend_to(i);
+            } else if command {
+                if self.marked.is_empty() {
+                    self.marked.insert(self.selected);
+                }
+                if !self.marked.remove(&i) {
+                    self.marked.insert(i);
+                }
+                self.anchor = i;
+                self.selected = i;
+            } else {
+                self.marked.clear();
+                self.selected = i;
+            }
         }
         if let Some(i) = opened {
             self.selected = i;
@@ -2001,9 +2155,9 @@ fn recipients(ui: &mut Ui, id: &str, list: &mut String, input: &mut String, hint
     });
 }
 
-fn paint_row(p: &egui::Painter, rect: egui::Rect, m: &Summary, selected: bool, hovered: bool, account: Option<&str>, marks: &[String]) {
+fn paint_row(p: &egui::Painter, rect: egui::Rect, m: &Summary, selected: bool, picked: bool, hovered: bool, account: Option<&str>, marks: &[String]) {
     use egui::Pos2;
-    if selected {
+    if selected || picked {
         selection(p, rect);
     } else if hovered {
         p.rect_filled(rect, 0.0, BAND.gamma_multiply(0.6));
