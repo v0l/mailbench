@@ -56,6 +56,9 @@ pub(super) fn matches_row(c: &super::Cache, e: &Entry, q: &Query, v: &View) -> b
                 Filter::Flagged => e.thread_flagged,
             };
     }
+    if e.count <= 1 {
+        return matches(e, q, v);
+    }
     match c.by_thread.get(&e.thread) {
         Some(members) => members.iter().any(|i| c.entries[*i].folder == e.folder && matches(&c.entries[*i], q, v)),
         None => matches(e, q, v),
