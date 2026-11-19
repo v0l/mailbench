@@ -2,6 +2,7 @@ use crate::search::BackfillPolicy;
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 pub const SETTINGS_KIND: &str = "settings";
 pub const PREFS_KEY: &str = "prefs";
@@ -53,6 +54,30 @@ impl RemoteImages {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum MarkRead {
+    Immediately,
+    #[default]
+    AfterDelay,
+    Never,
+}
+
+impl MarkRead {
+    pub const ALL: [MarkRead; 3] = [MarkRead::Immediately, MarkRead::AfterDelay, MarkRead::Never];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            MarkRead::Immediately => "immediately",
+            MarkRead::AfterDelay => "after a delay",
+            MarkRead::Never => "never (only on open)",
+        }
+    }
+}
+
+fn one_second() -> u32 {
+    1
+}
+
 pub const MIN_ZOOM: u32 = 60;
 pub const MAX_ZOOM: u32 = 250;
 
@@ -68,17 +93,29 @@ pub struct ReadingPrefs {
     pub remote_images: RemoteImages,
     #[serde(default)]
     pub dark_html: bool,
+    #[serde(default)]
+    pub mark_read: MarkRead,
+    #[serde(default = "one_second")]
+    pub mark_read_secs: u32,
 }
 
 impl Default for ReadingPrefs {
     fn default() -> Self {
-        ReadingPrefs { zoom_percent: 100, remote_images: RemoteImages::Ask, dark_html: false }
+        ReadingPrefs { zoom_percent: 100, remote_images: RemoteImages::Ask, dark_html: false, mark_read: MarkRead::AfterDelay, mark_read_secs: 1 }
     }
 }
 
 impl ReadingPrefs {
     pub fn zoom(&self) -> f32 {
         self.zoom_percent.clamp(MIN_ZOOM, MAX_ZOOM) as f32 / 100.0
+    }
+
+    pub fn mark_read_after(&self) -> Option<Duration> {
+        match self.mark_read {
+            MarkRead::Immediately => Some(Duration::ZERO),
+            MarkRead::AfterDelay => Some(Duration::from_secs(self.mark_read_secs as u64)),
+            MarkRead::Never => None,
+        }
     }
 
     pub fn zoom_milli(&self) -> u32 {

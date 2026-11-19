@@ -465,6 +465,9 @@ pub struct App {
     scroll_to_selected: bool,
     go_pending: bool,
     last_shown: Option<MessageId>,
+    dwell: Option<(MessageId, Instant)>,
+    dwell_done: bool,
+    mark_now: bool,
     last_head: Option<MessageId>,
     pub expanded: Option<MessageId>,
     pub thread_focus: Option<MessageId>,
@@ -520,6 +523,9 @@ impl App {
             scroll_to_selected: false,
             go_pending: false,
             last_shown: None,
+            dwell: None,
+            dwell_done: false,
+            mark_now: false,
             last_head: None,
             expanded: None,
             thread_focus: None,
@@ -771,6 +777,33 @@ impl App {
         self.marked.clear();
     }
 
+    fn mark_shown_read(&mut self, ctx: &egui::Context, v: &View) {
+        let Some(after) = self.prefs.reading.mark_read_after() else {
+            self.mark_now = false;
+            return;
+        };
+        let Some(m) = &v.current else { return };
+        let id = m.summary.id;
+        if self.dwell.map(|(d, _)| d) != Some(id) {
+            self.dwell = Some((id, Instant::now()));
+            self.dwell_done = false;
+        }
+        if self.dwell_done {
+            self.mark_now = false;
+            return;
+        }
+        let since = self.dwell.map(|(_, t)| t.elapsed()).unwrap_or_default();
+        if self.mark_now || since >= after {
+            self.mark_now = false;
+            self.dwell_done = true;
+            if m.summary.unread {
+                let _ = self.store.set_flags(id, FlagChange { unread: Some(false), flagged: None });
+            }
+        } else {
+            ctx.request_repaint_after(after - since);
+        }
+    }
+
     fn extend_to(&mut self, to: usize) {
         if self.marked.is_empty() {
             self.anchor = self.selected;
@@ -881,6 +914,7 @@ impl App {
                     }
                 }
                 Action::ToggleUnread => {
+                    self.dwell_done = true;
                     let current = if whole { v.head.as_ref() } else { v.current.as_ref().map(|m| &m.summary) };
                     if let Some(s) = current {
                         let unread = !s.unread;
@@ -1124,6 +1158,7 @@ impl App {
         let keys = self.key_actions(&ctx);
         self.apply(&ctx, keys);
         let v = self.view();
+        self.mark_shown_read(&ctx, &v);
         let accounts = self.store.accounts();
         let failed = self.force_failed || accounts.iter().any(|a| a.sync == SyncState::Failed);
         let mut actions = Vec::new();
@@ -1806,10 +1841,12 @@ impl App {
             } else {
                 self.marked.clear();
                 self.selected = i;
+                self.mark_now = true;
             }
         }
         if let Some(i) = opened {
             self.selected = i;
+            self.mark_now = true;
             actions.push(Action::Open);
         }
     }

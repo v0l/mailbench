@@ -265,6 +265,17 @@ impl Panels {
                 }
             });
             hint(ui, "Trusted senders and domains are chosen from the banner on a message and apply when this is set to ask or trusted.");
+            row(ui, "mark as read", |ui| {
+                for option in prefs::MarkRead::ALL {
+                    ui.selectable_value(&mut reading.mark_read, option, option.label());
+                }
+            });
+            if reading.mark_read == prefs::MarkRead::AfterDelay {
+                row(ui, "mark read delay", |ui| {
+                    let r = ui.add(egui::DragValue::new(&mut reading.mark_read_secs).range(1..=60).suffix(" s"));
+                    ui.ctx().accesskit_node_builder(r.id, |node| node.set_label("mark read delay seconds"));
+                });
+            }
             ui.checkbox(&mut reading.dark_html, "dark reading for HTML");
         });
     }

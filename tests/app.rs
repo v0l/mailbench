@@ -236,6 +236,85 @@ fn copy_has_no_em_or_en_dashes() {
     }
 }
 
+fn unread_row(app: &App) -> (usize, MessageId, String) {
+    let items = app.store.list(&Query::new(Folder::Inbox), 0, 100).items;
+    let i = items.iter().enumerate().skip(1).find(|(_, s)| s.unread && s.thread == 1).map(|(i, _)| i).unwrap();
+    (i, items[i].id, items[i].subject.clone())
+}
+
+fn is_unread(app: &App, id: MessageId) -> bool {
+    app.store.get(id).unwrap().summary.unread
+}
+
+#[test]
+fn clicking_a_row_marks_it_read() {
+    let mut h = harness(FakeStore::concept());
+    let (i, id, subject) = unread_row(&h.state().1);
+    assert!(is_unread(&h.state().1, id));
+    h.get_by_label_contains(&subject).click();
+    h.run();
+    h.run();
+    assert_eq!(h.state().1.selected, i);
+    assert!(!is_unread(&h.state().1, id));
+}
+
+#[test]
+fn moving_past_a_message_quickly_does_not_mark_it_read() {
+    let mut h = harness(FakeStore::concept());
+    let (i, id, _) = unread_row(&h.state().1);
+    h.state_mut().1.selected = i - 1;
+    h.run();
+    h.key_press(egui::Key::J);
+    h.run();
+    h.key_press(egui::Key::J);
+    h.run();
+    assert!(is_unread(&h.state().1, id));
+}
+
+#[test]
+fn resting_on_a_message_marks_it_read_after_the_dwell() {
+    let mut h = harness(FakeStore::concept());
+    let (i, id, _) = unread_row(&h.state().1);
+    h.state_mut().1.selected = i - 1;
+    h.run();
+    h.key_press(egui::Key::J);
+    h.run();
+    assert!(is_unread(&h.state().1, id));
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    h.run();
+    assert!(!is_unread(&h.state().1, id));
+}
+
+#[test]
+fn u_keeps_a_shown_message_unread() {
+    let mut h = harness(FakeStore::concept());
+    let (_, id, subject) = unread_row(&h.state().1);
+    h.get_by_label_contains(&subject).click();
+    h.run();
+    h.run();
+    assert!(!is_unread(&h.state().1, id));
+    h.key_press(egui::Key::U);
+    h.run();
+    assert!(is_unread(&h.state().1, id));
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    h.run();
+    h.run();
+    assert!(is_unread(&h.state().1, id));
+}
+
+#[test]
+fn mark_read_never_keeps_a_clicked_message_unread() {
+    let mut h = harness(FakeStore::concept());
+    h.state_mut().1.prefs.reading.mark_read = mailbench::prefs::MarkRead::Never;
+    let (_, id, subject) = unread_row(&h.state().1);
+    h.get_by_label_contains(&subject).click();
+    h.run();
+    h.run();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    h.run();
+    assert!(is_unread(&h.state().1, id));
+}
+
 #[test]
 fn a_three_message_thread_opens_collapsed_and_expands_an_older_message() {
     let mut h = harness(FakeStore::concept());
