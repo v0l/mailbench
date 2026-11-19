@@ -17,6 +17,7 @@ fn by_name(name: &str) -> Option<Folder> {
         "trash" | "deleted" | "deleted items" => Some(Folder::Trash),
         "junk" | "spam" | "junk email" => Some(Folder::Junk),
         "archive" | "archives" => Some(Folder::Archive),
+        "snoozed" => Some(Folder::Snoozed),
         _ => None,
     }
 }
@@ -65,6 +66,7 @@ pub enum Op {
     CreateFolder { account: String, name: String },
     RenameFolder { account: String, from: String, to: String },
     DeleteFolder { account: String, name: String },
+    Wake { account: String, folder: String, uid: u32, uid_validity: u32, to: String, key: String },
     Draft { account: String, local: String },
     DropDraft { account: String, message_id: String },
 }
@@ -78,6 +80,7 @@ impl Op {
             | Op::CreateFolder { account, .. }
             | Op::RenameFolder { account, .. }
             | Op::DeleteFolder { account, .. }
+            | Op::Wake { account, .. }
             | Op::Draft { account, .. }
             | Op::DropDraft { account, .. } => account,
         }

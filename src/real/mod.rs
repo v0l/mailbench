@@ -9,6 +9,8 @@ mod worker;
 use crate::backend::Folder as Remote;
 use crate::backend::*;
 use crate::mailstore::{self as ms, *};
+use crate::notify::{Batcher, Incoming, Notifier, NotifyPrefs};
+use crate::snooze::{Clock, Snooze, SnoozeTable, SystemClock, key_of};
 use crate::store::Store;
 use model::*;
 use std::collections::HashMap;
@@ -69,6 +71,7 @@ struct Entry {
     to_key: String,
     message_id: Option<String>,
     refs: Vec<String>,
+    wake: Option<i64>,
 }
 
 fn people_key(to: &[Address], cc: &[Address]) -> String {
@@ -282,6 +285,11 @@ pub(crate) struct Shared {
     contacts: Mutex<HashMap<String, ContactRecord>>,
     hold: Mutex<Duration>,
     signatures: Mutex<HashMap<String, String>>,
+    clock: Mutex<Arc<dyn Clock>>,
+    prefs: Mutex<Vec<NotifyPrefs>>,
+    batchers: Mutex<Vec<Batcher>>,
+    notifier: Mutex<Option<Arc<dyn Notifier>>>,
+    focus: Mutex<Option<u64>>,
 }
 
 fn now() -> i64 {
@@ -566,6 +574,65 @@ impl Shared {
         Self::outbox_in(&self.lock_store()).into_iter().filter(|(_, op)| op.account() == account).collect()
     }
 
+    pub fn now_secs(&self) -> i64 {
+        lock(&self.clock).now()
+    }
+
+    pub fn snooze_due(&self, account: &str) -> Vec<Snooze> {
+        let clock = lock(&self.clock).clone();
+        SnoozeTable::new(&self.lock_store(), &*clock).due(account)
+    }
+
+    pub fn next_wake(&self, account: &str) -> Option<i64> {
+        let clock = lock(&self.clock).clone();
+        SnoozeTable::new(&self.lock_store(), &*clock).next_due(account)
+    }
+
+    pub fn forget_snooze(&self, account: &str, key: &str) {
+        let _ = self.lock_store().delete(crate::snooze::KIND, key);
+        let _ = account;
+    }
+
+    pub fn arm_notifications(&self, index: usize) {
+        lock(&self.batchers)[index].arm();
+    }
+
+    pub fn note_incoming(&self, index: usize, folder: &str, validity: u32, messages: &[MessageSummary]) {
+        let account = &self.accounts[index].id;
+        let mut fresh: Vec<&MessageSummary> = messages.iter().filter(|m| !m.flags.seen && !m.flags.deleted).collect();
+        fresh.sort_by_key(|m| (m.date.unwrap_or(0), m.uid));
+        let items: Vec<Incoming> = fresh
+            .into_iter()
+            .map(|m| Incoming {
+                id: stable_id(&format!("r\0{account}\0{folder}\0{validity}\0{}", m.uid)),
+                from: m.from.first().map(display::person).unwrap_or_default(),
+                subject: m.subject.clone().unwrap_or_default(),
+            })
+            .collect();
+        lock(&self.batchers)[index].note(items);
+    }
+
+    pub fn flush_notifications(self: &Arc<Self>, index: usize) {
+        use chrono::Timelike;
+        let prefs = lock(&self.prefs)[index];
+        let now = chrono::Local::now();
+        let minute = (now.hour() * 60 + now.minute()) as u16;
+        let Some(notice) = lock(&self.batchers)[index].take(&prefs, minute) else { return };
+        let Some(notifier) = lock(&self.notifier).clone() else { return };
+        let shared = self.clone();
+        let focus = notice.focus;
+        notifier.show(
+            notice,
+            Box::new(move || {
+                *lock(&shared.focus) = Some(focus);
+                if let Some(ctx) = lock(&shared.ctx).as_ref() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    ctx.request_repaint();
+                }
+            }),
+        );
+    }
+
     pub fn remove_ops(&self, keys: &[String]) {
         let store = self.lock_store();
         for k in keys {
@@ -581,6 +648,17 @@ impl Shared {
         let key = format!("{nanos:030}{n:06}");
         let raw = serde_json::to_vec(op).map_err(backend_err)?;
         store.put(OUTBOX, &key, &raw).map_err(backend_err)
+    }
+
+    pub fn enqueue_op(&self, op: &Op) -> Result<(), StoreError> {
+        let store = self.lock_store();
+        self.enqueue(&store, op)
+    }
+
+    pub fn find_stored(&self, account: &str, folder: &str, pick: impl Fn(&MessageSummary) -> bool) -> Option<u32> {
+        let store = self.lock_store();
+        let sink = StoreSink::new(&store, account, true);
+        sink.messages(folder).ok()?.into_iter().find(|m| pick(m)).map(|m| m.uid)
     }
 
     fn queue_folder_op(&self, account: usize, op: Op) -> Result<(), StoreError> {
@@ -688,6 +766,7 @@ impl Shared {
             count: 1,
             thread_unread: false,
             thread_flagged: false,
+            wake: None,
         }
     }
 
@@ -848,12 +927,21 @@ impl Shared {
                 }
             }
             for (_, op) in &ops {
-                if let Op::Move { account: a, folder, uid, to, .. } = op {
-                    if *a == account.id {
+                match op {
+                    Op::Move { account: a, folder, uid, to, .. } if *a == account.id => {
                         pending.insert((folder.clone(), *uid), to.clone());
                     }
+                    Op::Wake { account: a, folder, uid, to, .. } if *a == account.id => {
+                        pending.insert((folder.clone(), *uid), to.clone());
+                        flag_ops.entry((folder.clone(), *uid)).or_default().0 = Some(false);
+                    }
+                    _ => {}
                 }
             }
+            let wakes = {
+                let clock = lock(&self.clock).clone();
+                SnoozeTable::new(&self.lock_store(), &*clock).wake_times(&account.id)
+            };
             for (stored_name, folder) in shown_folders.iter().filter(|(_, f)| f.selectable) {
                 let Some(stored_name) = stored_name else { continue };
                 let ui = ui_folder(folder).unwrap_or_else(|| ms::Folder::Other(index, folder.name.clone()));
@@ -884,6 +972,9 @@ impl Shared {
                         .map(|to| folder_for(index, &folders, to))
                         .unwrap_or_else(|| ui.clone());
                     let attachments = known.get(&id).copied().unwrap_or(false);
+                    let wake = (shown == ms::Folder::Snoozed)
+                        .then(|| wakes.get(&key_of(&account.id, m.message_id.as_deref(), m.date.unwrap_or(0), m.subject.as_deref().unwrap_or(""))).copied())
+                        .flatten();
                     for a in m.from.iter().chain(&m.to).chain(&m.cc) {
                         note_seen(&mut cache.seen, a);
                     }
@@ -923,6 +1014,7 @@ impl Shared {
                         thread_flagged: false,
                         message_id,
                         refs,
+                        wake,
                     });
                 }
                 if quick {
@@ -973,6 +1065,7 @@ impl Shared {
                 attachments: !msg.attachments.is_empty(),
                 message_id: msg.message_id.clone(),
                 refs: msg.references.clone(),
+                wake: None,
             });
         }
         let inputs: Vec<threads::Input> = cache
@@ -1066,7 +1159,10 @@ fn summary_from(e: &Entry, now: i64, remote: bool) -> Summary {
         id: MessageId(e.id),
         from: e.from.clone(),
         subject: e.subject.clone(),
-        when: display::when(e.date, now),
+        when: match (&e.folder, e.wake) {
+            (ms::Folder::Snoozed, Some(at)) => display::wake(at),
+            _ => display::when(e.date, now),
+        },
         unread: e.unread,
         flagged: e.flagged,
         new: e.unread,
@@ -1115,6 +1211,11 @@ impl RealStore {
             contacts: Mutex::new(HashMap::new()),
             hold: Mutex::new(DEFAULT_HOLD),
             signatures: Mutex::new(HashMap::new()),
+            clock: Mutex::new(Arc::new(SystemClock)),
+            prefs: Mutex::new(vec![NotifyPrefs::default(); accounts.len()]),
+            batchers: Mutex::new((0..accounts.len()).map(|_| Batcher::default()).collect()),
+            notifier: Mutex::new(None),
+            focus: Mutex::new(None),
         });
         {
             let store = shared.lock_store();
@@ -1185,6 +1286,20 @@ impl RealStore {
         self.shared.repaint();
     }
 
+    pub fn set_notify(&self, account: &str, prefs: NotifyPrefs) {
+        let Some(i) = self.shared.index_of(account) else { return };
+        lock(&self.shared.prefs)[i] = prefs;
+    }
+
+    pub fn set_notifier(&self, notifier: Arc<dyn Notifier>) {
+        *lock(&self.shared.notifier) = Some(notifier);
+    }
+
+    pub fn set_clock(&self, clock: Arc<dyn Clock>) {
+        *lock(&self.shared.clock) = clock;
+        self.sync_now();
+    }
+
     pub fn set_send_hold(&self, hold: Duration) {
         *lock(&self.shared.hold) = hold;
     }
@@ -1247,6 +1362,7 @@ impl MailStore for RealStore {
         self.shared.with_cache(|c| {
             ms::Folder::UNIFIED
                 .iter()
+                .chain(std::iter::once(&ms::Folder::Snoozed))
                 .map(|f| {
                     let counts = c.folder_counts.get(f).copied().unwrap_or_default();
                     FolderInfo { folder: f.clone(), unread: counts.unread, total: counts.all }
@@ -1488,6 +1604,24 @@ impl MailStore for RealStore {
         self.shared.refresh();
         self.shared.kick(e.account);
         Ok(())
+    }
+
+    fn snooze(&mut self, id: MessageId, wake_at: i64) -> Result<(), StoreError> {
+        let e = self.entry(id)?;
+        if e.local.is_some() {
+            return self.move_to(id, ms::Folder::Snoozed);
+        }
+        let account = self.shared.accounts[e.account].id.clone();
+        let record = Snooze { account, message_id: e.message_id.clone(), subject: e.subject.clone(), date: e.date, wake_at };
+        {
+            let clock = lock(&self.shared.clock).clone();
+            SnoozeTable::new(&self.shared.lock_store(), &*clock).add(&record).map_err(backend_err)?;
+        }
+        self.move_to(id, ms::Folder::Snoozed)
+    }
+
+    fn take_focus(&mut self) -> Option<MessageId> {
+        lock(&self.shared.focus).take().map(MessageId)
     }
 
     fn create_folder(&mut self, account: usize, name: &str) -> Result<(), StoreError> {

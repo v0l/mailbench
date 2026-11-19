@@ -323,6 +323,12 @@ pub trait MailStore {
     fn set_flags(&mut self, id: MessageId, change: FlagChange) -> Result<(), StoreError>;
     fn move_to(&mut self, id: MessageId, folder: Folder) -> Result<(), StoreError>;
     fn append(&mut self, folder: Folder, message: Outgoing) -> Result<MessageId, StoreError>;
+    fn snooze(&mut self, id: MessageId, _wake_at: i64) -> Result<(), StoreError> {
+        self.move_to(id, Folder::Snoozed)
+    }
+    fn take_focus(&mut self) -> Option<MessageId> {
+        None
+    }
     fn attachments(&self, _id: MessageId) -> Result<Vec<AttachmentData>, StoreError> {
         Ok(Vec::new())
     }

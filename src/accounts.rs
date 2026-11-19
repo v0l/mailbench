@@ -26,6 +26,8 @@ pub struct AccountConfig {
     pub credential: Credential,
     #[serde(default)]
     pub backfill: crate::search::BackfillPolicy,
+    #[serde(default)]
+    pub notify: crate::notify::NotifyPrefs,
 }
 
 pub fn new_id() -> String {
@@ -289,6 +291,7 @@ mod tests {
             smtp: ServerSettings::new(host, 465, Security::Tls),
             credential: Credential::Password("x".into()),
             backfill: Default::default(),
+            notify: Default::default(),
         }
     }
 

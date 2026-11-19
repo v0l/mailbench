@@ -292,3 +292,64 @@ fn m_on_a_thread_row_moves_every_message_and_in_the_reader_only_the_one() {
     }
     assert!(server_state(&name, "INBOX").is_empty());
 }
+
+#[test]
+fn a_due_snooze_returns_to_the_inbox_on_the_server_unread() {
+    if !common::greenmail() {
+        return;
+    }
+    let name = format!("sz{}", std::process::id());
+    common::create_greenmail_user(&name);
+    let mut s = smtp(&name);
+    block_on(s.send(&OutgoingMessage {
+        from: Address { name: Some("Zed".into()), address: "zed@localhost".into() },
+        to: vec![Address { name: None, address: format!("{name}@localhost") }],
+        subject: "Snooze me".into(),
+        body: "later".into(),
+        ..Default::default()
+    }))
+    .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::create(&dir.path().join("mail.db"), None, Some(("pw", KdfParams::fast()))).unwrap();
+    let real = RealStore::open(store, vec![setup(&name)]);
+    let mut h = harness(real);
+    until(&mut h, "mail in the inbox", |a| inbox(a) == 1);
+    let id = h.state().1.store.list(&Query::new(ms::Folder::Inbox), 0, 10).items[0].id;
+    h.state_mut().1.store.set_flags(id, ms::FlagChange { unread: Some(false), flagged: None }).unwrap();
+    until(&mut h, "marked read on the server", |_| server_seen(&name, "INBOX"));
+
+    let wake_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 + 12;
+    h.state_mut().1.store.snooze(id, wake_at).unwrap();
+    until(&mut h, "snoozed locally", |a| inbox(a) == 0 && a.store.counts(&Query::new(ms::Folder::Snoozed)).all == 1);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while server_state(&name, "Snoozed").len() != 1 {
+        h.run();
+        assert!(Instant::now() < deadline, "message did not reach the Snoozed folder, which had to be created");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    until(&mut h, "snoozed listed after resync with its wake time", |a| {
+        a.store.list(&Query::new(ms::Folder::Snoozed), 0, 1).items.first().is_some_and(|m| m.when.starts_with("wakes"))
+    });
+    assert!(server_state(&name, "INBOX").is_empty());
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while server_state(&name, "INBOX").len() != 1 {
+        h.run();
+        assert!(Instant::now() < deadline, "the due message did not come back to INBOX");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(server_state(&name, "Snoozed").is_empty());
+    assert!(!server_seen(&name, "INBOX"));
+    until(&mut h, "back in the inbox as unread", |a| {
+        a.store.list(&Query::new(ms::Folder::Inbox), 0, 1).items.first().is_some_and(|m| m.unread)
+    });
+}
+
+fn server_seen(name: &str, folder: &str) -> bool {
+    let mut b = imap(name);
+    block_on(async {
+        let delta = b.sync_folder(folder, None).await.unwrap();
+        delta.added.first().is_some_and(|m| m.flags.seen)
+    })
+}

@@ -451,6 +451,7 @@ impl AddForm {
             smtp: ServerSettings::new(self.smtp_host.trim(), port(&self.smtp_port, "outgoing")?, self.smtp_security.clone()),
             credential,
             backfill: Default::default(),
+            notify: Default::default(),
         })
     }
 
@@ -840,6 +841,25 @@ impl SettingsForm {
                                         ui.ctx().accesskit_node_builder(r.id, |node| node.set_label("size cap, 0 for none"));
                                     }
                                 });
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(&mut draft.notify.enabled, "desktop notifications");
+                                    if draft.notify.enabled {
+                                        let mut quiet = draft.notify.quiet.is_some();
+                                        ui.checkbox(&mut quiet, "quiet hours");
+                                        if quiet != draft.notify.quiet.is_some() {
+                                            draft.notify.quiet = quiet.then_some(crate::notify::QuietHours { start: 22 * 60, end: 7 * 60 });
+                                        }
+                                        if let Some(q) = draft.notify.quiet.as_mut() {
+                                            let (mut from, mut to) = (q.start / 60, q.end / 60);
+                                            let r = ui.add(egui::DragValue::new(&mut from).range(0..=23).suffix(":00"));
+                                            ui.ctx().accesskit_node_builder(r.id, |node| node.set_label("quiet from hour"));
+                                            let r = ui.add(egui::DragValue::new(&mut to).range(0..=23).suffix(":00"));
+                                            ui.ctx().accesskit_node_builder(r.id, |node| node.set_label("quiet until hour"));
+                                            q.start = from * 60;
+                                            q.end = to * 60;
+                                        }
+                                    }
+                                });
                             });
                             ui.add_space(8.0);
                         }
@@ -1095,7 +1115,9 @@ impl Shell {
         for c in &configs {
             real.set_backfill(&c.id, c.backfill);
             real.set_signature(&c.id, &c.signature);
+            real.set_notify(&c.id, c.notify);
         }
+        real.set_notifier(std::sync::Arc::new(crate::notify::DesktopNotifier));
         self.screen = Screen::Main(Box::new(Main { app: App::with_store(Box::new(real)) }));
         self.apply_open_settings();
         self.attach();

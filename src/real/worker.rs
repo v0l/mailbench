@@ -7,6 +7,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+const RETURNING: &str = "$Returning";
 const POLL: Duration = Duration::from_secs(60);
 const RETRY: Duration = Duration::from_secs(5);
 const REFRESH: Duration = Duration::from_millis(1500);
@@ -17,6 +18,8 @@ struct LockedSink {
     index: usize,
     last_refresh: Instant,
     fresh: bool,
+    inbox: String,
+    reset: bool,
 }
 
 impl LockedSink {
@@ -44,6 +47,7 @@ impl SyncSink for LockedSink {
     }
     fn reset_folder(&mut self, folder: &str) -> Result<()> {
         self.fresh = true;
+        self.reset |= folder == self.inbox;
         self.with(|s| s.reset_folder(folder))
     }
     fn known_uids(&mut self, folder: &str) -> Result<Vec<u32>> {
@@ -51,7 +55,12 @@ impl SyncSink for LockedSink {
     }
     fn put_summaries(&mut self, folder: &str, messages: &[MessageSummary]) -> Result<()> {
         self.fresh |= !messages.is_empty();
-        self.with(|s| s.put_summaries(folder, messages))
+        self.with(|s| s.put_summaries(folder, messages))?;
+        if folder == self.inbox && !self.reset {
+            let validity = self.shared.validity(&self.account, folder).unwrap_or(0);
+            self.shared.note_incoming(self.index, folder, validity, messages);
+        }
+        Ok(())
     }
     fn put_flags(&mut self, folder: &str, changes: &[(u32, Flags)]) -> Result<usize> {
         let n = self.with(|s| s.put_flags(folder, changes))?;
@@ -119,6 +128,19 @@ async fn push(shared: &Shared, backend: &mut dyn Backend, op: &Op, account: &str
                 }
                 other => other,
             }
+        }
+        Op::Wake { folder, uid, uid_validity, to, key, .. } => {
+            if shared.validity(account, folder) != Some(*uid_validity) {
+                shared.forget_snooze(account, key);
+                return Ok(());
+            }
+            let returning = Flags { keywords: vec![RETURNING.into()], ..Default::default() };
+            let _ = backend.set_flags(folder, &[*uid], &FlagUpdate::Add(returning)).await;
+            let unseen = Flags { seen: true, ..Default::default() };
+            backend.set_flags(folder, &[*uid], &FlagUpdate::Remove(unseen)).await?;
+            backend.move_messages(folder, &[*uid], to).await?;
+            shared.forget_snooze(account, key);
+            Ok(())
         }
         Op::CreateFolder { name, .. } => backend.create_folder(name).await,
         Op::RenameFolder { from, to, .. } => backend.rename_folder(from, to).await,
@@ -205,9 +227,51 @@ async fn push_outbox(shared: &Shared, account: &str, backend: &mut dyn Backend, 
     Ok(())
 }
 
+fn queue_wakes(shared: &Shared, account: &str) {
+    let due = shared.snooze_due(account);
+    if due.is_empty() {
+        return;
+    }
+    let folders = shared.folders_of(account);
+    let Some(snoozed) = server_folder(&folders, &crate::mailstore::Folder::Snoozed) else { return };
+    let inbox = inbox_name(shared, account);
+    let queued = shared.outbox(account);
+    let moving = queued.iter().any(|(_, op)| matches!(op, Op::Move { .. }));
+    for snooze in due {
+        let key = snooze.key();
+        if queued.iter().any(|(_, op)| matches!(op, Op::Wake { key: k, .. } if *k == key)) {
+            continue;
+        }
+        match shared.find_stored(account, &snoozed, |m| snooze.matches(m)) {
+            Some(uid) => {
+                let Some(uid_validity) = shared.validity(account, &snoozed) else { continue };
+                let op = Op::Wake { account: account.to_string(), folder: snoozed.clone(), uid, uid_validity, to: inbox.clone(), key };
+                let _ = shared.enqueue_op(&op);
+            }
+            None if !moving => shared.forget_snooze(account, &key),
+            None => {}
+        }
+    }
+}
+
+fn next_wait(shared: &Shared, account: &str, wait: Duration) -> Duration {
+    match shared.next_wake(account) {
+        Some(at) => wait.min(Duration::from_secs((at - shared.now_secs()).max(1) as u64)),
+        None => wait,
+    }
+}
+
 async fn cycle(shared: &Arc<Shared>, index: usize, account: &str, backend: &mut dyn Backend) -> Result<()> {
-    let mut sink =
-        LockedSink { shared: shared.clone(), account: account.to_string(), index, last_refresh: Instant::now(), fresh: false };
+    let mut sink = LockedSink {
+        shared: shared.clone(),
+        account: account.to_string(),
+        index,
+        last_refresh: Instant::now(),
+        fresh: false,
+        inbox: inbox_name(shared, account),
+        reset: false,
+    };
+    queue_wakes(shared, account);
     let mut done = Vec::new();
     let pushed = push_outbox(shared, account, backend, &mut done).await;
     let (folder_ops, done): (Vec<String>, Vec<String>) = done.into_iter().partition(|key| {
@@ -302,6 +366,10 @@ pub(super) async fn run(
     while !shared.stop.load(Ordering::Relaxed) {
         shared.set_state(index, SyncState::Syncing, None);
         let result = cycle(&shared, index, &account, backend.as_mut()).await;
+        shared.flush_notifications(index);
+        if result.is_ok() {
+            shared.arm_notifications(index);
+        }
         let mut watch = None;
         match &result {
             Ok(()) => {
@@ -311,7 +379,7 @@ pub(super) async fn run(
             Err(e) => shared.set_state(index, SyncState::Failed, Some(e.to_string())),
         }
         shared.refresh();
-        let wait = if result.is_ok() { POLL } else { RETRY };
+        let wait = next_wait(&shared, &account, if result.is_ok() { POLL } else { RETRY });
         let changed = async {
             match watch.as_mut() {
                 Some(w) => {

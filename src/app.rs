@@ -49,6 +49,7 @@ pub enum Action {
     ViewImage(usize),
     CloseViewer,
     OpenMove,
+    SnoozeUntil(i64, bool),
     MoveTo(Folder, bool),
     ToggleBranch(usize, String),
     NewFolder(usize, String),
@@ -355,6 +356,12 @@ impl Draft {
     }
 }
 
+struct Snoozer {
+    custom: String,
+    whole: bool,
+    error: bool,
+}
+
 struct Mover {
     query: String,
     selected: usize,
@@ -435,6 +442,7 @@ pub struct App {
     pub reader_focus: bool,
     pub force_failed: bool,
     mover: Option<Mover>,
+    snoozer: Option<Snoozer>,
     dialog: Option<FolderDialog>,
     collapsed: HashSet<(usize, String)>,
     search_id: Option<egui::Id>,
@@ -479,6 +487,7 @@ impl App {
             reader_focus: false,
             force_failed: false,
             mover: None,
+            snoozer: None,
             dialog: None,
             collapsed: HashSet::new(),
             search_id: None,
@@ -548,7 +557,7 @@ impl App {
         if self.draft.is_some() || self.dialog.is_some() {
             return Vec::new();
         }
-        if self.mover.is_some() {
+        if self.mover.is_some() || self.snoozer.is_some() {
             return Vec::new();
         }
         if Self::pressed(ctx, K::Escape) {
@@ -680,7 +689,23 @@ impl App {
                     self.reader_focus = true;
                 }
                 Action::Archive => self.move_current(&v, Folder::Archive, "Archived", whole),
-                Action::Snooze => self.move_current(&v, Folder::Snoozed, "Snoozed until tomorrow 08:00", whole),
+                Action::Snooze => {
+                    if v.current.is_some() {
+                        self.snoozer = Some(Snoozer { custom: String::new(), whole: whole && !self.reader_focus, error: false });
+                        ctx.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(t) if t.eq_ignore_ascii_case("s"))));
+                    }
+                }
+                Action::SnoozeUntil(at, whole) => {
+                    for (id, folder) in Self::targets(&v, whole, true) {
+                        if folder == Folder::Snoozed {
+                            continue;
+                        }
+                        match self.store.snooze(id, at) {
+                            Ok(()) => self.notice = Some(format!("Snoozed until {}", crate::snooze::describe(at))),
+                            Err(e) => self.notice = Some(format!("Could not snooze the message: {e:?}")),
+                        }
+                    }
+                }
                 Action::Junk => self.move_current(&v, Folder::Junk, "Moved to junk", whole),
                 Action::Trash => self.move_current(&v, Folder::Trash, "Moved to trash", whole),
                 Action::ToggleFlag => {
@@ -911,6 +936,7 @@ impl App {
 
     pub fn show(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
+        self.follow_notification();
         let keys = self.key_actions(&ctx);
         self.apply(&ctx, keys);
         let v = self.view();
@@ -938,6 +964,7 @@ impl App {
         self.composer(&ctx, &accounts);
         self.viewer(&ctx, &mut actions);
         self.move_picker(&ctx, v.current.as_ref(), &mut actions);
+        self.snooze_picker(&ctx, &mut actions);
         self.folder_dialog(&ctx);
         self.undo_toast(&ctx);
         self.apply(&ctx, actions);
@@ -1190,6 +1217,83 @@ impl App {
                 .map(|n| Target { label: n.path, folder: n.folder }),
         );
         out
+    }
+
+    fn follow_notification(&mut self) {
+        let Some(id) = self.store.take_focus() else { return };
+        self.folder = Folder::Inbox;
+        self.filter = Filter::All;
+        self.search.clear();
+        let query = self.query();
+        let total = self.store.counts(&query).all;
+        let page = self.store.list(&query, 0, total.max(1));
+        let at = page.items.iter().position(|s| s.id == id || self.store.thread(s.id).iter().any(|t| t.summary.id == id));
+        self.selected = at.unwrap_or(0);
+        self.expanded = Some(id);
+        self.reader_focus = true;
+        self.scroll_to_selected = true;
+    }
+
+    fn snooze_picker(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        let Some(snoozer) = self.snoozer.as_mut() else { return };
+        let now = chrono::Local::now();
+        let presets = crate::snooze::presets(&now);
+        let whole = snoozer.whole;
+        let (mut picked, mut close) = (None, false);
+        let r = egui::Modal::new(egui::Id::new("snooze"))
+            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                ui.set_width(380.0);
+                modal_title(ui, "snooze until");
+                for p in &presets {
+                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::click());
+                    let painter = ui.painter();
+                    if resp.hovered() {
+                        painter.rect_filled(rect, 2.0, BAND);
+                    }
+                    put(painter, rect.left() + 12.0, 150.0, rect.center().y, p.label, body(13.0), VALUE);
+                    put_right(painter, rect.right() - 8.0, rect.center().y, &crate::snooze::describe(p.at), figure(11.0), LEGEND);
+                    ui.ctx().accesskit_node_builder(resp.id, |n| n.set_label(format!("snooze {}", p.label)));
+                    if resp.clicked() {
+                        picked = Some(p.at);
+                    }
+                }
+                ui.add_space(6.0);
+                let r = field(ui, &mut snoozer.custom, "custom date, 2025-12-31 or 2025-12-31 17:30");
+                if r.changed() {
+                    snoozer.error = false;
+                }
+                if !r.has_focus() && snoozer.custom.is_empty() {
+                    r.request_focus();
+                }
+                if snoozer.error {
+                    Line::new().note("Use YYYY-MM-DD or YYYY-MM-DD HH:MM, in the future").size(11.5).show(ui);
+                }
+                if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    match crate::snooze::parse_custom(&snoozer.custom, &now) {
+                        Some(at) => picked = Some(at),
+                        None => snoozer.error = true,
+                    }
+                }
+                for (n, p) in presets.iter().enumerate() {
+                    let key = [egui::Key::Num1, egui::Key::Num2, egui::Key::Num3][n.min(2)];
+                    if snoozer.custom.is_empty() && n < 3 && ui.input(|i| i.key_pressed(key)) {
+                        picked = Some(p.at);
+                    }
+                }
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    close = true;
+                }
+            });
+        if r.should_close() {
+            close = true;
+        }
+        if let Some(at) = picked {
+            actions.push(Action::SnoozeUntil(at, whole));
+            self.snoozer = None;
+        } else if close {
+            self.snoozer = None;
+        }
     }
 
     fn move_picker(&mut self, ctx: &egui::Context, current: Option<&Message>, actions: &mut Vec<Action>) {

@@ -56,6 +56,14 @@ pub fn when(ts: i64, now: i64) -> String {
     }
 }
 
+pub fn wake(ts: i64) -> String {
+    use chrono::TimeZone;
+    match chrono::Local.timestamp_opt(ts, 0).single() {
+        Some(t) => format!("wakes {}", t.format("%a %-d %b %H:%M")),
+        None => "snoozed".into(),
+    }
+}
+
 pub fn sent(ts: i64) -> String {
     let day = ts.div_euclid(86_400);
     let secs = ts.rem_euclid(86_400);
