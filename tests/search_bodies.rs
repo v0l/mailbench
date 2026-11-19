@@ -112,3 +112,27 @@ fn the_server_fills_in_bodies_that_are_not_local_yet() {
     assert_eq!(real.list(&q, 0, 10).items[0].subject, "Remote subject");
     until("search settles", || !real.searching(&q));
 }
+
+#[test]
+fn search_reaches_user_folders_and_the_server_there() {
+    if !common::greenmail() {
+        return;
+    }
+    let name = user("uf");
+    block_on(imap(&name).create_folder("Receipts")).unwrap();
+    let raw = b"From: shop@example.test\r\nTo: x@localhost\r\nSubject: Order\r\nDate: Mon, 13 Nov 2023 10:00:00 +0000\r\n\r\nyour sprocket shipped\r\n";
+    block_on(imap(&name).append("Receipts", raw)).unwrap();
+    let (_dir, store) = fresh_store();
+    let real = RealStore::open(store, vec![setup(&name)]);
+    let folder = ms::Folder::Other(0, "Receipts".into());
+    let q = Query { text: "sprocket".into(), ..Query::new(folder.clone()) };
+    until("user folder synced", || real.counts(&Query::new(folder.clone())).all == 1);
+    until("server hit in user folder", || real.list(&q, 0, 10).total == 1);
+    real.set_backfill("acct", BackfillPolicy::on());
+    until("local hit in user folder", || {
+        let page = real.list(&q, 0, 10);
+        page.total == 1 && !page.items[0].remote
+    });
+    let elsewhere = Query { text: "sprocket".into(), ..Query::new(ms::Folder::Inbox) };
+    assert_eq!(real.list(&elsewhere, 0, 10).total, 0);
+}

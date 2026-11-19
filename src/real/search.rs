@@ -45,6 +45,13 @@ impl View {
     }
 }
 
+pub(super) fn scope<'a>(c: &'a super::Cache, q: &Query, v: &View) -> Box<dyn Iterator<Item = &'a Entry> + 'a> {
+    if v.parsed.folder.is_some() {
+        return Box::new(c.entries.iter());
+    }
+    Box::new(c.by_folder.get(&q.folder).into_iter().flatten().map(|i| &c.entries[*i]))
+}
+
 pub(super) fn matches_row(c: &super::Cache, e: &Entry, q: &Query, v: &View) -> bool {
     if !e.head {
         return false;
@@ -70,7 +77,7 @@ pub(super) fn matches(e: &Entry, q: &Query, v: &View) -> bool {
     let p = &v.parsed;
     match &p.folder {
         Some(f) => {
-            if e.folder.name() != f && e.server_folder.to_lowercase() != *f {
+            if e.folder.name().to_lowercase() != *f && e.server_folder.to_lowercase() != *f {
                 return false;
             }
         }
@@ -240,9 +247,9 @@ fn ask_servers(shared: &Arc<Shared>, text: &str, parsed: &Parsed, folders_hit: &
     for (index, account) in shared.accounts.iter().enumerate() {
         let folders = shared.folders_of(&account.id);
         for folder in folders.iter().filter(|f| f.selectable) {
-            let Some(ui) = ui_folder(folder) else { continue };
+            let ui = ui_folder(folder).unwrap_or_else(|| crate::mailstore::Folder::Other(index, folder.name.clone()));
             if let Some(wanted) = &parsed.folder {
-                if ui.name() != wanted && folder.name.to_lowercase() != *wanted {
+                if ui.name().to_lowercase() != *wanted && folder.name.to_lowercase() != *wanted {
                     continue;
                 }
             }

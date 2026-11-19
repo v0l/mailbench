@@ -735,6 +735,10 @@ pub struct RealStore {
 }
 
 
+fn summary(e: &Entry, now: i64) -> Summary {
+    summary_from(e, now, false)
+}
+
 fn summary_from(e: &Entry, now: i64, remote: bool) -> Summary {
     Summary {
         remote,
@@ -924,7 +928,7 @@ impl MailStore for RealStore {
             }
             let base = Query { filter: Filter::All, ..query.clone() };
             let mut out = Counts::default();
-            for e in c.by_folder.get(&query.folder).into_iter().flatten().map(|i| &c.entries[*i]).filter(|e| search::matches_row(c, e, &base, &view)) {
+            for e in search::scope(c, &base, &view).filter(|e| search::matches_row(c, e, &base, &view)) {
                 out.all += 1;
                 out.unread += e.thread_unread as usize;
                 out.flagged += e.thread_flagged as usize;
@@ -937,16 +941,16 @@ impl MailStore for RealStore {
         let now = now();
         let view = self.shared.search_view(query);
         self.shared.with_cache(|c| {
-            let Some(index) = c.by_folder.get(&query.folder) else {
-                return Page { offset, total: 0, items: Vec::new() };
-            };
             if view.is_plain() && query.filter == Filter::All {
+                let Some(index) = c.by_folder.get(&query.folder) else {
+                    return Page { offset, total: 0, items: Vec::new() };
+                };
                 let items = index.iter().skip(offset).take(limit).map(|i| row(&c.entries[*i], now, false)).collect();
                 return Page { offset, total: index.len(), items };
             }
             let mut total = 0;
             let mut items = Vec::new();
-            for e in index.iter().map(|i| &c.entries[*i]).filter(|e| search::matches_row(c, e, query, &view)) {
+            for e in search::scope(c, query, &view).filter(|e| search::matches_row(c, e, query, &view)) {
                 if total >= offset && items.len() < limit {
                     items.push(row(e, now, view.is_remote(e.id)));
                 }
