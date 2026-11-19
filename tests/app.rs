@@ -281,3 +281,74 @@ fn enter_expands_the_focused_older_message_in_the_reader() {
     assert_eq!(h.state().1.expanded, Some(thread[0].summary.id));
     h.get_by_label_contains("Hi Mara, the Rev C Gerbers passed");
 }
+
+fn picker_to(path: PathBuf) -> mailbench::app::SavePicker {
+    Box::new(move |_, _| Some(path.clone()))
+}
+
+#[test]
+fn save_as_writes_the_attachment_bytes_to_the_chosen_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("out.pdf");
+    let mut h = harness(FakeStore::concept());
+    h.state_mut().1.save_picker = picker_to(target.clone());
+    h.get_by_label_contains("stencil-quote-revc.pdf").click();
+    h.run();
+    h.get_by_label("save as").click();
+    h.run();
+    assert_eq!(std::fs::read(&target).unwrap(), b"fake content of stencil-quote-revc.pdf");
+}
+
+#[test]
+fn shift_s_saves_every_attachment_as_a_zip() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("all.zip");
+    let mut h = harness(FakeStore::concept());
+    h.state_mut().1.save_picker = picker_to(target.clone());
+    h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::S);
+    h.run();
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(&target).unwrap()).unwrap();
+    assert_eq!(zip.len(), 2);
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("revc-paste-layer.zip").unwrap(), &mut text).unwrap();
+    assert_eq!(text, "fake content of revc-paste-layer.zip");
+}
+
+#[test]
+fn o_writes_a_private_copy_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let open_dir = dir.path().join("open");
+    let opened = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut h = harness(FakeStore::concept());
+    {
+        let app = &mut h.state_mut().1;
+        app.open_dir = open_dir.clone();
+        let sink = opened.clone();
+        app.opener = Box::new(move |p| {
+            sink.lock().unwrap().push(p.to_path_buf());
+            true
+        });
+    }
+    h.key_press(egui::Key::O);
+    h.run();
+    let paths = opened.lock().unwrap().clone();
+    assert_eq!(paths.len(), 1);
+    assert_eq!(std::fs::read(&paths[0]).unwrap(), b"fake content of stencil-quote-revc.pdf");
+    assert!(h.state().1.notice.as_ref().unwrap().contains("plain copy"));
+}
+
+#[test]
+fn open_disabled_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let open_dir = dir.path().join("open");
+    let mut h = harness(FakeStore::concept());
+    {
+        let app = &mut h.state_mut().1;
+        app.open_dir = open_dir.clone();
+        app.allow_open = false;
+    }
+    h.key_press(egui::Key::O);
+    h.run();
+    assert!(!open_dir.exists());
+    assert!(h.state().1.notice.as_ref().unwrap().contains("turned off"));
+}

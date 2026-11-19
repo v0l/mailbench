@@ -110,6 +110,14 @@ pub struct Page {
 pub struct AttachmentInfo {
     pub name: String,
     pub size: String,
+    pub mime: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct AttachmentData {
+    pub name: String,
+    pub mime: String,
+    pub data: std::sync::Arc<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -223,4 +231,7 @@ pub trait MailStore {
     fn set_flags(&mut self, id: MessageId, change: FlagChange) -> Result<(), StoreError>;
     fn move_to(&mut self, id: MessageId, folder: Folder) -> Result<(), StoreError>;
     fn append(&mut self, folder: Folder, message: Outgoing) -> Result<MessageId, StoreError>;
+    fn attachments(&self, _id: MessageId) -> Result<Vec<AttachmentData>, StoreError> {
+        Ok(Vec::new())
+    }
 }

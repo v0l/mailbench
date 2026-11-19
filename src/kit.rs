@@ -243,6 +243,8 @@ pub fn attachment(ui: &mut Ui, name: &str, size: &str) -> egui::Response {
     let s = ui.fonts_mut(|f| f.layout_no_wrap(size.to_string(), figure(10.5), LEGEND));
     let w = 26.0 + g.size().x + 12.0 + s.size().x + 10.0;
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 26.0), Sense::click());
+    let label = format!("{name} {size}");
+    resp.widget_info(move || egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label.clone()));
     let p = ui.painter();
     p.rect_filled(rect, 2.0, if resp.hovered() { BAND } else { WELL });
     p.rect_stroke(rect, 2.0, Stroke::new(1.0, ETCH), egui::StrokeKind::Inside);

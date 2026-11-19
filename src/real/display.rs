@@ -1,6 +1,6 @@
 use crate::backend::Address;
 use crate::htmlview::HtmlBody;
-use crate::mailstore::AttachmentInfo;
+use crate::mailstore::{AttachmentData, AttachmentInfo};
 use mail_parser::{MessageParser, PartKind};
 use std::sync::Arc;
 
@@ -134,6 +134,25 @@ fn split_text(text: &str) -> (Vec<String>, Vec<String>) {
     (paragraphs, quoted)
 }
 
+fn mime_of(p: &mail_parser::MessagePart) -> String {
+    p.content_type()
+        .map(|c| format!("{}/{}", c.ctype(), c.subtype().unwrap_or("octet-stream")).to_ascii_lowercase())
+        .unwrap_or_else(|| "application/octet-stream".into())
+}
+
+pub fn extract_attachments(raw: &[u8]) -> Vec<AttachmentData> {
+    let Some(msg) = MessageParser::default().parse(raw) else { return Vec::new() };
+    let html = html_of(&msg);
+    msg.attachments()
+        .filter(|p| !is_inline_image(p, &html))
+        .map(|p| AttachmentData {
+            name: p.attachment_name().unwrap_or("attachment").to_string(),
+            mime: mime_of(&p),
+            data: Arc::new(p.decoded().into_owned()),
+        })
+        .collect()
+}
+
 pub fn parse_body(raw: &[u8]) -> Body {
     let Some(msg) = MessageParser::default().parse(raw) else {
         return Body::default();
@@ -152,6 +171,7 @@ pub fn parse_body(raw: &[u8]) -> Body {
             attachments.push(AttachmentInfo {
                 name: p.attachment_name().unwrap_or("attachment").to_string(),
                 size: size(p.decoded_len()),
+                mime: mime_of(&p),
             });
         }
     }
@@ -221,5 +241,49 @@ mod tests {
         assert_eq!(b.attachments[0].name, "q.pdf");
         assert_eq!(b.attachments[0].size, "5 B");
         assert!(has_attachments(raw));
+    }
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::*;
+
+    fn mail(part_headers: &str, body: &str) -> Vec<u8> {
+        format!(
+            "From: a@x.test\r\nSubject: s\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"b\"\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nhi\r\n--b\r\n{part_headers}\r\n\r\n{body}\r\n--b--\r\n"
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn base64_part_decodes_to_the_original_bytes() {
+        let raw = mail("Content-Type: application/pdf; name=\"q.pdf\"\r\nContent-Disposition: attachment; filename=\"q.pdf\"\r\nContent-Transfer-Encoding: base64", "SGVsbG8gd29ybGQ=");
+        let a = extract_attachments(&raw);
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].name, "q.pdf");
+        assert_eq!(a[0].mime, "application/pdf");
+        assert_eq!(a[0].data.as_slice(), b"Hello world");
+    }
+
+    #[test]
+    fn quoted_printable_part_decodes_to_the_original_bytes() {
+        let raw = mail("Content-Type: text/csv; name=\"d.csv\"\r\nContent-Disposition: attachment; filename=\"d.csv\"\r\nContent-Transfer-Encoding: quoted-printable", "caf=C3=A9,1=\r\n23");
+        let a = extract_attachments(&raw);
+        assert_eq!(a[0].data.as_slice(), "café,123".as_bytes());
+    }
+
+    #[test]
+    fn rfc2231_filename_is_decoded() {
+        let raw = mail("Content-Type: application/octet-stream\r\nContent-Disposition: attachment; filename*=UTF-8''r%C3%A9sum%C3%A9%20v2.txt\r\nContent-Transfer-Encoding: 7bit", "plain");
+        let a = extract_attachments(&raw);
+        assert_eq!(a[0].name, "résumé v2.txt");
+        assert_eq!(a[0].data.as_slice(), b"plain");
+        assert_eq!(parse_body(&raw).attachments[0].name, "résumé v2.txt");
+    }
+
+    #[test]
+    fn rfc2231_continuations_are_joined() {
+        let raw = mail("Content-Type: application/octet-stream\r\nContent-Disposition: attachment; filename*0*=UTF-8''long%20na; filename*1*=me.bin\r\nContent-Transfer-Encoding: 7bit", "x");
+        assert_eq!(extract_attachments(&raw)[0].name, "long name.bin");
     }
 }

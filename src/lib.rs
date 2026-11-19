@@ -1,5 +1,6 @@
 pub mod accounts;
 pub mod app;
+pub mod attach;
 pub mod autodetect;
 pub mod backend;
 pub mod data;

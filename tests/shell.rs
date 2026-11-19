@@ -415,7 +415,11 @@ fn removing_an_account_in_settings_deletes_its_synced_data() {
     h.state_mut().1.open_settings();
     h.run();
     h.run();
+    h.run();
+    h.run();
     h.get_by_label("remove").click();
+    h.run();
+    h.run();
     h.run();
     h.run();
     h.get_by_label_contains("deletes the mail synced from this account");
@@ -503,4 +507,15 @@ fn copy_has_no_em_or_en_dashes() {
         let text = std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(f)).unwrap();
         assert!(!text.contains('\u{2014}') && !text.contains('\u{2013}'), "{f}");
     }
+}
+
+#[test]
+fn starting_the_shell_wipes_leftover_open_copies() {
+    let d = dir();
+    let open_dir = d.path().join("open");
+    let leftover = mailbench::attach::write_private(&open_dir, "old.pdf", b"plain").unwrap();
+    assert!(leftover.exists());
+    let _shell = Shell::with_open_dir(d.path().to_path_buf(), Rc::new(MemKeychain::default()), env(FixtureNet::default()), Some(KdfParams::fast()), open_dir.clone());
+    assert!(!leftover.exists());
+    assert!(!open_dir.exists());
 }

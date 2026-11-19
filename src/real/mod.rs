@@ -857,6 +857,20 @@ impl MailStore for RealStore {
         })
     }
 
+    fn attachments(&self, id: MessageId) -> Result<Vec<AttachmentData>, StoreError> {
+        let e = self.entry(id)?;
+        if e.local.is_some() {
+            return Ok(Vec::new());
+        }
+        let raw = {
+            let store = self.shared.lock_store();
+            StoreSink::new(&store, &self.shared.accounts[e.account].id, true)
+                .body(&e.server_folder, e.uid)
+                .map_err(backend_err)?
+        };
+        Ok(raw.map(|r| display::extract_attachments(&r)).unwrap_or_default())
+    }
+
     fn set_flags(&mut self, id: MessageId, change: FlagChange) -> Result<(), StoreError> {
         let e = self.entry(id)?;
         if e.local.is_some() {

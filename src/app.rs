@@ -39,6 +39,23 @@ pub enum Action {
     GoTo(Folder),
     Expand(MessageId),
     One(Box<Action>),
+    OpenAttachment(usize),
+    SaveAttachment(usize),
+    SaveAllAttachments,
+    ViewImage(usize),
+    CloseViewer,
+}
+
+pub type SavePicker = Box<dyn FnMut(&str, &str) -> Option<std::path::PathBuf>>;
+
+fn rfd_picker() -> SavePicker {
+    Box::new(|name, ext| {
+        let mut dialog = rfd::FileDialog::new().set_file_name(name);
+        if !ext.is_empty() {
+            dialog = dialog.add_filter(ext, &[ext]);
+        }
+        dialog.save_file()
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -144,6 +161,12 @@ pub struct App {
     pub expanded: Option<MessageId>,
     pub thread_focus: Option<MessageId>,
     pub settings_requested: bool,
+    pub allow_open: bool,
+    pub open_dir: std::path::PathBuf,
+    pub save_picker: SavePicker,
+    pub opener: Box<dyn FnMut(&std::path::Path) -> bool>,
+    previews: Option<(MessageId, Vec<Option<egui::TextureHandle>>)>,
+    pub viewing: Option<usize>,
     html: crate::htmlview::Renderer,
 }
 
@@ -176,6 +199,12 @@ impl App {
             expanded: None,
             thread_focus: None,
             settings_requested: false,
+            allow_open: true,
+            open_dir: crate::attach::default_open_dir(),
+            save_picker: rfd_picker(),
+            opener: Box::new(|p| open::that(p).is_ok()),
+            previews: None,
+            viewing: None,
             html: crate::htmlview::Renderer::default(),
         }
     }
@@ -265,9 +294,18 @@ impl App {
             return out;
         }
         for (key, action) in table {
+            if key == K::S && !plain {
+                continue;
+            }
             if Self::pressed(ctx, key) {
                 out.push(action);
             }
+        }
+        if plain && Self::pressed(ctx, K::O) {
+            out.push(Action::OpenAttachment(0));
+        }
+        if !plain && Self::pressed(ctx, K::S) {
+            out.push(Action::SaveAllAttachments);
         }
         if plain && Self::pressed(ctx, K::Num3) && ctx.input(|i| i.modifiers.shift) {
             out.push(Action::Trash);
@@ -403,8 +441,129 @@ impl App {
                     }
                 }
                 Action::GoTo(f) => self.go_folder(f),
+                Action::OpenAttachment(i) => self.open_attachment(&v, i),
+                Action::SaveAttachment(i) => self.save_attachment(&v, i),
+                Action::SaveAllAttachments => self.save_all(&v),
+                Action::ViewImage(i) => self.viewing = Some(i),
+                Action::CloseViewer => self.viewing = None,
             }
             ctx.request_repaint();
+        }
+    }
+
+    fn attachment_data(&mut self, v: &View) -> Option<Vec<AttachmentData>> {
+        let m = v.current.as_ref()?;
+        if m.attachments.is_empty() {
+            return None;
+        }
+        match self.store.attachments(m.summary.id) {
+            Ok(items) if !items.is_empty() => Some(items),
+            Ok(_) => None,
+            Err(e) => {
+                self.notice = Some(format!("Could not read the attachment: {e:?}"));
+                None
+            }
+        }
+    }
+
+    fn save_attachment(&mut self, v: &View, index: usize) {
+        let Some(items) = self.attachment_data(v) else { return };
+        let Some(item) = items.get(index) else { return };
+        let name = crate::attach::safe_name(&item.name, "attachment");
+        let ext = name.rsplit_once('.').map(|(_, e)| e.to_string()).unwrap_or_default();
+        let Some(path) = (self.save_picker)(&name, &ext) else { return };
+        self.notice = Some(match std::fs::write(&path, item.data.as_slice()) {
+            Ok(()) => format!("Saved {}", path.display()),
+            Err(e) => format!("Could not save: {e}"),
+        });
+    }
+
+    fn save_all(&mut self, v: &View) {
+        let Some(items) = self.attachment_data(v) else { return };
+        let Some(path) = (self.save_picker)("attachments.zip", "zip") else { return };
+        self.notice = Some(match crate::attach::zip_all(&items).and_then(|bytes| std::fs::write(&path, bytes)) {
+            Ok(()) => format!("Saved {} attachments to {}", items.len(), path.display()),
+            Err(e) => format!("Could not save: {e}"),
+        });
+    }
+
+    fn open_attachment(&mut self, v: &View, index: usize) {
+        if !self.allow_open {
+            if v.current.as_ref().is_some_and(|m| !m.attachments.is_empty()) {
+                self.notice = Some("Opening attachments is turned off in settings. Use save as instead.".into());
+            }
+            return;
+        }
+        let Some(items) = self.attachment_data(v) else { return };
+        let Some(item) = items.get(index) else { return };
+        self.notice = Some(match crate::attach::write_private(&self.open_dir, &item.name, &item.data) {
+            Ok(path) => {
+                if (self.opener)(&path) {
+                    format!("Opened a plain copy of {} at {}. It is deleted when mailbench closes.", item.name, path.display())
+                } else {
+                    format!("No program could open {}. A plain copy is at {} until mailbench closes.", item.name, path.display())
+                }
+            }
+            Err(e) => format!("Could not write the copy: {e}"),
+        });
+    }
+
+    fn sync_previews(&mut self, ctx: &egui::Context, m: &Message) {
+        if self.previews.as_ref().is_some_and(|(id, _)| *id == m.summary.id) {
+            return;
+        }
+        self.viewing = None;
+        if !m.attachments.iter().any(|a| crate::attach::is_previewable_image(&a.mime)) {
+            self.previews = Some((m.summary.id, Vec::new()));
+            return;
+        }
+        let data = self.store.attachments(m.summary.id).unwrap_or_default();
+        let textures = data
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                if !crate::attach::is_previewable_image(&d.mime) {
+                    return None;
+                }
+                let image = crate::attach::decode_image(&d.data)?;
+                Some(ctx.load_texture(format!("attachment-{}-{i}", m.summary.id.0), image, egui::TextureOptions::LINEAR))
+            })
+            .collect();
+        self.previews = Some((m.summary.id, textures));
+    }
+
+    fn preview_texture(&self, index: usize) -> Option<&egui::TextureHandle> {
+        self.previews.as_ref()?.1.get(index)?.as_ref()
+    }
+
+    fn previews_ui(&self, ui: &mut Ui, actions: &mut Vec<Action>) {
+        let Some((_, textures)) = &self.previews else { return };
+        for (i, t) in textures.iter().enumerate() {
+            let Some(t) = t else { continue };
+            let size = t.size_vec2();
+            let scale = (360.0 / size.x).min(240.0 / size.y).min(1.0);
+            let resp = ui.add(egui::Image::new(t).fit_to_exact_size(size * scale).sense(egui::Sense::click()));
+            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                actions.push(Action::ViewImage(i));
+            }
+        }
+    }
+
+    fn viewer(&self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        let Some(i) = self.viewing else { return };
+        let Some(t) = self.preview_texture(i) else { return };
+        let r = egui::Modal::new(egui::Id::new("image-viewer"))
+            .backdrop_color(egui::Color32::from_black_alpha(200))
+            .show(ctx, |ui| {
+                egui::ScrollArea::both().max_height(ctx.content_rect().height() * 0.8).max_width(ctx.content_rect().width() * 0.8).show(ui, |ui| {
+                    ui.add(egui::Image::new(t).fit_to_original_size(1.0));
+                });
+                if ui.add(Key::new("close").outline(VALUE)).clicked() {
+                    actions.push(Action::CloseViewer);
+                }
+            });
+        if r.should_close() {
+            actions.push(Action::CloseViewer);
         }
     }
 
@@ -443,6 +602,7 @@ impl App {
             });
         });
         self.composer(&ctx, &accounts);
+        self.viewer(&ctx, &mut actions);
         self.apply(&ctx, actions);
     }
 
@@ -503,6 +663,8 @@ impl App {
                     ("x", "flag"),
                     ("/", "search"),
                     ("c", "compose"),
+                    ("o", "open file"),
+                    ("S", "save files"),
                     ("Esc", "back"),
                 ],
                 Some((text, tint)),
@@ -693,6 +855,7 @@ impl App {
             return;
         };
         let account = accounts.get(m.summary.account).map(|a| a.name.as_str()).unwrap_or("");
+        self.sync_previews(&ui.ctx().clone(), m);
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.set_max_width(ui.available_width().min(if m.html.is_empty() { MEASURE + 44.0 } else { 820.0 }));
             ui.spacing_mut().item_spacing.y = 8.0;
@@ -769,9 +932,24 @@ impl App {
                 }
             }
             ui.add_space(6.0);
+            self.previews_ui(ui, actions);
             ui.horizontal_wrapped(|ui| {
-                for a in &m.attachments {
-                    attachment(ui, &a.name, &a.size);
+                for (i, a) in m.attachments.iter().enumerate() {
+                    let chip = attachment(ui, &a.name, &a.size);
+                    egui::Popup::menu(&chip).show(|ui| {
+                        ui.set_min_width(120.0);
+                        if self.allow_open && ui.add(Key::new("open").outline(VALUE).id_salt(("open", i)).min_width(ui.available_width())).clicked() {
+                            actions.push(Action::OpenAttachment(i));
+                            ui.close();
+                        }
+                        if ui.add(Key::new("save as").outline(VALUE).id_salt(("save", i)).min_width(ui.available_width())).clicked() {
+                            actions.push(Action::SaveAttachment(i));
+                            ui.close();
+                        }
+                    });
+                }
+                if m.attachments.len() > 1 && ui.add(Key::new("save all").outline(VALUE)).clicked() {
+                    actions.push(Action::SaveAllAttachments);
                 }
             });
             for t in v.thread.iter().skip(shown_at + 1) {

@@ -28,9 +28,9 @@ fn concept_message(id: u64, i: usize, m: &crate::data::Msg, suffix: &str) -> Mes
     let quoted_lines = if first { THREAD[2].quoted_lines as usize } else { (m.count as usize - 1) * 3 };
     let quoted = (0..quoted_lines).map(|n| format!("> earlier line {}", n + 1)).collect();
     let attachments = if first {
-        ATTACHMENTS.iter().map(|(n, s)| AttachmentInfo { name: n.to_string(), size: s.to_string() }).collect()
+        ATTACHMENTS.iter().map(|(n, s)| AttachmentInfo { name: n.to_string(), size: s.to_string(), mime: mime_of(n) }).collect()
     } else if m.attach {
-        vec![AttachmentInfo { name: "attachment.pdf".into(), size: "120 KB".into() }]
+        vec![AttachmentInfo { name: "attachment.pdf".into(), size: "120 KB".into(), mime: "application/pdf".into() }]
     } else {
         Vec::new()
     };
@@ -59,6 +59,14 @@ fn concept_message(id: u64, i: usize, m: &crate::data::Msg, suffix: &str) -> Mes
         remote_images: if first { Some(BLOCKED_HOST.to_string()) } else { None },
         headers: if first { sample_headers() } else { Default::default() },
         body_state: Default::default(),
+    }
+}
+
+fn mime_of(name: &str) -> String {
+    match name.rsplit_once('.').map(|(_, e)| e) {
+        Some("pdf") => "application/pdf".into(),
+        Some("zip") => "application/zip".into(),
+        _ => "application/octet-stream".into(),
     }
 }
 
@@ -287,6 +295,18 @@ impl MailStore for FakeStore {
     fn move_to(&mut self, id: MessageId, folder: Folder) -> Result<(), StoreError> {
         self.find(id)?.folder = folder;
         Ok(())
+    }
+
+    fn attachments(&self, id: MessageId) -> Result<Vec<AttachmentData>, StoreError> {
+        let m = self.messages.iter().find(|m| m.summary.id == id).ok_or(StoreError::NotFound)?;
+        Ok(m.attachments
+            .iter()
+            .map(|a| AttachmentData {
+                name: a.name.clone(),
+                mime: a.mime.clone(),
+                data: std::sync::Arc::new(format!("fake content of {}", a.name).into_bytes()),
+            })
+            .collect())
     }
 
     fn append(&mut self, folder: Folder, message: Outgoing) -> Result<MessageId, StoreError> {

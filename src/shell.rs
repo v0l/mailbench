@@ -691,6 +691,7 @@ pub struct SettingsForm {
     pub message: Option<(bool, String)>,
     retest: Option<(String, TestRun)>,
     methods: UnlockMethods,
+    pub allow_open: bool,
 }
 
 pub enum SettingsEvent {
@@ -698,6 +699,7 @@ pub enum SettingsEvent {
     Close,
     Rebuild,
     AddAccount,
+    AllowOpen,
 }
 
 fn methods_of(store: &Store) -> UnlockMethods {
@@ -716,6 +718,7 @@ impl SettingsForm {
             message: None,
             retest: None,
             methods: methods_of(store),
+            allow_open: allow_open_setting(store),
         }
     }
 
@@ -790,6 +793,7 @@ impl SettingsForm {
         let mut drop_keychain = false;
         let mut drop_password = false;
         let mut set_password = false;
+        let mut allow_open_changed = false;
         let m = egui::Modal::new(egui::Id::new("settings"))
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .show(ctx, |ui| {
@@ -872,6 +876,14 @@ impl SettingsForm {
                                 status(ui, *ok, text);
                             }
                         });
+                        ui.add_space(8.0);
+                        section(ui, "attachments", "what happens when you open a file", |ui| {
+                            if ui.checkbox(&mut self.allow_open, "allow open (writes a plain copy to a temp folder)").changed() {
+                                let _ = store.put(SETTINGS_KIND, ALLOW_OPEN_KEY, if self.allow_open { b"1" } else { b"0" });
+                                allow_open_changed = true;
+                            }
+                            hint(ui, "Save as always works. Copies made by open are deleted when mailbench closes and on the next start.");
+                        });
                     });
                 form_footer(ui, |ui| {
                     if ui.add(Key::new("apply").solid(READOUT).min_width(100.0)).clicked() {
@@ -882,6 +894,9 @@ impl SettingsForm {
                     }
                 });
             });
+        if allow_open_changed {
+            event = SettingsEvent::AllowOpen;
+        }
         if let Some(i) = remove {
             self.removing = Some(i);
         }
@@ -961,6 +976,14 @@ pub struct Shell {
     screen: Screen,
     store: Option<Store>,
     settings: Option<SettingsForm>,
+    open_dir: PathBuf,
+}
+
+pub const SETTINGS_KIND: &str = "settings";
+pub const ALLOW_OPEN_KEY: &str = "attachments.allow_open";
+
+pub fn allow_open_setting(store: &Store) -> bool {
+    store.get(SETTINGS_KIND, ALLOW_OPEN_KEY).ok().flatten().map(|v| v.as_slice() != b"0").unwrap_or(true)
 }
 
 pub fn default_data_dir() -> PathBuf {
@@ -981,9 +1004,28 @@ impl Shell {
             screen: Screen::First(FirstForm::new(true)),
             store: None,
             settings: None,
+            open_dir: crate::attach::default_open_dir(),
         };
+        crate::attach::wipe_open_dir(&shell.open_dir);
         shell.start();
         shell
+    }
+
+    pub fn with_open_dir(dir: PathBuf, keychain: Rc<dyn Keychain>, env: Env, kdf: Option<KdfParams>, open_dir: PathBuf) -> Shell {
+        crate::attach::wipe_open_dir(&open_dir);
+        let mut shell = Shell::new(dir, keychain, env, kdf);
+        shell.open_dir = open_dir;
+        shell.apply_open_settings();
+        shell
+    }
+
+    fn apply_open_settings(&mut self) {
+        let allow = self.store.as_ref().map(allow_open_setting).unwrap_or(true);
+        let dir = self.open_dir.clone();
+        if let Screen::Main(m) = &mut self.screen {
+            m.app.allow_open = allow;
+            m.app.open_dir = dir;
+        }
     }
 
     fn db_path(&self) -> PathBuf {
@@ -1042,6 +1084,7 @@ impl Shell {
         let setups: Vec<_> = configs.iter().filter_map(|c| accounts::setup_for(c, store).ok()).collect();
         let Ok(clone) = store.try_clone() else { return };
         self.screen = Screen::Main(Box::new(Main { app: App::with_store(Box::new(RealStore::open(clone, setups))) }));
+        self.apply_open_settings();
         self.attach();
     }
 
@@ -1235,6 +1278,7 @@ impl Shell {
         match form.show(ctx, store, &*self.keychain, kdf) {
             SettingsEvent::None => {}
             SettingsEvent::Close => self.settings = None,
+            SettingsEvent::AllowOpen => self.apply_open_settings(),
             SettingsEvent::Rebuild => {
                 self.build_main();
                 if matches!(self.screen, Screen::Add(..)) {
@@ -1250,6 +1294,12 @@ impl Shell {
                 self.screen = Screen::Add(Box::new(AddForm::new(false)), back);
             }
         }
+    }
+}
+
+impl Drop for Shell {
+    fn drop(&mut self) {
+        crate::attach::wipe_open_dir(&self.open_dir);
     }
 }
 
