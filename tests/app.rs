@@ -764,7 +764,7 @@ fn rebound_archive_key_archives_and_the_hint_bar_shows_it() {
     let mut h = harness(FakeStore::concept());
     h.state_mut().1.prefs.keys.set("archive", egui::Key::B).unwrap();
     h.run();
-    h.get_by_label_contains("archive");
+    assert!(h.state().1.prefs.keys.hint_items().iter().any(|(k, a)| k == "b" && a == "archive"));
     let first = inbox_ids(&h.state().1)[0];
     h.key_press(egui::Key::E);
     h.run();
