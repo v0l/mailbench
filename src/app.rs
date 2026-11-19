@@ -1109,7 +1109,7 @@ impl App {
             return;
         }
         self.viewing = None;
-        if !m.attachments.iter().any(|a| crate::attach::is_previewable_image(&a.mime)) {
+        if !m.attachments.iter().any(|a| crate::attach::is_previewable(&a.mime, &a.name)) {
             self.previews = Some((m.summary.id, Vec::new()));
             return;
         }
@@ -1118,10 +1118,7 @@ impl App {
             .iter()
             .enumerate()
             .map(|(i, d)| {
-                if !crate::attach::is_previewable_image(&d.mime) {
-                    return None;
-                }
-                let image = crate::attach::decode_image(&d.data)?;
+                let image = crate::attach::preview_image(&d.mime, &d.name, &d.data)?;
                 Some(ctx.load_texture(format!("attachment-{}-{i}", m.summary.id.0), image, egui::TextureOptions::LINEAR))
             })
             .collect();

@@ -57,6 +57,47 @@ pub fn decode_image(data: &[u8]) -> Option<egui::ColorImage> {
     Some(egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()))
 }
 
+pub fn is_previewable(mime: &str, name: &str) -> bool {
+    is_previewable_image(mime) || is_pdf(mime, name)
+}
+
+pub fn preview_image(mime: &str, name: &str, data: &[u8]) -> Option<egui::ColorImage> {
+    if is_previewable_image(mime) {
+        decode_image(data)
+    } else if is_pdf(mime, name) {
+        render_pdf_first_page(data, 720.0)
+    } else {
+        None
+    }
+}
+
+pub fn is_pdf(mime: &str, name: &str) -> bool {
+    mime.eq_ignore_ascii_case("application/pdf") || name.to_ascii_lowercase().ends_with(".pdf")
+}
+
+pub fn render_pdf_first_page(data: &[u8], target_width: f32) -> Option<egui::ColorImage> {
+    use hayro::hayro_interpret::InterpreterSettings;
+    use hayro::hayro_syntax::Pdf;
+    use hayro::vello_cpu::color::palette::css::WHITE;
+    use hayro::{PixmapSettings, RenderCache, RenderSettings, render};
+    let pdf = Pdf::new(data.to_vec()).ok()?;
+    let pages = pdf.pages();
+    let page = pages.first()?;
+    let (width, height) = page.render_dimensions();
+    if width < 1.0 || height < 1.0 {
+        return None;
+    }
+    let scale = (target_width / width).clamp(0.05, 4.0);
+    let pixmap = render(
+        page,
+        &RenderCache::new(),
+        &InterpreterSettings::default(),
+        &RenderSettings::default(),
+        &PixmapSettings { x_scale: scale, y_scale: scale, bg_color: WHITE },
+    );
+    decode_image(&pixmap.into_png().ok()?)
+}
+
 fn create_private_dir(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -102,6 +143,25 @@ pub fn write_private(dir: &Path, name: &str, data: &[u8]) -> std::io::Result<Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TINY_PDF: &str = "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]/Contents 4 0 R/Resources<<>>>>endobj\n4 0 obj<</Length 30>>stream\n1 0 0 rg 0 0 100 100 re f\nendstream\nendobj\ntrailer<</Root 1 0 R/Size 5>>\n";
+
+    #[test]
+    fn renders_pdf_first_page() {
+        let img = render_pdf_first_page(TINY_PDF.as_bytes(), 100.0).unwrap();
+        assert_eq!(img.size, [100, 50]);
+        assert_eq!(img.pixels[0].r(), 255);
+        assert_eq!(img.pixels[0].g(), 0);
+        assert_eq!(img.pixels[99].g(), 255);
+        assert!(render_pdf_first_page(b"nope", 100.0).is_none());
+    }
+
+    #[test]
+    fn detects_pdf() {
+        assert!(is_pdf("application/PDF", "x"));
+        assert!(is_pdf("application/octet-stream", "A.PDF"));
+        assert!(!is_pdf("image/png", "a.png"));
+    }
     use std::sync::Arc;
 
     fn item(name: &str, data: &[u8]) -> AttachmentData {
