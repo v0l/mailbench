@@ -239,7 +239,7 @@ fn reading_preferences_persist() {
 #[test]
 fn theme_and_density_persist_and_apply() {
     let mut rig = boot();
-    rig.h.get_by_label_contains("density");
+    rig.h.get_by_label("density compact");
     {
         let f = rig.h.state_mut().1.settings_form().unwrap();
         f.panels.prefs.theme = prefs::Theme::Light;
