@@ -11,6 +11,7 @@ pub const KIND: &str = "account";
 pub enum Credential {
     Password(String),
     OAuth { provider: Provider, tokens: OAuthTokens },
+    Nostr { secret: String, #[serde(default)] relays: Vec<String> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +73,7 @@ pub fn auth_of(cfg: &AccountConfig) -> Auth {
         Credential::OAuth { tokens, .. } => {
             Auth::XOAuth2 { user: cfg.username.clone(), access_token: tokens.access_token.clone() }
         }
+        Credential::Nostr { secret, .. } => Auth::Password { user: cfg.username.clone(), password: secret.clone() },
     }
 }
 
@@ -185,8 +187,34 @@ impl Backend for Fresh {
     }
 }
 
+pub fn nostr_backend(cfg: &AccountConfig) -> Result<NostrBackend> {
+    match &cfg.credential {
+        Credential::Nostr { secret, relays } => NostrBackend::new(NostrConfig::new(secret, relays.clone())),
+        _ => Err(BackendError::Auth("not a nostr account".into())),
+    }
+}
+
+pub fn nostr_config(secret: &str, relays: Vec<String>) -> Result<AccountConfig> {
+    let backend = NostrBackend::new(NostrConfig::new(secret, relays.clone()))?;
+    let address = backend.address();
+    let none = ServerSettings::new("", 0, Security::Plain);
+    Ok(AccountConfig {
+        id: new_id(),
+        name: "nostr".into(),
+        display_name: String::new(),
+        signature: String::new(),
+        username: address.clone(),
+        address,
+        imap: none.clone(),
+        smtp: none,
+        credential: Credential::Nostr { secret: secret.trim().to_string(), relays },
+        backfill: Default::default(),
+    })
+}
+
 pub fn setup_for(cfg: &AccountConfig, store: &Store) -> Result<AccountSetup> {
     let backend: Box<dyn Backend> = match cfg.credential {
+        Credential::Nostr { .. } => Box::new(nostr_backend(cfg)?),
         Credential::Password(_) => Box::new(build_account(cfg)),
         Credential::OAuth { .. } => Box::new(Fresh { cfg: cfg.clone(), store_path: Some(store.try_clone()?), inner: None }),
     };
@@ -231,6 +259,14 @@ pub fn run_checks(cfg: &AccountConfig, mut report: impl FnMut(Step, std::result:
                 }
             }
         }
+    }
+    if matches!(cfg.credential, Credential::Nostr { .. }) {
+        let result = nostr_backend(&cfg).map_err(|e| e.to_string()).and_then(|mut b| crate::runtime::block_on(b.check()).map_err(|e| e.to_string()));
+        report(Step::Imap, result.clone());
+        if result.is_ok() {
+            report(Step::Smtp, Ok(()));
+        }
+        return;
     }
     let mut account = build_account(&cfg);
     let imap = crate::runtime::block_on(account.mail.check()).map_err(|e| e.to_string());
@@ -313,5 +349,15 @@ mod tests {
     fn connection_failure_points_to_server_settings() {
         let hint = fix_hint(&cfg("mail.example.com"), "connection failed: Connection refused", false);
         assert!(hint.contains("host, the port"), "{hint}");
+    }
+
+    #[test]
+    fn nostr_account_derives_its_address_and_round_trips() {
+        let cfg = nostr_config(&"0a".repeat(32), vec!["wss://relay.example".into()]).unwrap();
+        assert!(cfg.address.ends_with("@nostr"));
+        let back: AccountConfig = serde_json::from_slice(&serde_json::to_vec(&cfg).unwrap()).unwrap();
+        assert_eq!(back, cfg);
+        assert_eq!(nostr_backend(&back).unwrap().address(), cfg.address);
+        assert!(nostr_config("not a key", vec![]).is_err());
     }
 }

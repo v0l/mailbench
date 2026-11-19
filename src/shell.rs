@@ -365,6 +365,8 @@ pub struct AddForm {
     pub smtp_port: String,
     pub smtp_security: Security,
     pub edit: bool,
+    pub nostr: bool,
+    pub relays: String,
     pub provider: Option<Provider>,
     pub oauth: Option<(Provider, oauth::OAuthTokens)>,
     pub test: TestRun,
@@ -408,6 +410,8 @@ impl AddForm {
             smtp_port: "587".into(),
             smtp_security: Security::StartTls,
             edit: false,
+            nostr: false,
+            relays: String::new(),
             provider: None,
             oauth: None,
             test: TestRun::default(),
@@ -425,6 +429,15 @@ impl AddForm {
     }
 
     pub fn config(&self) -> Result<AccountConfig, String> {
+        if self.nostr {
+            if self.password.trim().is_empty() {
+                return Err("Enter your nsec".into());
+            }
+            let relays = self.relays.split([',', ' ', '\n']).map(str::trim).filter(|r| !r.is_empty()).map(String::from).collect();
+            let mut cfg = accounts::nostr_config(&self.password, relays).map_err(|_| "That is not a valid nsec".to_string())?;
+            cfg.id = self.id.clone();
+            return Ok(cfg);
+        }
         let email = self.email();
         if autodetect::split_address(&email).is_none() {
             return Err("Enter your email address".into());
@@ -581,6 +594,37 @@ impl AddForm {
         let mut sign_in = None;
         page(ui, |ui| {
             section(ui, "add account", "your address first, the rest is looked up", |ui| {
+                ui.checkbox(&mut self.nostr, "nostr account (NIP-17 private messages)");
+                if self.nostr {
+                    row(ui, "nsec", |ui| {
+                        secret(ui, &mut self.password);
+                    });
+                    row(ui, "relays", |ui| {
+                        ui.text_edit_singleline(&mut self.relays);
+                    });
+                    hint(ui, "Leave relays empty to use your kind 10050 list, then your NIP-65 relays, then the defaults.");
+                    let parsed = self.config();
+                    self.test.show(ui, parsed.as_ref().ok(), false);
+                    if let Some(e) = &self.saved_error {
+                        status(ui, false, e);
+                    }
+                    let tested = self.test.all_ok() && self.test.for_key == self.key();
+                    form_footer(ui, |ui| {
+                        let ok = parsed.is_ok();
+                        if ui.add(Key::new("save and sync").solid(READOUT).min_width(130.0).enabled(tested && ok)).clicked() {
+                            if let Ok(cfg) = &parsed {
+                                event = AddEvent::Save(cfg.clone());
+                            }
+                        }
+                        if ui.add(Key::new("test connection").outline(VALUE).min_width(130.0).enabled(ok && !self.test.running())).clicked() {
+                            run_test = true;
+                        }
+                        if !self.first && ui.add(Key::new("cancel").outline(VALUE).min_width(90.0)).clicked() {
+                            event = AddEvent::Cancel;
+                        }
+                    });
+                    return;
+                }
                 row(ui, "email", |ui| {
                     let r = field_then(ui, &mut self.email, "you@example.com", 110.0, |ui| {
                         detect = ui.add(Key::new("detect").outline(VALUE).min_width(90.0)).clicked();
