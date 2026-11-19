@@ -80,10 +80,9 @@ pub fn assign(inputs: &[Input<'_>], ids: &[u64]) -> Vec<u64> {
             continue;
         }
         let alone = sizes.get(&sets.find(i)).copied().unwrap_or(1) == 1;
-        if prefixed && alone {
-            if let Some((_, j)) = latest.get(&norm).filter(|(date, _)| inputs[i].date - date <= WINDOW) {
-                sets.union(i, *j);
-            }
+        let near = latest.get(&norm).filter(|(date, _)| inputs[i].date - date <= WINDOW);
+        if let (true, Some((_, j))) = (prefixed && alone, near) {
+            sets.union(i, *j);
         }
         latest.insert(norm, (inputs[i].date, i));
     }
