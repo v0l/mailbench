@@ -1237,7 +1237,7 @@ impl App {
             .show(ui, |ui| add(self, ui));
         let rect = shown.response.rect;
         let edge = Rect::from_x_y_ranges(rect.right() - 4.0..=rect.right() + 16.0, rect.y_range());
-        let reset = ui.interact(edge, ui.id().with(("divider-reset", name)), egui::Sense::click()).double_clicked();
+        let reset = ui.interact(edge, ui.scope_id().with(("divider-reset", name)), egui::Sense::click()).double_clicked();
         if reset {
             return DividerOutcome { width: default, epoch: epoch + 1 };
         }
