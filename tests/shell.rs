@@ -552,6 +552,7 @@ fn a_nostr_account_without_a_relay_list_is_asked_to_publish_one() {
             _ => panic!("not a nostr credential"),
         }
     });
+}
 
 struct ApproveAll;
 
@@ -600,8 +601,13 @@ fn add_form_pastes_a_bunker_url_connects_and_only_then_allows_saving() {
     }
     assert!(h.get_by_label("save and sync").accesskit_node().is_disabled());
     h.get_by_label("test connection").click();
-    until(&mut h, "test ok", |s| s.add_form().unwrap().test.all_ok());
+    until(&mut h, "test done", |s| !s.add_form().unwrap().test.running() && s.add_form().unwrap().test.all_ok());
+    h.run();
+    h.get_by_label_contains("Publish your DM relay list?");
+    assert!(h.get_by_label("save and sync").accesskit_node().is_disabled());
+    h.get_by_label("publish relay list").click();
+    h.run();
     assert!(!h.get_by_label("save and sync").accesskit_node().is_disabled());
     let cfg = h.state_mut().1.add_form().unwrap().config().unwrap();
-    assert!(matches!(cfg.credential, mailbench::accounts::Credential::NostrBunker { .. }));
+    assert!(matches!(cfg.credential, mailbench::accounts::Credential::NostrBunker { publish_inbox: true, .. }));
 }
