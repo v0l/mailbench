@@ -209,6 +209,7 @@ pub fn nostr_config(secret: &str, relays: Vec<String>) -> Result<AccountConfig> 
         smtp: none,
         credential: Credential::Nostr { secret: secret.trim().to_string(), relays },
         backfill: Default::default(),
+        notify: Default::default(),
     })
 }
 

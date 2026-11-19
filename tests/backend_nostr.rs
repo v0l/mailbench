@@ -121,3 +121,24 @@ async fn a_kind_15_file_opens_as_a_decrypted_attachment() {
     assert_eq!(attachments.len(), 1);
     assert_eq!(attachments[0].decoded().as_ref(), b"attached words");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dm_body_word_is_found_by_search_after_sync() {
+    use mailbench::store::{KdfParams, Store};
+    let relay = MockRelay::run().await.unwrap();
+    let url = relay.url().await.to_string();
+    let mut alice = backend(1, &url).await;
+    let mut bob = backend(2, &url).await;
+    let long = format!("{} the quarterly xylophone invoice", "padding ".repeat(20));
+    alice.send(&mail(&alice, &bob, "Plans", &long, None)).await.unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::create(&dir.path().join("mail.db"), None, Some(("pw", KdfParams::fast()))).unwrap();
+    let mut sink = StoreSink::new(&store, "nostr-acct", true);
+    let report = sync_account(&mut bob, &mut sink).await.unwrap();
+    assert_eq!(report.added, 1);
+    let hits = sink.search_hits("xylophone").unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].0, "Inbox");
+    assert!(sink.search_hits("nonexistentword").unwrap().is_empty());
+}
