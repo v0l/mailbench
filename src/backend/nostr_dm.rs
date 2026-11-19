@@ -214,10 +214,9 @@ impl Names {
 fn summary_of(dm: &Dm, me: &PublicKey, names: &Names) -> MessageSummary {
     let name = |k: &PublicKey| Address { name: names.get(k).flatten(), address: address_of(k) };
     let to: Vec<Address> = dm.to.iter().filter(|k| **k != dm.sender || dm.to.len() == 1).map(name).collect();
-    let _ = me;
     MessageSummary {
         uid: uid_of(&dm.id),
-        flags: Flags::default(),
+        flags: Flags { seen: dm.sender == *me, ..Default::default() },
         subject: Some(dm.display_subject()),
         from: vec![name(&dm.sender)],
         to,

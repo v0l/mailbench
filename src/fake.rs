@@ -132,6 +132,9 @@ impl FakeStore {
                 detail: None,
                 indexed: None,
                 signature: String::new(),
+                server_folders: true,
+                server_search: true,
+                server_flags: true,
             })
             .collect()
     }

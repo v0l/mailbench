@@ -54,6 +54,9 @@ pub struct AccountInfo {
     pub detail: Option<String>,
     pub indexed: Option<(usize, usize)>,
     pub signature: String,
+    pub server_folders: bool,
+    pub server_search: bool,
+    pub server_flags: bool,
 }
 
 #[derive(Clone, Debug)]

@@ -1296,7 +1296,10 @@ impl App {
                 if folded && node.children {
                     hidden_under = Some(node.depth);
                 }
-                self.tree_row(ui, node, folded, actions);
+                self.tree_row(ui, node, folded, info.server_folders, actions);
+            }
+            if !info.server_folders {
+                continue;
             }
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), egui::Sense::click());
             let p = ui.painter();
@@ -1311,7 +1314,7 @@ impl App {
         }
     }
 
-    fn tree_row(&self, ui: &mut Ui, node: &TreeFolder, folded: bool, actions: &mut Vec<Action>) {
+    fn tree_row(&self, ui: &mut Ui, node: &TreeFolder, folded: bool, editable: bool, actions: &mut Vec<Action>) {
         let on = node.folder == self.folder;
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), egui::Sense::click());
         let p = ui.painter();
@@ -1347,6 +1350,9 @@ impl App {
             }
         }
         let parent = node.path[..node.path.len() - node.leaf.len()].to_string();
+        if !editable {
+            return;
+        }
         resp.context_menu(|ui| {
             ui.set_min_width(140.0);
             let child_prefix = format!("{}{}", node.path, node.delimiter);
@@ -1874,6 +1880,7 @@ impl App {
                 let more = ui.add(Key::more());
                 egui::Popup::menu(&more).show(|ui| {
                     ui.set_min_width(140.0);
+                    let server_flags = accounts.get(m.summary.account).is_none_or(|a| a.server_flags);
                     let entries = [
                         ("mark unread", Action::ToggleUnread, VALUE),
                         ("flag", Action::ToggleFlag, VALUE),
@@ -1882,6 +1889,9 @@ impl App {
                         ("delete", Action::Trash, FAULT),
                     ];
                     for (label, action, tint) in entries {
+                        if label == "flag" && !server_flags {
+                            continue;
+                        }
                         if ui.add(Key::new(label).outline(tint).min_width(ui.available_width())).clicked() {
                             actions.push(Action::One(Box::new(action)));
                             ui.close();

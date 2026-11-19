@@ -250,6 +250,9 @@ fn run(shared: &Arc<Shared>, text: &str) {
 fn ask_servers(shared: &Arc<Shared>, text: &str, parsed: &Parsed, folders_hit: &HashSet<(usize, String)>) {
     let Some(server_query) = parsed.server_query() else { return };
     for (index, account) in shared.accounts.iter().enumerate() {
+        if !shared.caps_of(index).server_search {
+            continue;
+        }
         let folders = shared.folders_of(&account.id);
         for folder in folders.iter().filter(|f| f.selectable) {
             let ui = ui_folder(folder).unwrap_or_else(|| crate::mailstore::Folder::Other(index, folder.name.clone()));

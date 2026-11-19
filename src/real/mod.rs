@@ -27,6 +27,7 @@ const FETCH_RETRY: Duration = Duration::from_secs(5);
 const LOCAL: &str = "local";
 const ATTACH: &str = "attach";
 const CONTACT: &str = "contact";
+const LOCAL_MOVE: &str = "localmove";
 const DEFAULT_HOLD: Duration = Duration::from_secs(SEND_HOLD_SECS);
 
 pub struct AccountSetup {
@@ -296,6 +297,7 @@ pub(crate) struct Shared {
     contacts: Mutex<HashMap<String, ContactRecord>>,
     hold: Mutex<Duration>,
     signatures: Mutex<HashMap<String, String>>,
+    caps: Mutex<Vec<Option<Capabilities>>>,
     clock: Mutex<Arc<dyn Clock>>,
     prefs: Mutex<Vec<NotifyPrefs>>,
     batchers: Mutex<Vec<Batcher>>,
@@ -377,6 +379,14 @@ fn stable_id(key: &str) -> u64 {
 impl Shared {
     pub fn lock_store(&self) -> MutexGuard<'_, Store> {
         lock(&self.store)
+    }
+
+    pub fn caps_of(&self, index: usize) -> Capabilities {
+        lock(&self.caps).get(index).cloned().flatten().unwrap_or(Capabilities { server_folders: true, server_search: true, server_flags: true, ..Default::default() })
+    }
+
+    pub fn set_caps(&self, index: usize, caps: Capabilities) {
+        lock(&self.caps)[index] = Some(caps);
     }
 
     pub fn set_state(&self, index: usize, state: SyncState, detail: Option<String>) {
@@ -997,6 +1007,17 @@ impl Shared {
                     }
                 }
             }
+            {
+                let store = self.lock_store();
+                let prefix = format!("{}\0", account.id);
+                for key in store.list_prefix(LOCAL_MOVE, &prefix).unwrap_or_default() {
+                    let Some((folder, uid)) = key[prefix.len()..].split_once('\0') else { continue };
+                    let Ok(uid) = uid.parse::<u32>() else { continue };
+                    if let Some(to) = store.get(LOCAL_MOVE, &key).ok().flatten() {
+                        pending.insert((folder.to_string(), uid), String::from_utf8_lossy(&to).into_owned());
+                    }
+                }
+            }
             for (_, op) in &ops {
                 match op {
                     Op::FlagsSet { account: a, folder, uids, seen, flagged, .. } if *a == account.id => {
@@ -1297,6 +1318,7 @@ impl RealStore {
             contacts: Mutex::new(HashMap::new()),
             hold: Mutex::new(DEFAULT_HOLD),
             signatures: Mutex::new(HashMap::new()),
+            caps: Mutex::new(vec![None; accounts.len()]),
             clock: Mutex::new(Arc::new(SystemClock)),
             prefs: Mutex::new(vec![NotifyPrefs::default(); accounts.len()]),
             batchers: Mutex::new((0..accounts.len()).map(|_| Batcher::default()).collect()),
@@ -1456,6 +1478,9 @@ impl MailStore for RealStore {
                     detail: states[i].1.clone(),
                     indexed: lock(&self.shared.progress)[i],
                     signature: lock(&self.shared.signatures).get(&a.id).cloned().unwrap_or_default(),
+                    server_folders: self.shared.caps_of(i).server_folders,
+                    server_search: self.shared.caps_of(i).server_search,
+                    server_flags: self.shared.caps_of(i).server_flags,
                 })
                 .collect()
         })
@@ -1630,6 +1655,20 @@ impl MailStore for RealStore {
             return Ok(());
         }
         let account = self.shared.accounts[e.account].id.clone();
+        if !self.shared.caps_of(e.account).server_flags {
+            self.shared.apply_flags(&account, &e.server_folder, e.uid, seen, flagged);
+            self.shared.user_gen.fetch_add(1, Ordering::SeqCst);
+            self.shared.patch(e.id, |x| {
+                if let Some(s) = seen {
+                    x.unread = !s;
+                }
+                if let Some(f) = flagged {
+                    x.flagged = f;
+                }
+            });
+            self.shared.refresh();
+            return Ok(());
+        }
         let validity = self.shared.validity(&account, &e.server_folder).unwrap_or(e.validity);
         {
             let store = self.shared.lock_store();
@@ -1695,6 +1734,14 @@ impl MailStore for RealStore {
             ms::Folder::Other(_, name) => name.clone(),
             _ => server_folder(&folders, &folder).unwrap_or_else(|| default_name(&folder).to_string()),
         };
+        if !self.shared.caps_of(e.account).server_folders {
+            let key = format!("{account}\0{}\0{:010}", e.server_folder, e.uid);
+            self.shared.lock_store().put(LOCAL_MOVE, &key, to.as_bytes()).map_err(backend_err)?;
+            self.shared.user_gen.fetch_add(1, Ordering::SeqCst);
+            self.shared.patch(e.id, |x| x.folder = folder);
+            self.shared.refresh();
+            return Ok(());
+        }
         {
             let store = self.shared.lock_store();
             self.shared.enqueue(

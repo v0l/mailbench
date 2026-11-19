@@ -159,6 +159,9 @@ fn caps_of(raw: &async_imap::types::Capabilities) -> Capabilities {
         uidplus: raw.has_str("UIDPLUS"),
         gmail_ext: raw.has_str("X-GM-EXT-1"),
         send: false,
+        server_folders: true,
+        server_search: true,
+        server_flags: true,
     }
 }
 

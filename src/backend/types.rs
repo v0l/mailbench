@@ -30,6 +30,9 @@ pub struct Capabilities {
     pub uidplus: bool,
     pub gmail_ext: bool,
     pub send: bool,
+    pub server_folders: bool,
+    pub server_search: bool,
+    pub server_flags: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -400,6 +400,9 @@ pub(super) async fn run(
     let account = shared.accounts[index].id.clone();
     while !shared.stop.load(Ordering::Relaxed) {
         shared.set_state(index, SyncState::Syncing, None);
+        if let Ok(caps) = backend.capabilities().await {
+            shared.set_caps(index, caps);
+        }
         let result = cycle(&shared, index, &account, backend.as_mut()).await;
         shared.flush_notifications(index);
         if result.is_ok() {
