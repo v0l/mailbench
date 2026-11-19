@@ -1843,7 +1843,7 @@ impl App {
                     html: format!("<img src=\"{}\" width=\"48\" height=\"48\">", url.replace('"', "")),
                     inline: Vec::new(),
                 };
-                let _ = html_body(ui, &self.html, m.summary.id.0 ^ 0xA7A7, &avatar, true);
+                let _ = html_body(ui, &self.html, m.summary.id.0 ^ 0xA7A7, &avatar, true, &mut HtmlState::default());
             }
             ui.horizontal(|ui| {
                 chip(ui, account, LEGEND, false);

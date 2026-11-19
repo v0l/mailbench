@@ -345,7 +345,7 @@ pub fn html_body(
 
 fn paint_tiles(ui: &Ui, renderer: &crate::htmlview::Renderer, page: &std::sync::Arc<crate::htmlview::Rendered>, rect: Rect, ratio: f32) {
     let source = std::sync::Arc::as_ptr(page) as usize;
-    let cache_id = egui::Id::new("html-textures");
+    let cache_id = egui::Id::new(("html-textures", page.key.id));
     let mut cache = ui
         .ctx()
         .data(|d| d.get_temp::<HtmlTextures>(cache_id))

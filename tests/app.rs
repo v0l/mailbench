@@ -699,6 +699,7 @@ fn imap_style_accounts_show_the_new_folder_action() {
     let h = harness(FakeStore::concept());
     let name = h.state().1.store.accounts()[0].name.clone();
     h.get_by_label(&format!("new folder in {name}"));
+}
 
 fn html_harness(html: &str) -> Harness<'static, (bool, App)> {
     let mut store = FakeStore::concept();
