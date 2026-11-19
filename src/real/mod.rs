@@ -695,7 +695,7 @@ impl Shared {
         let mut guard = lock(&self.cache);
         let cache = Arc::make_mut(&mut guard);
         cache.entries.retain(|e| e.id != id);
-        cache.by_id = cache.entries.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
+        cache.index();
     }
 
     fn local_outgoing(&self, local: &str, index: usize) -> Option<Outgoing> {
