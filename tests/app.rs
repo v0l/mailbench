@@ -3,6 +3,7 @@ use egui_kittest::kittest::Queryable;
 use mailbench::app::App;
 use mailbench::fake::FakeStore;
 use mailbench::mailstore::*;
+use mailbench::search::Parsed;
 use std::path::PathBuf;
 
 fn harness(store: FakeStore) -> Harness<'static, (bool, App)> {
@@ -667,4 +668,28 @@ fn snoozing_marked_rows_uses_the_picker_and_moves_them_together() {
     h.run();
     assert_eq!(h.state().1.store.counts(&Query::new(Folder::Snoozed)).all, 3);
     assert_eq!(h.state().1.store.counts(&Query::new(Folder::Inbox)).all, 27);
+}
+
+#[test]
+fn sidebar_lists_labels_and_clicking_one_searches_it() {
+    let mut h = harness(FakeStore::concept());
+    h.get_by_label("label bench night");
+    h.get_by_label("label invoices");
+    h.get_by_label("label fab").click();
+    h.run();
+    h.run();
+    let app = &h.state().1;
+    assert_eq!(app.search, "label:fab");
+    assert_eq!(Parsed::parse(&app.search).label.as_deref(), Some("fab"));
+}
+
+#[test]
+fn clicking_a_label_with_spaces_quotes_it_in_the_query() {
+    let mut h = harness(FakeStore::concept());
+    h.get_by_label("label bench night").click();
+    h.run();
+    h.run();
+    let app = &h.state().1;
+    assert_eq!(app.search, "label:\"bench night\"");
+    assert_eq!(Parsed::parse(&app.search).label.as_deref(), Some("bench night"));
 }

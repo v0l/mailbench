@@ -46,7 +46,7 @@ impl View {
 }
 
 pub(super) fn scope<'a>(c: &'a super::Cache, q: &Query, v: &View) -> Box<dyn Iterator<Item = &'a Entry> + 'a> {
-    if v.parsed.folder.is_some() {
+    if v.parsed.folder.is_some() || v.parsed.label.is_some() {
         return Box::new(c.entries.iter());
     }
     Box::new(c.by_folder.get(&q.folder).into_iter().flatten().map(|i| &c.entries[*i]))
@@ -82,9 +82,14 @@ pub(super) fn matches(e: &Entry, q: &Query, v: &View) -> bool {
             }
         }
         None => {
-            if e.folder != q.folder {
+            if p.label.is_none() && e.folder != q.folder {
                 return false;
             }
+        }
+    }
+    if let Some(l) = &p.label {
+        if !e.labels.iter().any(|x| x.to_lowercase() == *l) {
+            return false;
         }
     }
     match q.filter {
@@ -280,5 +285,57 @@ fn ask_servers(shared: &Arc<Shared>, text: &str, parsed: &Parsed, folders_hit: &
                 st.pending = st.pending.saturating_sub(1);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mailstore::Folder;
+
+    fn entry(folder: Folder, labels: &[&str]) -> Entry {
+        Entry {
+            id: 1,
+            account: 0,
+            folder,
+            server_folder: String::new(),
+            uid: 1,
+            validity: 1,
+            local: None,
+            from: String::new(),
+            from_address: String::new(),
+            to: Vec::new(),
+            cc: Vec::new(),
+            subject: String::new(),
+            date: 0,
+            unread: false,
+            flagged: false,
+            labels: labels.iter().map(|l| l.to_string()).collect(),
+            attachments: false,
+            search_key: String::new(),
+            thread: 1,
+            head: true,
+            count: 1,
+            thread_unread: false,
+            thread_flagged: false,
+            to_key: String::new(),
+            message_id: None,
+            refs: Vec::new(),
+            wake: None,
+        }
+    }
+
+    fn view(text: &str) -> View {
+        View { parsed: Parsed::parse(text), plain: false, hits: None, remote: Default::default() }
+    }
+
+    #[test]
+    fn a_label_query_matches_messages_in_any_folder_by_label_case_insensitively() {
+        let q = Query { folder: Folder::Inbox, filter: Filter::All, text: "label:\"bench night\"".into() };
+        let v = view(&q.text);
+        assert!(matches(&entry(Folder::Inbox, &["Bench Night"]), &q, &v));
+        assert!(matches(&entry(Folder::Archive, &["Receipts", "Bench Night"]), &q, &v));
+        assert!(!matches(&entry(Folder::Inbox, &["Receipts"]), &q, &v));
+        assert!(!matches(&entry(Folder::Inbox, &[]), &q, &v));
     }
 }

@@ -41,6 +41,7 @@ pub enum Action {
     OpenLink(String),
     Unsubscribe,
     GoTo(Folder),
+    Label(String),
     Expand(MessageId),
     One(Box<Action>),
     OpenAttachment(usize),
@@ -915,6 +916,11 @@ impl App {
                     }
                 }
                 Action::GoTo(f) => self.go_folder(f),
+                Action::Label(name) => {
+                    self.search = if name.contains(' ') { format!("label:\"{name}\"") } else { format!("label:{name}") };
+                    self.selected = 0;
+                    self.filter = Filter::All;
+                }
                 Action::OpenAttachment(i) => self.open_attachment(&v, i),
                 Action::SaveAttachment(i) => self.save_attachment(&v, i),
                 Action::SaveAllAttachments => self.save_all(&v),
@@ -1259,6 +1265,10 @@ impl App {
                 put(p, rect.left() + 12.0, 120.0, rect.center().y, &l.name, body(13.0), LEGEND);
                 if l.unread > 0 {
                     put_right(p, rect.right() - 6.0, rect.center().y, &l.unread.to_string(), figure(11.0), LEGEND);
+                }
+                ui.ctx().accesskit_node_builder(resp.id, |n| n.set_label(format!("label {}", l.name)));
+                if resp.clicked() {
+                    actions.push(Action::Label(l.name.clone()));
                 }
             }
         }

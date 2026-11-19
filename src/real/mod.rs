@@ -2072,3 +2072,55 @@ impl MailStore for RealStore {
         *lock(&self.shared.hold)
     }
 }
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+
+    fn entry(labels: &[&str], unread: bool) -> Entry {
+        Entry {
+            id: 0,
+            account: 0,
+            folder: ms::Folder::Inbox,
+            server_folder: String::new(),
+            uid: 0,
+            validity: 0,
+            local: None,
+            from: String::new(),
+            from_address: String::new(),
+            to: Vec::new(),
+            cc: Vec::new(),
+            subject: String::new(),
+            date: 0,
+            unread,
+            flagged: false,
+            labels: labels.iter().map(|l| l.to_string()).collect(),
+            attachments: false,
+            search_key: String::new(),
+            thread: 0,
+            head: true,
+            count: 1,
+            thread_unread: false,
+            thread_flagged: false,
+            to_key: String::new(),
+            message_id: None,
+            refs: Vec::new(),
+            wake: None,
+        }
+    }
+
+    #[test]
+    fn labels_lists_one_entry_per_label_with_unread_counts() {
+        let cache = Cache {
+            entries: vec![
+                entry(&["Receipts", "Bench Night"], true),
+                entry(&["Receipts"], false),
+                entry(&["Receipts"], true),
+                entry(&[], true),
+            ],
+            ..Default::default()
+        };
+        let got: Vec<(String, usize)> = cache.labels().into_iter().map(|l| (l.name, l.unread)).collect();
+        assert_eq!(got, [("Bench Night".to_string(), 1), ("Receipts".to_string(), 2)]);
+    }
+}

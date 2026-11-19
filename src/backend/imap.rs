@@ -277,9 +277,49 @@ fn gmail_item(caps: &Capabilities) -> &'static str {
 fn parse_fetch_flags(f: &Fetch) -> Flags {
     let mut flags = parse_flags(f.flags());
     if let Some(labels) = f.gmail_labels() {
-        flags.labels = labels.iter().filter(|l| !l.starts_with('\\')).map(|l| l.to_string()).collect();
+        flags.labels = user_labels(labels.iter().map(|l| l.as_ref()));
     }
     flags
+}
+
+fn user_labels<'a>(raw: impl Iterator<Item = &'a str>) -> Vec<String> {
+    raw.filter(|l| !l.starts_with('\\')).map(decode_mutf7).collect()
+}
+
+fn decode_mutf7(s: &str) -> String {
+    const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+,";
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i + 1..];
+        let Some(end) = tail.find('-') else {
+            out.push_str(&rest[i..]);
+            return out;
+        };
+        let body = &tail[..end];
+        if body.is_empty() {
+            out.push('&');
+        } else {
+            let mut bits = 0u32;
+            let mut n = 0;
+            let mut units: Vec<u16> = Vec::new();
+            for c in body.bytes() {
+                let Some(v) = B64.iter().position(|b| *b == c) else { continue };
+                bits = (bits << 6) | v as u32;
+                n += 6;
+                if n >= 16 {
+                    n -= 16;
+                    units.push((bits >> n) as u16);
+                    bits &= (1 << n) - 1;
+                }
+            }
+            out.push_str(&String::from_utf16_lossy(&units));
+        }
+        rest = &tail[end + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 fn parse_flags<'a>(flags: impl Iterator<Item = Flag<'a>>) -> Flags {
@@ -635,6 +675,30 @@ mod tests {
     fn gmail_labels_are_requested_only_with_the_extension() {
         assert_eq!(gmail_item(&Capabilities::default()), "");
         assert_eq!(gmail_item(&Capabilities { gmail_ext: true, ..Default::default() }), " X-GM-LABELS");
+    }
+
+    fn labels_in(response: &[u8]) -> Vec<String> {
+        use async_imap::imap_proto::{AttributeValue, Response};
+        let (_, parsed) = Response::parse(response).unwrap();
+        let Response::Fetch(_, attrs) = parsed else { panic!("not a fetch") };
+        attrs
+            .iter()
+            .find_map(|a| match a {
+                AttributeValue::GmailLabels(l) => Some(user_labels(l.iter().map(|c| c.as_ref()))),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn x_gm_labels_response_keeps_user_labels_decoded() {
+        let raw = b"* 7 FETCH (UID 4412 X-GM-LABELS (\\Inbox \\Important Receipts \"Bench Night\" \"&AOk-t&AOk-\" \"&2D3eAA- fun\" \"A &- B\") FLAGS (\\Seen))\r\n";
+        assert_eq!(labels_in(raw), ["Receipts", "Bench Night", "\u{e9}t\u{e9}", "\u{1f600} fun", "A & B"]);
+    }
+
+    #[test]
+    fn x_gm_labels_empty_when_only_system_labels() {
+        assert!(labels_in(b"* 1 FETCH (X-GM-LABELS (\\Inbox \\Sent))\r\n").is_empty());
     }
 
     #[test]
