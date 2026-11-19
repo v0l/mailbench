@@ -117,13 +117,20 @@ impl Notifier for DesktopNotifier {
         std::thread::spawn(move || {
             let mut n = notify_rust::Notification::new();
             n.appname("mailbench").summary(&notice.title).body(&notice.body);
-            n.action("default", "Open");
-            let Ok(handle) = n.show() else { return };
-            handle.wait_for_action(|action| {
-                if action == "default" {
-                    on_click();
-                }
-            });
+            #[cfg(target_os = "macos")]
+            {
+                let _ = (n.show(), on_click);
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                n.action("default", "Open");
+                let Ok(handle) = n.show() else { return };
+                handle.wait_for_action(|action| {
+                    if action == "default" {
+                        on_click();
+                    }
+                });
+            }
         });
     }
 }
