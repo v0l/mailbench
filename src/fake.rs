@@ -5,6 +5,7 @@ pub struct FakeStore {
     accounts: Vec<AccountInfo>,
     messages: Vec<Message>,
     next: u64,
+    older: Vec<(u64, Vec<u64>)>,
 }
 
 fn sync_of(state: AccountState) -> SyncState {
@@ -120,11 +121,42 @@ impl FakeStore {
         let n = messages.len() as u64;
         messages.push(draft(n + 1, "Re: Firmware release notes for 2.4", "Wed"));
         messages.push(draft(n + 2, "Bench night checklist", "Tue"));
-        FakeStore { accounts: Self::base_accounts(), messages, next: n + 3 }
+        let mut store = FakeStore { accounts: Self::base_accounts(), messages, next: n + 3, older: Vec::new() };
+        store.add_older(1, &[THREAD[0].clone(), THREAD[1].clone()]);
+        store
+    }
+
+    fn add_older(&mut self, head: u64, turns: &[crate::data::Turn]) {
+        let base = self.messages.iter().find(|m| m.summary.id.0 == head).cloned().expect("head");
+        let mut ids = Vec::new();
+        for t in turns {
+            let id = self.next;
+            self.next += 1;
+            let mut m = base.clone();
+            m.summary.id = MessageId(id);
+            m.summary.from = t.from.to_string();
+            m.summary.when = t.when.to_string();
+            m.summary.unread = false;
+            m.summary.new = false;
+            m.summary.thread = 1;
+            m.sent = t.when.to_string();
+            m.paragraphs = t.paragraphs.iter().map(|p| p.to_string()).collect();
+            m.quoted = Vec::new();
+            m.attachments = Vec::new();
+            m.remote_images = None;
+            m.headers = Default::default();
+            self.messages.push(m);
+            ids.push(id);
+        }
+        self.older.push((head, ids));
+    }
+
+    fn is_older(&self, id: MessageId) -> bool {
+        self.older.iter().any(|(_, ids)| ids.contains(&id.0))
     }
 
     pub fn empty() -> FakeStore {
-        FakeStore { accounts: Self::base_accounts(), messages: Vec::new(), next: 1 }
+        FakeStore { accounts: Self::base_accounts(), messages: Vec::new(), next: 1, older: Vec::new() }
     }
 
     pub fn failed() -> FakeStore {
@@ -146,11 +178,11 @@ impl FakeStore {
                 m
             })
             .collect();
-        FakeStore { accounts: Self::base_accounts(), messages, next: count as u64 + 1 }
+        FakeStore { accounts: Self::base_accounts(), messages, next: count as u64 + 1, older: Vec::new() }
     }
 
-    fn matches(m: &Message, q: &Query) -> bool {
-        if m.folder != q.folder {
+    fn matches(&self, m: &Message, q: &Query) -> bool {
+        if m.folder != q.folder || self.is_older(m.summary.id) {
             return false;
         }
         match q.filter {
@@ -205,7 +237,7 @@ impl MailStore for FakeStore {
     fn counts(&self, query: &Query) -> Counts {
         let base = Query { filter: Filter::All, ..query.clone() };
         let mut c = Counts::default();
-        for m in self.messages.iter().filter(|m| Self::matches(m, &base)) {
+        for m in self.messages.iter().filter(|m| self.matches(m, &base)) {
             c.all += 1;
             c.unread += m.summary.unread as usize;
             c.flagged += m.summary.flagged as usize;
@@ -216,13 +248,22 @@ impl MailStore for FakeStore {
     fn list(&self, query: &Query, offset: usize, limit: usize) -> Page {
         let mut total = 0;
         let mut items = Vec::new();
-        for m in self.messages.iter().filter(|m| Self::matches(m, query)) {
+        for m in self.messages.iter().filter(|m| self.matches(m, query)) {
             if total >= offset && items.len() < limit {
                 items.push(m.summary.clone());
             }
             total += 1;
         }
         Page { offset, total, items }
+    }
+
+    fn thread(&self, id: MessageId) -> Vec<ThreadItem> {
+        let mut ids: Vec<u64> = self.older.iter().find(|(h, _)| *h == id.0).map(|(_, o)| o.clone()).unwrap_or_default();
+        ids.push(id.0);
+        ids.iter()
+            .filter_map(|i| self.messages.iter().find(|m| m.summary.id.0 == *i))
+            .map(|m| ThreadItem { summary: m.summary.clone(), folder: m.folder })
+            .collect()
     }
 
     fn get(&self, id: MessageId) -> Result<Message, StoreError> {

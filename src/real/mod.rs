@@ -1,6 +1,7 @@
 mod display;
 mod headers;
 mod model;
+mod threads;
 mod worker;
 
 use crate::backend::*;
@@ -54,16 +55,54 @@ struct Entry {
     flagged: bool,
     attachments: bool,
     search_key: String,
+    thread: u64,
+    head: bool,
+    count: u32,
+    thread_unread: bool,
+    thread_flagged: bool,
 }
 
 fn search_key(from: &str, address: &str, subject: &str) -> String {
     format!("{from}\0{address}\0{subject}").to_lowercase()
 }
 
+impl Cache {
+    fn index(&mut self) {
+        self.by_id = self.entries.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
+        self.by_thread.clear();
+        for (i, e) in self.entries.iter().enumerate() {
+            self.by_thread.entry(e.thread).or_default().push(i);
+        }
+        let threads: Vec<u64> = self.by_thread.keys().copied().collect();
+        for t in threads {
+            self.reindex(t);
+        }
+    }
+
+    fn reindex(&mut self, thread: u64) {
+        let Some(members) = self.by_thread.get(&thread) else { return };
+        let count = members.len() as u32;
+        let unread = members.iter().any(|i| self.entries[*i].unread);
+        let flagged = members.iter().any(|i| self.entries[*i].flagged);
+        let mut folders: Vec<ms::Folder> = Vec::new();
+        for i in members.clone() {
+            let e = &mut self.entries[i];
+            e.head = !folders.contains(&e.folder);
+            if e.head {
+                folders.push(e.folder);
+            }
+            e.count = count;
+            e.thread_unread = unread;
+            e.thread_flagged = flagged;
+        }
+    }
+}
+
 #[derive(Default, Clone)]
 struct Cache {
     entries: Vec<Entry>,
     by_id: HashMap<u64, usize>,
+    by_thread: HashMap<u64, Vec<usize>>,
     labels: Vec<LabelInfo>,
 }
 
@@ -136,6 +175,8 @@ impl Shared {
         let cache = Arc::make_mut(&mut guard);
         if let Some(i) = cache.by_id.get(&id).copied() {
             f(&mut cache.entries[i]);
+            let thread = cache.entries[i].thread;
+            cache.reindex(thread);
         }
     }
 
@@ -144,7 +185,7 @@ impl Shared {
         let cache = Arc::make_mut(&mut guard);
         let at = cache.entries.partition_point(|x| (x.date, x.id) > (entry.date, entry.id));
         cache.entries.insert(at, entry);
-        cache.by_id = cache.entries.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
+        cache.index();
     }
 
     fn request_body(&self, e: &Entry) -> BodyState {
@@ -352,6 +393,7 @@ impl Shared {
         let ops = Self::outbox_in(&self.lock_store());
         let known = lock(&self.known_attachments).clone();
         let mut cache = Cache::default();
+        let mut meta: Vec<(Option<String>, Vec<String>)> = Vec::new();
         let mut label_counts: HashMap<String, usize> = HashMap::new();
         for (index, account) in self.accounts.iter().enumerate() {
             let folders = {
@@ -413,6 +455,9 @@ impl Shared {
                     let from: String = m.from.first().map(display::person).unwrap_or_default();
                     let from_address: String = m.from.first().map(|a| a.address.clone()).unwrap_or_default();
                     let subject: String = m.subject.clone().unwrap_or_default();
+                    let mut refs = m.references;
+                    refs.extend(m.in_reply_to);
+                    meta.push((m.message_id, refs));
                     cache.entries.push(Entry {
                         id,
                         account: index,
@@ -431,6 +476,11 @@ impl Shared {
                         unread: flag_ops.get(&(folder.name.clone(), m.uid)).and_then(|f| f.0).map(|s| !s).unwrap_or(!m.flags.seen),
                         flagged: flag_ops.get(&(folder.name.clone(), m.uid)).and_then(|f| f.1).unwrap_or(m.flags.flagged),
                         attachments,
+                        thread: id,
+                        head: true,
+                        count: 1,
+                        thread_unread: false,
+                        thread_flagged: false,
                     });
                 }
                 if quick {
@@ -445,8 +495,15 @@ impl Shared {
             let Ok(msg) = serde_json::from_slice::<LocalMsg>(&raw) else { continue };
             let Some(index) = self.index_of(&msg.account) else { continue };
             let Some(folder) = folder_from_name(&msg.folder) else { continue };
+            meta.push((None, Vec::new()));
+            let local_id = stable_id(&format!("l\0{key}"));
             cache.entries.push(Entry {
-                id: stable_id(&format!("l\0{key}")),
+                id: local_id,
+                thread: local_id,
+                head: true,
+                count: 1,
+                thread_unread: false,
+                thread_flagged: false,
                 account: index,
                 folder,
                 server_folder: String::new(),
@@ -465,8 +522,20 @@ impl Shared {
                 attachments: false,
             });
         }
+        let inputs: Vec<threads::Input> = cache
+            .entries
+            .iter()
+            .zip(&meta)
+            .map(|(e, (id, refs))| threads::Input { message_id: id.as_deref(), refs, subject: &e.subject, date: e.date })
+            .collect();
+        let ids: Vec<u64> = cache.entries.iter().map(|e| e.id).collect();
+        let assigned = threads::assign(&inputs, &ids);
+        drop(inputs);
+        for (e, t) in cache.entries.iter_mut().zip(assigned) {
+            e.thread = t;
+        }
         cache.entries.sort_by(|a, b| b.date.cmp(&a.date).then(b.id.cmp(&a.id)));
-        cache.by_id = cache.entries.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
+        cache.index();
         let mut labels: Vec<LabelInfo> =
             label_counts.into_iter().map(|(name, unread)| LabelInfo { name, unread }).collect();
         labels.sort_by(|a, b| a.name.cmp(&b.name));
@@ -534,13 +603,13 @@ pub struct RealStore {
 }
 
 fn matches(e: &Entry, q: &Query, needle: &str) -> bool {
-    if e.folder != q.folder {
+    if e.folder != q.folder || !e.head {
         return false;
     }
     match q.filter {
         Filter::All => {}
-        Filter::Unread if !e.unread => return false,
-        Filter::Flagged if !e.flagged => return false,
+        Filter::Unread if !e.thread_unread => return false,
+        Filter::Flagged if !e.thread_flagged => return false,
         _ => {}
     }
     needle.is_empty() || e.search_key.contains(needle)
@@ -557,8 +626,12 @@ fn summary(e: &Entry, now: i64) -> Summary {
         new: e.unread,
         attachments: e.attachments,
         account: e.account,
-        thread: 1,
+        thread: e.count,
     }
+}
+
+fn row(e: &Entry, now: i64) -> Summary {
+    Summary { unread: e.thread_unread, new: e.thread_unread, flagged: e.thread_flagged, ..summary(e, now) }
 }
 
 impl RealStore {
@@ -697,8 +770,8 @@ impl MailStore for RealStore {
             let mut out = Counts::default();
             for e in c.entries.iter().filter(|e| matches(e, &base, &needle)) {
                 out.all += 1;
-                out.unread += e.unread as usize;
-                out.flagged += e.flagged as usize;
+                out.unread += e.thread_unread as usize;
+                out.flagged += e.thread_flagged as usize;
             }
             out
         })
@@ -712,11 +785,24 @@ impl MailStore for RealStore {
             let mut items = Vec::new();
             for e in c.entries.iter().filter(|e| matches(e, query, &needle)) {
                 if total >= offset && items.len() < limit {
-                    items.push(summary(e, now));
+                    items.push(row(e, now));
                 }
                 total += 1;
             }
             Page { offset, total, items }
+        })
+    }
+
+    fn thread(&self, id: MessageId) -> Vec<ThreadItem> {
+        let now = now();
+        self.shared.with_cache(|c| {
+            let Some(i) = c.by_id.get(&id.0) else { return Vec::new() };
+            let Some(members) = c.by_thread.get(&c.entries[*i].thread) else { return Vec::new() };
+            members
+                .iter()
+                .rev()
+                .map(|m| ThreadItem { summary: summary(&c.entries[*m], now), folder: c.entries[*m].folder })
+                .collect()
         })
     }
 
@@ -896,6 +982,11 @@ impl MailStore for RealStore {
             unread: false,
             flagged: false,
             attachments: false,
+            thread: id,
+            head: true,
+            count: 1,
+            thread_unread: false,
+            thread_flagged: false,
         });
         self.shared.refresh();
         self.shared.kick(message.account);

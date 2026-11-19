@@ -37,6 +37,8 @@ pub enum Action {
     OpenLink(String),
     Unsubscribe,
     GoTo(Folder),
+    Expand(MessageId),
+    One(Box<Action>),
 }
 
 #[derive(Clone, Debug)]
@@ -101,6 +103,8 @@ struct View {
     counts: Counts,
     total: usize,
     current: Option<Message>,
+    head: Option<Summary>,
+    thread: Vec<ThreadItem>,
 }
 
 fn unsubscribe(u: Unsubscribe) -> String {
@@ -136,6 +140,8 @@ pub struct App {
     scroll_to_selected: bool,
     go_pending: bool,
     last_shown: Option<MessageId>,
+    last_head: Option<MessageId>,
+    pub expanded: Option<MessageId>,
     pub settings_requested: bool,
     html: crate::htmlview::Renderer,
 }
@@ -165,6 +171,8 @@ impl App {
             scroll_to_selected: false,
             go_pending: false,
             last_shown: None,
+            last_head: None,
+            expanded: None,
             settings_requested: false,
             html: crate::htmlview::Renderer::default(),
         }
@@ -185,18 +193,25 @@ impl App {
         if total > 0 && self.selected >= total {
             self.selected = total - 1;
         }
-        let current = self
-            .store
-            .list(&query, self.selected, 1)
-            .items
-            .first()
-            .and_then(|s| self.store.get(s.id).ok());
+        let head = self.store.list(&query, self.selected, 1).items.into_iter().next();
+        let head_id = head.as_ref().map(|s| s.id);
+        if head_id != self.last_head {
+            self.expanded = None;
+            self.last_head = head_id;
+        }
+        let thread = head_id.map(|id| self.store.thread(id)).unwrap_or_default();
+        let shown = self
+            .expanded
+            .filter(|e| thread.iter().any(|t| t.summary.id == *e))
+            .or_else(|| thread.last().map(|t| t.summary.id))
+            .or(head_id);
+        let current = shown.and_then(|id| self.store.get(id).ok());
         let id = current.as_ref().map(|m| m.summary.id);
         if id != self.last_shown {
             self.quotes_open = false;
             self.last_shown = id;
         }
-        View { query, counts, total, current }
+        View { query, counts, total, current, head, thread }
     }
 
     fn pressed(ctx: &egui::Context, key: egui::Key) -> bool {
@@ -257,21 +272,41 @@ impl App {
         out
     }
 
-    fn move_current(&mut self, v: &View, to: Folder, done: &str) {
-        let Some(m) = &v.current else { return };
-        if m.folder == to {
-            return;
+    fn targets(v: &View, whole: bool, same_folder: bool) -> Vec<(MessageId, Folder)> {
+        if whole && !v.thread.is_empty() {
+            let row = v.query.folder;
+            return v
+                .thread
+                .iter()
+                .filter(|t| !same_folder || t.folder == row)
+                .map(|t| (t.summary.id, t.folder))
+                .collect();
         }
-        match self.store.move_to(m.summary.id, to) {
-            Ok(()) => self.notice = Some(done.into()),
-            Err(e) => self.notice = Some(format!("Could not move the message: {e:?}")),
+        v.current.iter().map(|m| (m.summary.id, m.folder)).collect()
+    }
+
+    fn move_current(&mut self, v: &View, to: Folder, done: &str, whole: bool) {
+        for (id, folder) in Self::targets(v, whole, true) {
+            if folder == to {
+                continue;
+            }
+            match self.store.move_to(id, to) {
+                Ok(()) => self.notice = Some(done.into()),
+                Err(e) => self.notice = Some(format!("Could not move the message: {e:?}")),
+            }
         }
     }
 
     fn apply(&mut self, ctx: &egui::Context, actions: Vec<Action>) {
         for a in actions {
             let v = self.view();
+            let (a, whole) = match a {
+                Action::One(inner) => (*inner, false),
+                a => (a, true),
+            };
             match a {
+                Action::One(_) => {}
+                Action::Expand(id) => self.expanded = Some(id),
                 Action::Next => {
                     if self.selected + 1 < v.total {
                         self.selected += 1;
@@ -283,34 +318,39 @@ impl App {
                     self.scroll_to_selected = true;
                 }
                 Action::Open => {
-                    if let Some(m) = &v.current {
-                        let _ = self.store.set_flags(
-                            m.summary.id,
-                            FlagChange { unread: Some(false), flagged: None },
-                        );
-                        self.reader_focus = true;
+                    if self.reader_focus && v.thread.len() > 1 {
+                        let shown = v.current.as_ref().map(|m| m.summary.id);
+                        let at = v.thread.iter().position(|t| Some(t.summary.id) == shown).unwrap_or(0);
+                        if at > 0 {
+                            self.expanded = Some(v.thread[at - 1].summary.id);
+                        }
                     }
+                    for (id, _) in Self::targets(&v, true, false) {
+                        let _ = self.store.set_flags(id, FlagChange { unread: Some(false), flagged: None });
+                    }
+                    self.reader_focus = true;
                 }
-                Action::Archive => self.move_current(&v, Folder::Archive, "Archived"),
-                Action::Snooze => self.move_current(&v, Folder::Snoozed, "Snoozed until tomorrow 08:00"),
-                Action::Junk => self.move_current(&v, Folder::Junk, "Moved to junk"),
-                Action::Trash => self.move_current(&v, Folder::Trash, "Moved to trash"),
+                Action::Archive => self.move_current(&v, Folder::Archive, "Archived", whole),
+                Action::Snooze => self.move_current(&v, Folder::Snoozed, "Snoozed until tomorrow 08:00", whole),
+                Action::Junk => self.move_current(&v, Folder::Junk, "Moved to junk", whole),
+                Action::Trash => self.move_current(&v, Folder::Trash, "Moved to trash", whole),
                 Action::ToggleFlag => {
-                    if let Some(m) = &v.current {
-                        let on = !m.summary.flagged;
-                        let _ = self.store.set_flags(
-                            m.summary.id,
-                            FlagChange { unread: None, flagged: Some(on) },
-                        );
+                    let current = if whole { v.head.as_ref() } else { v.current.as_ref().map(|m| &m.summary) };
+                    if let Some(s) = current {
+                        let on = !s.flagged;
+                        for (id, _) in Self::targets(&v, whole, false) {
+                            let _ = self.store.set_flags(id, FlagChange { unread: None, flagged: Some(on) });
+                        }
                         self.notice = Some(if on { "Flagged".into() } else { "Flag removed".into() });
                     }
                 }
                 Action::ToggleUnread => {
-                    if let Some(m) = &v.current {
-                        let _ = self.store.set_flags(
-                            m.summary.id,
-                            FlagChange { unread: Some(!m.summary.unread), flagged: None },
-                        );
+                    let current = if whole { v.head.as_ref() } else { v.current.as_ref().map(|m| &m.summary) };
+                    if let Some(s) = current {
+                        let unread = !s.unread;
+                        for (id, _) in Self::targets(&v, whole, false) {
+                            let _ = self.store.set_flags(id, FlagChange { unread: Some(unread), flagged: None });
+                        }
                     }
                 }
                 Action::Reply(mode) => {
@@ -648,6 +688,12 @@ impl App {
             ui.set_max_width(ui.available_width().min(if m.html.is_empty() { MEASURE + 44.0 } else { 820.0 }));
             ui.spacing_mut().item_spacing.y = 8.0;
             subject_line(ui, &m.summary.subject);
+            let shown_at = v.thread.iter().position(|t| t.summary.id == m.summary.id).unwrap_or(v.thread.len());
+            for t in v.thread.iter().take(shown_at) {
+                if collapsed_message(ui, &t.summary.from, &t.summary.when, t.summary.unread) {
+                    actions.push(Action::Expand(t.summary.id));
+                }
+            }
             let mut to = m.to.join(", ");
             if to.is_empty() {
                 to = "nobody".into();
@@ -662,8 +708,8 @@ impl App {
                     chip(ui, "flagged", READOUT, true);
                 }
                 ui.add_space(6.0);
-                if m.summary.thread > 1 {
-                    Line::new().note(format!("{} messages in this conversation", m.summary.thread)).size(11.5).show(ui);
+                if v.thread.len() > 1 {
+                    Line::new().note(format!("{} messages in this conversation", v.thread.len())).size(11.5).show(ui);
                 }
             });
             ui.add_space(4.0);
@@ -719,6 +765,11 @@ impl App {
                     attachment(ui, &a.name, &a.size);
                 }
             });
+            for t in v.thread.iter().skip(shown_at + 1) {
+                if collapsed_message(ui, &t.summary.from, &t.summary.when, t.summary.unread) {
+                    actions.push(Action::Expand(t.summary.id));
+                }
+            }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if ui.add(Key::new("reply").solid(READOUT).min_width(90.0)).clicked() {
@@ -734,7 +785,7 @@ impl App {
                     .add(Key::new("archive").outline(VALUE).min_width(90.0).enabled(m.folder != Folder::Archive))
                     .clicked()
                 {
-                    actions.push(Action::Archive);
+                    actions.push(Action::One(Box::new(Action::Archive)));
                 }
                 let more = ui.add(Key::more());
                 egui::Popup::menu(&more).show(|ui| {
@@ -748,7 +799,7 @@ impl App {
                     ];
                     for (label, action, tint) in entries {
                         if ui.add(Key::new(label).outline(tint).min_width(ui.available_width())).clicked() {
-                            actions.push(action);
+                            actions.push(Action::One(Box::new(action)));
                             ui.close();
                         }
                     }

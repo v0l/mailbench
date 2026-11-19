@@ -183,6 +183,12 @@ pub struct Message {
     pub body_state: BodyState,
 }
 
+#[derive(Clone, Debug)]
+pub struct ThreadItem {
+    pub summary: Summary,
+    pub folder: Folder,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FlagChange {
     pub unread: Option<bool>,
@@ -211,6 +217,9 @@ pub trait MailStore {
     fn counts(&self, query: &Query) -> Counts;
     fn list(&self, query: &Query, offset: usize, limit: usize) -> Page;
     fn get(&self, id: MessageId) -> Result<Message, StoreError>;
+    fn thread(&self, id: MessageId) -> Vec<ThreadItem> {
+        self.get(id).map(|m| vec![ThreadItem { summary: m.summary, folder: m.folder }]).unwrap_or_default()
+    }
     fn set_flags(&mut self, id: MessageId, change: FlagChange) -> Result<(), StoreError>;
     fn move_to(&mut self, id: MessageId, folder: Folder) -> Result<(), StoreError>;
     fn append(&mut self, folder: Folder, message: Outgoing) -> Result<MessageId, StoreError>;

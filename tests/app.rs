@@ -233,3 +233,31 @@ fn copy_has_no_em_or_en_dashes() {
         assert!(!text.contains('\u{2014}') && !text.contains('\u{2013}'), "{f}");
     }
 }
+
+#[test]
+fn a_three_message_thread_opens_collapsed_and_expands_an_older_message() {
+    let mut h = harness(FakeStore::concept());
+    let head = inbox_ids(&h.state().1)[0];
+    assert_eq!(h.state().1.store.thread(head).len(), 3);
+    assert_eq!(h.state().1.store.list(&Query::new(Folder::Inbox), 0, 1).items[0].thread, 3);
+    h.get_by_label_contains("Quote attached");
+    assert!(h.query_by_label_contains("Hi Mara, the Rev C Gerbers passed").is_none());
+    let older = h.state().1.store.thread(head)[0].summary.id;
+    h.get_by_label_contains("Wed 15 Nov 16:20").click();
+    h.run();
+    h.run();
+    assert_eq!(h.state().1.expanded, Some(older));
+    h.get_by_label_contains("Hi Mara, the Rev C Gerbers passed");
+}
+
+#[test]
+fn archiving_from_the_list_takes_the_whole_thread_and_the_reader_takes_one() {
+    let mut h = harness(FakeStore::concept());
+    let head = inbox_ids(&h.state().1)[0];
+    let ids: Vec<_> = h.state().1.store.thread(head).iter().map(|t| t.summary.id).collect();
+    h.key_press(egui::Key::E);
+    h.run();
+    for id in &ids {
+        assert_eq!(h.state().1.store.get(*id).unwrap().folder, Folder::Archive);
+    }
+}

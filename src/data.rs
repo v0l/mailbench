@@ -103,6 +103,7 @@ pub fn inbox() -> Vec<Msg> {
     ]
 }
 
+#[derive(Clone)]
 pub struct Turn {
     pub from: &'static str,
     pub to: &'static str,
