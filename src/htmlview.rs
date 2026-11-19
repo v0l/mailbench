@@ -889,6 +889,21 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "writes MAILBENCH_FONT_PNG to show which system fonts Blitz picked"]
+    fn system_font_sample_is_written_to_a_png() {
+        let out = std::env::var("MAILBENCH_FONT_PNG").expect("MAILBENCH_FONT_PNG");
+        let html = body("<body style=\"margin:8px;background:#fff;color:#000\"><p style=\"font:28px 'Segoe UI'\">Segoe UI: The quick brown fox 0123456789</p><p style=\"font:28px Arial\">Arial: The quick brown fox 0123456789</p><p style=\"font:28px 'Helvetica Neue'\">Helvetica Neue: The quick brown fox</p><p style=\"font:28px sans-serif\">sans-serif: The quick brown fox</p><p style=\"font:28px serif\">serif: The quick brown fox</p><p style=\"font:28px monospace\">monospace: The quick brown fox</p><p style=\"font:28px sans-serif\">Accents: caf\u{e9} na\u{ef}ve \u{fc}ber, \u{20ac}5 \u{2014} \u{201c}quotes\u{201d}</p></body>");
+        let r = shot(&html, 900, 1.0, false);
+        let height: u32 = r.tiles.iter().map(|(top, t)| top + t.height).max().unwrap();
+        let mut img = image::RgbaImage::from_pixel(r.tiles[0].1.width, height, image::Rgba([255, 255, 255, 255]));
+        for (top, t) in &r.tiles {
+            let tile = image::RgbaImage::from_raw(t.width, t.height, t.rgba.clone()).unwrap();
+            image::imageops::replace(&mut img, &tile, 0, *top as i64);
+        }
+        img.save(out).unwrap();
+    }
+
+    #[test]
     fn renderer_thread_returns_the_page() {
         let renderer = Renderer::new(None);
         let key = key(300, 1.0, false);
