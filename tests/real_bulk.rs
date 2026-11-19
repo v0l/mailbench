@@ -1,4 +1,5 @@
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 use mailbench::app::App;
 use mailbench::backend::*;
 use mailbench::mailstore::{Folder as UiFolder, Query, SyncState};
@@ -121,4 +122,41 @@ fn archiving_three_selected_rows_is_one_op_per_folder_and_undo_brings_them_back(
     until(&mut h, "back in the inbox", |a| count(a, UiFolder::Inbox) == 3 && count(a, UiFolder::Archive) == 0);
     assert_eq!(on_server(&name, "INBOX"), 3);
     assert_eq!(on_server(&name, "Archive"), 0);
+}
+
+fn seen_on_server(name: &str, folder: &str) -> Option<bool> {
+    let delta = block_on(imap_at(name, 3143).sync_folder(folder, None)).ok()?;
+    delta.added.first().map(|m| m.flags.seen)
+}
+
+#[test]
+fn clicking_a_message_marks_it_seen_on_the_server() {
+    if !common::greenmail() {
+        return;
+    }
+    let name = format!("seen{}", std::process::id());
+    common::create_greenmail_user(&name);
+    let mut smtp = SmtpBackend::new(SmtpConfig::new("127.0.0.1", 3025, Security::Plain, auth(&name)));
+    block_on(smtp.send(&OutgoingMessage {
+        from: Address { name: Some("Zed".into()), address: "zed@localhost".into() },
+        to: vec![Address { name: None, address: format!("{name}@localhost") }],
+        subject: "Click to read".into(),
+        body: "body".into(),
+        ..Default::default()
+    }))
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mail.db");
+    Store::create(&path, None, Some(("pw", KdfParams::fast()))).unwrap();
+
+    let mut h = open_app(&path, &name, 3143);
+    until(&mut h, "first sync", |a| count(a, UiFolder::Inbox) == 1 && a.store.accounts()[0].sync == SyncState::Idle);
+    assert_eq!(seen_on_server(&name, "INBOX"), Some(false));
+
+    h.get_all_by_label_contains("Click to read").next().unwrap().click();
+    h.run();
+    h.run();
+    until(&mut h, "outbox drained", |a| a.store.pending_ops() == 0);
+    assert!(!h.state().1.store.list(&Query::new(UiFolder::Inbox), 0, 1).items[0].unread);
+    assert_eq!(seen_on_server(&name, "INBOX"), Some(true));
 }
