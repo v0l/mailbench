@@ -751,10 +751,6 @@ fn summary_from(e: &Entry, now: i64, remote: bool) -> Summary {
     }
 }
 
-fn summary(e: &Entry, now: i64) -> Summary {
-    summary_from(e, now, false)
-}
-
 fn row(e: &Entry, now: i64, remote: bool) -> Summary {
     Summary { unread: e.thread_unread, new: e.thread_unread, flagged: e.thread_flagged, ..summary_from(e, now, remote) }
 }
