@@ -139,6 +139,12 @@ impl FakeStore {
             .collect()
     }
 
+    pub fn set_html(&mut self, id: MessageId, html: &str) {
+        if let Some(m) = self.messages.iter_mut().find(|m| m.summary.id == id) {
+            m.html = crate::htmlview::HtmlBody { html: html.into(), inline: Vec::new() };
+        }
+    }
+
     pub fn concept() -> FakeStore {
         let mut messages: Vec<Message> =
             inbox().iter().enumerate().map(|(i, m)| concept_message(i as u64 + 1, i, m, "")).collect();

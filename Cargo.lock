@@ -4053,6 +4053,7 @@ dependencies = [
  "nostr-sdk",
  "notify-rust",
  "open",
+ "parley",
  "peniko",
  "percent-encoding",
  "rand 0.8.8",

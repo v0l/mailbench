@@ -837,6 +837,7 @@ pub struct SettingsForm {
     retest: Option<(String, TestRun)>,
     methods: UnlockMethods,
     pub allow_open: bool,
+    pub dark_reading: bool,
 }
 
 pub enum SettingsEvent {
@@ -864,6 +865,7 @@ impl SettingsForm {
             retest: None,
             methods: methods_of(store),
             allow_open: allow_open_setting(store),
+            dark_reading: dark_reading_setting(store),
         }
     }
 
@@ -1048,6 +1050,13 @@ impl SettingsForm {
                             }
                         });
                         ui.add_space(8.0);
+                        section(ui, "reading", "how HTML mail is drawn", |ui| {
+                            if ui.checkbox(&mut self.dark_reading, "dark background for mail that sets no colours").changed() {
+                                let _ = store.put(SETTINGS_KIND, DARK_READING_KEY, if self.dark_reading { b"1" } else { b"0" });
+                                allow_open_changed = true;
+                            }
+                        });
+                        ui.add_space(8.0);
                         section(ui, "attachments", "what happens when you open a file", |ui| {
                             if ui.checkbox(&mut self.allow_open, "allow open (writes a plain copy to a temp folder)").changed() {
                                 let _ = store.put(SETTINGS_KIND, ALLOW_OPEN_KEY, if self.allow_open { b"1" } else { b"0" });
@@ -1153,6 +1162,13 @@ pub struct Shell {
 pub const SETTINGS_KIND: &str = "settings";
 pub const ALLOW_OPEN_KEY: &str = "attachments.allow_open";
 
+pub const DARK_READING_KEY: &str = "reading.dark";
+pub const IMAGE_TRUST_KIND: &str = "image-trust";
+
+pub fn dark_reading_setting(store: &Store) -> bool {
+    store.get(SETTINGS_KIND, DARK_READING_KEY).ok().flatten().map(|v| v.as_slice() == b"1").unwrap_or(false)
+}
+
 pub fn allow_open_setting(store: &Store) -> bool {
     store.get(SETTINGS_KIND, ALLOW_OPEN_KEY).ok().flatten().map(|v| v.as_slice() != b"0").unwrap_or(true)
 }
@@ -1193,9 +1209,20 @@ impl Shell {
     fn apply_open_settings(&mut self) {
         let allow = self.store.as_ref().map(allow_open_setting).unwrap_or(true);
         let dir = self.open_dir.clone();
+        let dark = self.store.as_ref().map(dark_reading_setting).unwrap_or(false);
+        let trusted: std::collections::HashSet<String> =
+            self.store.as_ref().and_then(|s| s.list(IMAGE_TRUST_KIND).ok()).unwrap_or_default().into_iter().collect();
+        let saver = self.store.as_ref().and_then(|s| s.try_clone().ok());
         if let Screen::Main(m) = &mut self.screen {
             m.app.allow_open = allow;
             m.app.open_dir = dir;
+            m.app.html_state.dark = dark;
+            m.app.trusted = trusted;
+            if let Some(saver) = saver {
+                m.app.trust_saver = Box::new(move |key| {
+                    let _ = saver.put(IMAGE_TRUST_KIND, key, b"1");
+                });
+            }
         }
     }
 

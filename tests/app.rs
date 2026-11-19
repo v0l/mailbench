@@ -700,3 +700,61 @@ fn imap_style_accounts_show_the_new_folder_action() {
     let name = h.state().1.store.accounts()[0].name.clone();
     h.get_by_label(&format!("new folder in {name}"));
 }
+
+fn html_harness(html: &str) -> Harness<'static, (bool, App)> {
+    let mut store = FakeStore::concept();
+    let id = store.list(&Query::new(Folder::Inbox), 0, 1).items[0].id;
+    store.set_html(id, html);
+    let mut h = harness(store);
+    for _ in 0..40 {
+        h.run();
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    h
+}
+
+fn copied(h: &Harness<'static, (bool, App)>) -> Option<String> {
+    h.output().platform_output.commands.iter().find_map(|c| match c {
+        egui::OutputCommand::CopyText(t) => Some(t.clone()),
+        _ => None,
+    })
+}
+
+#[test]
+fn copy_with_no_selection_copies_the_html_text() {
+    let mut h = html_harness("<p>First paragraph here</p><p>Second paragraph</p>");
+    h.event(egui::Event::Copy);
+    h.step();
+    assert_eq!(copied(&h).as_deref(), Some("First paragraph here\nSecond paragraph"));
+}
+
+#[test]
+fn dragging_selects_text_and_copy_takes_only_that() {
+    let mut h = html_harness("<body style=\"margin:0\"><p style=\"margin:0\">Selectable words</p><p style=\"margin:0\">Other line below</p></body>");
+    let body = h.get_by_label("message body");
+    let rect = body.rect();
+    let start = rect.left_top() + egui::vec2(1.0, 6.0);
+    let end = rect.left_top() + egui::vec2(400.0, 8.0);
+    h.hover_at(start);
+    h.event(egui::Event::PointerButton { pos: start, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.run();
+    for step in 1..=8 {
+        h.hover_at(start + (end - start) * (step as f32 / 8.0));
+        h.run();
+    }
+    h.event(egui::Event::PointerButton { pos: end, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.run();
+    h.event(egui::Event::Copy);
+    h.step();
+    assert_eq!(copied(&h).as_deref(), Some("Selectable words"));
+}
+
+#[test]
+fn trusting_a_sender_loads_images_without_asking_again() {
+    let mut h = harness(FakeStore::concept());
+    h.get_by_label("always from sender").click();
+    h.run();
+    h.run();
+    assert!(h.query_by_label_contains("REMOTE IMAGES BLOCKED").is_none());
+    assert_eq!(h.state().1.trusted.len(), 1);
+}

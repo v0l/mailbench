@@ -36,6 +36,10 @@ pub enum Action {
     Search,
     Back,
     LoadImagesOnce,
+    TrustImages(String),
+    Find,
+    WarnLink(String, String, String),
+    CloseLinkWarning,
     ToggleQuotes,
     ToggleHeaders,
     OpenLink(String),
@@ -474,6 +478,10 @@ pub struct App {
     pub pending_send: Option<PendingSend>,
     picker: Option<Receiver<Vec<std::path::PathBuf>>>,
     html: crate::htmlview::Renderer,
+    pub html_state: crate::kit::HtmlState,
+    pub trusted: HashSet<String>,
+    pub trust_saver: Box<dyn FnMut(&str)>,
+    link_warning: Option<(String, String, String)>,
 }
 
 impl App {
@@ -523,6 +531,10 @@ impl App {
             pending_send: None,
             picker: None,
             html: crate::htmlview::Renderer::default(),
+            html_state: Default::default(),
+            trusted: HashSet::new(),
+            trust_saver: Box::new(|_| {}),
+            link_warning: None,
         }
     }
 
@@ -577,6 +589,9 @@ impl App {
         }
         if Self::pressed(ctx, K::Escape) {
             return vec![Action::Back];
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, K::F)) {
+            return vec![Action::Find];
         }
         if ctx.egui_wants_keyboard_input() {
             return Vec::new();
@@ -889,6 +904,8 @@ impl App {
                         });
                     }
                 }
+                Action::Back if self.link_warning.is_some() => self.link_warning = None,
+                Action::Back if self.html_state.find.is_some() => self.html_state.find = None,
                 Action::Back => {
                     if let Some(id) = self.search_id {
                         ctx.memory_mut(|m| m.surrender_focus(id));
@@ -905,6 +922,18 @@ impl App {
                         self.images_loaded.insert(m.summary.id);
                     }
                 }
+                Action::TrustImages(key) => {
+                    (self.trust_saver)(&key);
+                    self.trusted.insert(key);
+                }
+                Action::Find => {
+                    if v.current.as_ref().is_some_and(|m| !m.html.is_empty()) {
+                        let find = self.html_state.find.get_or_insert_with(Default::default);
+                        find.focus = true;
+                    }
+                }
+                Action::WarnLink(href, shown, real) => self.link_warning = Some((href, shown, real)),
+                Action::CloseLinkWarning => self.link_warning = None,
                 Action::ToggleQuotes => self.quotes_open = !self.quotes_open,
                 Action::ToggleHeaders => self.headers_open = !self.headers_open,
                 Action::OpenLink(link) => {
@@ -1108,6 +1137,7 @@ impl App {
         self.composer(&ctx, &accounts);
         self.viewer(&ctx, &mut actions);
         self.move_picker(&ctx, v.current.as_ref(), &mut actions);
+        self.link_warning_dialog(&ctx, &mut actions);
         self.snooze_picker(&ctx, &mut actions);
         self.folder_dialog(&ctx);
         self.undo_toast(&ctx);
@@ -1403,6 +1433,39 @@ impl App {
         self.expanded = Some(id);
         self.reader_focus = true;
         self.scroll_to_selected = true;
+    }
+
+    fn link_warning_dialog(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        let Some((href, shown, real)) = self.link_warning.clone() else { return };
+        let mut open = false;
+        let mut close = false;
+        let r = egui::Modal::new(egui::Id::new("link-warning"))
+            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                ui.set_width(420.0);
+                modal_title(ui, "this link goes somewhere else");
+                Line::new().note(format!("The link text says {shown}, but it opens {real}. Phishing mail does this.")).size(12.5).wrapped(ui);
+                ui.add_space(4.0);
+                Line::new().measured(href.as_str()).size(11.0).show(ui);
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.add(Key::new("cancel").solid(READOUT).min_width(90.0)).clicked() {
+                        close = true;
+                    }
+                    if ui.add(Key::new("open anyway").outline(WARN).min_width(110.0)).clicked() {
+                        open = true;
+                    }
+                });
+            });
+        if r.should_close() {
+            close = true;
+        }
+        if open {
+            actions.push(Action::OpenLink(href));
+            actions.push(Action::CloseLinkWarning);
+        } else if close {
+            actions.push(Action::CloseLinkWarning);
+        }
     }
 
     fn snooze_picker(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
@@ -1780,7 +1843,7 @@ impl App {
                     html: format!("<img src=\"{}\" width=\"48\" height=\"48\">", url.replace('"', "")),
                     inline: Vec::new(),
                 };
-                let _ = html_body(ui, &self.html, m.summary.id.0 ^ 0xA7A7, &avatar, true);
+                let _ = html_body(ui, &self.html, m.summary.id.0 ^ 0xA7A7, &avatar, true, &mut HtmlState::default());
             }
             ui.horizontal(|ui| {
                 chip(ui, account, LEGEND, false);
@@ -1816,10 +1879,16 @@ impl App {
                 }
                 BodyState::Ready => {}
             }
+            let trust = trust_keys(&m.from_address);
+            let trusted = trust.iter().any(|k| self.trusted.contains(k));
             if let Some(host) = &m.remote_images {
-                if !self.images_loaded.contains(&m.summary.id) {
-                    if blocked_images(ui, host) {
-                        actions.push(Action::LoadImagesOnce);
+                if !self.images_loaded.contains(&m.summary.id) && !trusted {
+                    let domain = trust[1].trim_start_matches("domain:");
+                    match blocked_images(ui, host, &m.from_address, domain) {
+                        Some(ImageChoice::Once) => actions.push(Action::LoadImagesOnce),
+                        Some(ImageChoice::Sender) => actions.push(Action::TrustImages(trust[0].clone())),
+                        Some(ImageChoice::Domain) => actions.push(Action::TrustImages(trust[1].clone())),
+                        None => {}
                     }
                     ui.add_space(4.0);
                 } else {
@@ -1840,9 +1909,18 @@ impl App {
                     }
                 }
             } else {
-                let remote = self.images_loaded.contains(&m.summary.id);
-                if let Some(link) = html_body(ui, &self.html, m.summary.id.0, &m.html, remote) {
-                    actions.push(Action::OpenLink(link));
+                let remote = self.images_loaded.contains(&m.summary.id) || trusted;
+                if let Some(find) = &mut self.html_state.find {
+                    let count = self.html_state.match_count;
+                    if find_bar(ui, find, count) {
+                        actions.push(Action::Back);
+                    }
+                }
+                if let Some(link) = html_body(ui, &self.html, m.summary.id.0, &m.html, remote, &mut self.html_state) {
+                    match link.mismatch {
+                        Some((shown, real)) => actions.push(Action::WarnLink(link.href, shown, real)),
+                        None => actions.push(Action::OpenLink(link.href)),
+                    }
                 }
             }
             ui.add_space(6.0);
@@ -2290,4 +2368,10 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::CentralPanel::no_frame().show(ui, |ui| self.show(ui));
     }
+}
+
+pub fn trust_keys(address: &str) -> [String; 2] {
+    let address = address.trim().to_ascii_lowercase();
+    let domain = address.rsplit_once('@').map(|(_, d)| d).unwrap_or(&address).to_string();
+    [format!("sender:{address}"), format!("domain:{domain}")]
 }
