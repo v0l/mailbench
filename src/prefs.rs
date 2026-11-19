@@ -74,6 +74,58 @@ impl MarkRead {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ReaderWidth {
+    Comfortable,
+    #[default]
+    Full,
+}
+
+impl ReaderWidth {
+    pub const ALL: [ReaderWidth; 2] = [ReaderWidth::Comfortable, ReaderWidth::Full];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            ReaderWidth::Comfortable => "comfortable",
+            ReaderWidth::Full => "full width",
+        }
+    }
+
+    pub fn toggled(&self) -> ReaderWidth {
+        match self {
+            ReaderWidth::Comfortable => ReaderWidth::Full,
+            ReaderWidth::Full => ReaderWidth::Comfortable,
+        }
+    }
+}
+
+pub const SIDE_DEFAULT: u32 = 196;
+pub const SIDE_RANGE: (f32, f32) = (140.0, 340.0);
+pub const LIST_DEFAULT: u32 = 540;
+pub const LIST_RANGE: (f32, f32) = (300.0, 800.0);
+
+fn side_default() -> u32 {
+    SIDE_DEFAULT
+}
+
+fn list_default() -> u32 {
+    LIST_DEFAULT
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LayoutPrefs {
+    #[serde(default = "side_default")]
+    pub side_w: u32,
+    #[serde(default = "list_default")]
+    pub list_w: u32,
+}
+
+impl Default for LayoutPrefs {
+    fn default() -> Self {
+        LayoutPrefs { side_w: SIDE_DEFAULT, list_w: LIST_DEFAULT }
+    }
+}
+
 fn one_second() -> u32 {
     1
 }
@@ -97,11 +149,20 @@ pub struct ReadingPrefs {
     pub mark_read: MarkRead,
     #[serde(default = "one_second")]
     pub mark_read_secs: u32,
+    #[serde(default)]
+    pub reader_width: ReaderWidth,
 }
 
 impl Default for ReadingPrefs {
     fn default() -> Self {
-        ReadingPrefs { zoom_percent: 100, remote_images: RemoteImages::Ask, dark_html: false, mark_read: MarkRead::AfterDelay, mark_read_secs: 1 }
+        ReadingPrefs {
+            zoom_percent: 100,
+            remote_images: RemoteImages::Ask,
+            dark_html: false,
+            mark_read: MarkRead::AfterDelay,
+            mark_read_secs: 1,
+            reader_width: ReaderWidth::Full,
+        }
     }
 }
 
@@ -130,7 +191,7 @@ pub struct Command {
     pub hint: bool,
 }
 
-pub const COMMANDS: [Command; 13] = [
+pub const COMMANDS: [Command; 14] = [
     Command { id: "next", label: "next message", default: egui::Key::J, hint: true },
     Command { id: "previous", label: "previous message", default: egui::Key::K, hint: true },
     Command { id: "open", label: "open", default: egui::Key::Enter, hint: true },
@@ -144,6 +205,7 @@ pub const COMMANDS: [Command; 13] = [
     Command { id: "search", label: "search", default: egui::Key::Slash, hint: true },
     Command { id: "move", label: "move to folder", default: egui::Key::M, hint: true },
     Command { id: "compose", label: "compose", default: egui::Key::C, hint: true },
+    Command { id: "reader_width", label: "toggle reader width", default: egui::Key::W, hint: false },
 ];
 
 pub const FIXED: [(&str, &str, bool); 6] = [
@@ -295,6 +357,8 @@ pub struct Prefs {
     pub reading: ReadingPrefs,
     #[serde(default)]
     pub keys: Bindings,
+    #[serde(default)]
+    pub layout: LayoutPrefs,
 }
 
 pub fn load(store: &Store) -> Prefs {
@@ -345,6 +409,8 @@ mod tests {
         assert_eq!(p.reading.zoom_percent, 100);
         assert_eq!(p.reading.remote_images, RemoteImages::Ask);
         assert_eq!(p.bodies, BodyPolicy::KeepAll);
+        assert_eq!(p.reading.reader_width, ReaderWidth::Full);
+        assert_eq!(p.layout, LayoutPrefs { side_w: 196, list_w: 540 });
     }
 
     #[test]

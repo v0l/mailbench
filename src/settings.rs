@@ -276,6 +276,11 @@ impl Panels {
                     ui.ctx().accesskit_node_builder(r.id, |node| node.set_label("mark read delay seconds"));
                 });
             }
+            row(ui, "reader width", |ui| {
+                for option in prefs::ReaderWidth::ALL {
+                    ui.selectable_value(&mut reading.reader_width, option, format!("width {}", option.label()));
+                }
+            });
             ui.checkbox(&mut reading.dark_html, "dark reading for HTML");
         });
     }

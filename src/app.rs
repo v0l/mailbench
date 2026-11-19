@@ -1,8 +1,8 @@
 use crate::fake::FakeStore;
 use crate::kit::*;
 use crate::mailstore::*;
-use crate::prefs::RemoteImages;
-use egui::{Margin, Ui};
+use crate::prefs::{self, Prefs, RemoteImages};
+use egui::{Margin, Rect, Ui};
 use egui_bench::prelude::*;
 use std::collections::HashSet;
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -11,8 +11,6 @@ use std::time::{Duration, Instant};
 const AUTOSAVE: Duration = Duration::from_secs(4);
 
 pub const ROW_H: f32 = 25.0;
-const LIST_W: f32 = 540.0;
-const SIDE_W: f32 = 196.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reply {
@@ -42,6 +40,7 @@ pub enum Action {
     WarnLink(String, String, String),
     CloseLinkWarning,
     ToggleQuotes,
+    ToggleReaderWidth,
     ToggleHeaders,
     OpenLink(String),
     Unsubscribe,
@@ -487,7 +486,17 @@ pub struct App {
     pub html_state: crate::kit::HtmlState,
     pub trusted: HashSet<String>,
     pub trust_saver: Box<dyn FnMut(&str)>,
+    pub prefs_saver: Box<dyn FnMut(&Prefs)>,
+    pub reader_pane_w: f32,
+    pub reader_content_w: f32,
+    side_epoch: u32,
+    list_epoch: u32,
     link_warning: Option<(String, String, String)>,
+}
+
+struct DividerOutcome {
+    width: u32,
+    epoch: u32,
 }
 
 impl App {
@@ -545,6 +554,11 @@ impl App {
             html_state: Default::default(),
             trusted: HashSet::new(),
             trust_saver: Box::new(|_| {}),
+            prefs_saver: Box::new(|_| {}),
+            reader_pane_w: 0.0,
+            reader_content_w: 0.0,
+            side_epoch: 0,
+            list_epoch: 0,
             link_warning: None,
         }
     }
@@ -609,7 +623,7 @@ impl App {
         }
         let plain = ctx.input(|i| !i.modifiers.shift);
         let keys = &self.prefs.keys;
-        let table: [(K, Action); 15] = [
+        let table: [(K, Action); 16] = [
             (keys.key_for("next"), Action::Next),
             (K::ArrowDown, Action::Next),
             (keys.key_for("previous"), Action::Previous),
@@ -625,6 +639,7 @@ impl App {
             (keys.key_for("compose"), Action::Compose),
             (keys.key_for("move"), Action::OpenMove),
             (keys.key_for("search"), Action::Search),
+            (keys.key_for("reader_width"), Action::ToggleReaderWidth),
         ];
         let snooze_key = keys.key_for("snooze");
         let mut out = Vec::new();
@@ -975,6 +990,10 @@ impl App {
                 }
                 Action::WarnLink(href, shown, real) => self.link_warning = Some((href, shown, real)),
                 Action::CloseLinkWarning => self.link_warning = None,
+                Action::ToggleReaderWidth => {
+                    self.prefs.reading.reader_width = self.prefs.reading.reader_width.toggled();
+                    (self.prefs_saver)(&self.prefs);
+                }
                 Action::ToggleQuotes => self.quotes_open = !self.quotes_open,
                 Action::ToggleHeaders => self.headers_open = !self.headers_open,
                 Action::OpenLink(link) => {
@@ -1164,16 +1183,19 @@ impl App {
         let mut actions = Vec::new();
         self.header(ui, &accounts, failed, &mut actions);
         self.hint_bar(ui);
-        egui::Panel::left("side")
-            .exact_size(SIDE_W)
-            .resizable(false)
-            .frame(egui::Frame::NONE.fill(CHASSIS).inner_margin(Margin::same(8)))
-            .show(ui, |ui| self.side(ui, &accounts, &mut actions));
-        egui::Panel::left("list")
-            .exact_size(LIST_W)
-            .resizable(false)
-            .frame(egui::Frame::NONE.fill(CHASSIS))
-            .show(ui, |ui| self.list(ui, &v, &accounts, &mut actions));
+        let side = self.divider_panel("side", self.side_epoch, self.prefs.layout.side_w, prefs::SIDE_DEFAULT, prefs::SIDE_RANGE, true, ui, |this, ui| {
+            this.side(ui, &accounts, &mut actions)
+        });
+        self.side_epoch = side.epoch;
+        let list = self.divider_panel("list", self.list_epoch, self.prefs.layout.list_w, prefs::LIST_DEFAULT, prefs::LIST_RANGE, false, ui, |this, ui| {
+            this.list(ui, &v, &accounts, &mut actions)
+        });
+        self.list_epoch = list.epoch;
+        let layout = prefs::LayoutPrefs { side_w: side.width, list_w: list.width };
+        if layout != self.prefs.layout {
+            self.prefs.layout = layout;
+            (self.prefs_saver)(&self.prefs);
+        }
         egui::CentralPanel::no_frame().show(ui, |ui| {
             pane_fill(ui, CHASSIS);
             egui::Frame::NONE.inner_margin(Margin { left: 22, right: 22, top: 16, bottom: 10 }).show(ui, |ui| {
@@ -1188,6 +1210,38 @@ impl App {
         self.folder_dialog(&ctx);
         self.undo_toast(&ctx);
         self.apply(&ctx, actions);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn divider_panel(
+        &mut self,
+        name: &'static str,
+        epoch: u32,
+        width: u32,
+        default: u32,
+        range: (f32, f32),
+        padded: bool,
+        ui: &mut Ui,
+        add: impl FnOnce(&mut Self, &mut Ui),
+    ) -> DividerOutcome {
+        let frame = if padded {
+            egui::Frame::NONE.fill(CHASSIS).inner_margin(Margin::same(8))
+        } else {
+            egui::Frame::NONE.fill(CHASSIS)
+        };
+        let shown = egui::Panel::left((name, epoch))
+            .default_size(width as f32)
+            .size_range(range.0..=range.1)
+            .resizable(true)
+            .frame(frame)
+            .show(ui, |ui| add(self, ui));
+        let rect = shown.response.rect;
+        let edge = Rect::from_x_y_ranges(rect.right() - 4.0..=rect.right() + 16.0, rect.y_range());
+        let reset = ui.interact(edge, ui.id().with(("divider-reset", name)), egui::Sense::click()).double_clicked();
+        if reset {
+            return DividerOutcome { width: default, epoch: epoch + 1 };
+        }
+        DividerOutcome { width: rect.width().round() as u32, epoch }
     }
 
     fn header(&mut self, ui: &mut Ui, accounts: &[AccountInfo], failed: bool, actions: &mut Vec<Action>) {
@@ -1858,8 +1912,13 @@ impl App {
         };
         let account = accounts.get(m.summary.account).map(|a| a.name.as_str()).unwrap_or("");
         self.sync_previews(&ui.ctx().clone(), m);
+        self.reader_pane_w = ui.available_width();
+        let full = self.prefs.reading.reader_width == prefs::ReaderWidth::Full;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            ui.set_max_width(ui.available_width().min(if m.html.is_empty() { MEASURE + 44.0 } else { 820.0 }));
+            if !full {
+                ui.set_max_width(ui.available_width().min(if m.html.is_empty() { MEASURE + 44.0 } else { 820.0 }));
+            }
+            self.reader_content_w = ui.available_width();
             ui.spacing_mut().item_spacing.y = self.prefs.density.reader_gap();
             subject_line(ui, &m.summary.subject);
             let shown_at = v.thread.iter().position(|t| t.summary.id == m.summary.id).unwrap_or(v.thread.len());

@@ -891,3 +891,127 @@ fn default_reading_zoom_seeds_the_html_zoom() {
     h.run();
     assert!(h.state().1.html_state.zoom.values().all(|z| *z == 1500));
 }
+
+fn wide_harness(store: FakeStore, app_setup: impl FnOnce(&mut App)) -> Harness<'static, (bool, App)> {
+    let mut app = App::with_store(Box::new(store));
+    app.selected = 0;
+    app_setup(&mut app);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1920.0, 1080.0))
+        .with_step_dt(0.02)
+        .with_pixels_per_point(1.0)
+        .build_ui_state(
+            |ui, (ready, app): &mut (bool, App)| {
+                if !*ready {
+                    mailbench::kit::setup(ui.ctx());
+                    *ready = true;
+                    ui.ctx().request_repaint();
+                    return;
+                }
+                app.show(ui);
+            },
+            (false, app),
+        );
+    for _ in 0..40 {
+        h.run();
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    h
+}
+
+fn html_store() -> FakeStore {
+    let mut store = FakeStore::concept();
+    let id = store.list(&Query::new(Folder::Inbox), 0, 1).items[0].id;
+    store.set_html(id, "<p>First paragraph here</p>");
+    store
+}
+
+fn plain_store() -> FakeStore {
+    let store = FakeStore::concept();
+    let id = store.list(&Query::new(Folder::Inbox), 0, 1).items[0].id;
+    assert!(store.get(id).unwrap().html.is_empty());
+    store
+}
+
+#[test]
+fn full_width_reader_fills_the_pane_for_plain_and_html_mail() {
+    for store in [plain_store(), html_store()] {
+        let h = wide_harness(store, |_| {});
+        let app = &h.state().1;
+        assert!(app.reader_pane_w > 900.0, "{}", app.reader_pane_w);
+        assert!(app.reader_content_w >= app.reader_pane_w - 20.0, "{} of {}", app.reader_content_w, app.reader_pane_w);
+    }
+}
+
+#[test]
+fn comfortable_reader_width_keeps_the_old_cap() {
+    for (store, cap) in [(plain_store(), 604.0), (html_store(), 820.0)] {
+        let h = wide_harness(store, |app| app.prefs.reading.reader_width = mailbench::prefs::ReaderWidth::Comfortable);
+        let app = &h.state().1;
+        assert!(app.reader_content_w <= cap + 0.5, "{}", app.reader_content_w);
+        assert!(app.reader_content_w > cap - 40.0, "{}", app.reader_content_w);
+    }
+}
+
+#[test]
+fn w_toggles_the_reader_width() {
+    let mut h = wide_harness(plain_store(), |_| {});
+    h.key_press(egui::Key::W);
+    h.run();
+    h.run();
+    let app = &h.state().1;
+    assert_eq!(app.prefs.reading.reader_width, mailbench::prefs::ReaderWidth::Comfortable);
+    assert!(app.reader_content_w < 700.0);
+}
+
+#[test]
+fn dragging_the_list_divider_resizes_the_reader_and_persists() {
+    let saved = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let sink = saved.clone();
+    let mut h = wide_harness(plain_store(), move |app| {
+        app.prefs_saver = Box::new(move |p| *sink.borrow_mut() = Some(p.clone()));
+    });
+    let before = h.state().1.reader_pane_w;
+    let x = 747.0;
+    h.hover_at(egui::pos2(x, 500.0));
+    h.run();
+    h.drag_at(egui::pos2(x, 500.0));
+    h.run();
+    h.hover_at(egui::pos2(x + 200.0, 500.0));
+    h.run();
+    h.drop_at(egui::pos2(x + 200.0, 500.0));
+    h.run();
+    h.run();
+    let after = h.state().1.reader_pane_w;
+    assert!((before - after - 200.0).abs() < 6.0, "{before} -> {after}");
+    let prefs = saved.borrow().clone().expect("saved");
+    assert!(prefs.layout.list_w > 700, "{}", prefs.layout.list_w);
+
+    let h2 = wide_harness(plain_store(), move |app| app.prefs = prefs);
+    assert!((h2.state().1.reader_pane_w - after).abs() < 2.0);
+}
+
+#[test]
+fn double_clicking_the_divider_resets_the_list_width() {
+    let mut h = wide_harness(plain_store(), |app| app.prefs.layout.list_w = 700);
+    let before = h.state().1.reader_pane_w;
+    let x = 900.0;
+    h.hover_at(egui::pos2(x, 500.0));
+    h.run();
+    for _ in 0..2 {
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton {
+                pos: egui::pos2(x, 500.0),
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+    }
+    h.step();
+    h.run();
+    h.run();
+    let after = h.state().1.reader_pane_w;
+    assert!((after - before - 160.0).abs() < 6.0, "{before} -> {after}");
+    assert_eq!(h.state().1.prefs.layout.list_w, 540);
+}

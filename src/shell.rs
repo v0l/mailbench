@@ -1244,6 +1244,11 @@ impl Shell {
             m.app.allow_open = allow;
             m.app.open_dir = dir;
             m.app.trusted = trusted;
+            if let Some(prefs_store) = self.store.as_ref().and_then(|s| s.try_clone().ok()) {
+                m.app.prefs_saver = Box::new(move |prefs| {
+                    let _ = crate::prefs::save(&prefs_store, prefs);
+                });
+            }
             if let Some(saver) = saver {
                 m.app.trust_saver = Box::new(move |key| {
                     let _ = saver.put(IMAGE_TRUST_KIND, key, b"1");
