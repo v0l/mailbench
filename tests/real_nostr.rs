@@ -162,3 +162,20 @@ fn a_sender_picture_is_blocked_until_images_are_allowed_and_nip05_needs_proof() 
         }
     });
 }
+
+#[test]
+fn a_nostr_account_has_no_labels_and_label_search_finds_nothing() {
+    mailbench::runtime::block_on(async {
+        let (mut h, _d, _r) = open().await;
+        assert!(h.state().1.store.labels().is_empty());
+        assert!(h.query_by_label_contains("label ").is_none());
+        let q = Query { text: "label:work".into(), ..Query::new(ms::Folder::Inbox) };
+        h.state_mut().1.search = "label:work".into();
+        h.run();
+        assert_eq!(h.state().1.store.counts(&q).all, 0);
+        let plain = Query { text: "hello".into(), ..Query::new(ms::Folder::Inbox) };
+        h.state_mut().1.search = "hello".into();
+        h.run();
+        assert!(h.state().1.store.list(&plain, 0, 10).items.len() <= 1);
+    });
+}

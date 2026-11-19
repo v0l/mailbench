@@ -197,3 +197,39 @@ fn snooze_and_mark_all_read_use_the_bulk_paths() {
     assert_eq!(json_of(d, &["list", "--json"]), json!([]));
     assert_eq!(json_of(d, &["list", "--folder", "snoozed", "--json"]).as_array().unwrap().len(), 1);
 }
+
+fn nostr_config(secret: &str, relay: &str) -> AccountConfig {
+    accounts::nostr_config(secret, vec![relay.to_string()]).unwrap()
+}
+
+#[test]
+fn send_works_for_a_nostr_account_and_refuses_attachments() {
+    use nostr_relay_builder::MockRelay;
+    let relay = block_on(MockRelay::run()).unwrap();
+    let url = block_on(relay.url()).to_string();
+    let alice = "01".repeat(32);
+    let bob_secret = "02".repeat(32);
+    let mut bob = NostrBackend::new(NostrConfig::new(&bob_secret, vec![url.clone()])).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::create(&dir.path().join("mail.db"), None, Some(("pw", KdfParams::fast()))).unwrap();
+    accounts::save(&store, &nostr_config(&alice, &url)).unwrap();
+    drop(store);
+
+    let body = dir.path().join("body.txt");
+    std::fs::write(&body, "hello from the shell").unwrap();
+    let file = dir.path().join("f.bin");
+    std::fs::write(&file, b"x").unwrap();
+    let to = bob.address();
+    let refused = mailbench(dir.path(), &["send", "--to", &to, "--subject", "Hi", "--body-file", body.to_str().unwrap(), "--attach", file.to_str().unwrap()]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("cannot send attachments"));
+
+    let out = mailbench(dir.path(), &["send", "--to", &to, "--subject", "Hi Bob", "--body-file", body.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let state = block_on(bob.open_folder("Inbox")).unwrap();
+    let got = block_on(bob.fetch_summaries("Inbox", &state.uids)).unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].subject.as_deref(), Some("Hi Bob"));
+}

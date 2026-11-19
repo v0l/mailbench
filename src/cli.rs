@@ -389,6 +389,9 @@ fn send_cmd(cli: &Cli, a: &SendArgs) -> Res<()> {
         eprintln!("note: sending from {}; pick another with --account", configs[0].address);
     }
     let from = configs[0].address.clone();
+    if matches!(configs[0].credential, accounts::Credential::Nostr { .. }) && !attachments.is_empty() {
+        return Err("nostr accounts cannot send attachments yet".into());
+    }
     if a.dry_run {
         println!("From: {from}\nTo: {}\nSubject: {}\nAttachments: {}\nBytes: {}", a.to.join(", "), a.subject, attachments.len(), body.len());
         return Ok(());

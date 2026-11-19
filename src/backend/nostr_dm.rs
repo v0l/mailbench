@@ -624,6 +624,9 @@ impl Backend for NostrBackend {
     }
 
     async fn send(&mut self, message: &OutgoingMessage) -> Result<()> {
+        if !message.attachments.is_empty() {
+            return Err(BackendError::Protocol("nostr messages cannot carry attachments yet".into()));
+        }
         let client = self.client().await?;
         let me = self.public_key();
         let mut recipients = Vec::new();
