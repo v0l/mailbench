@@ -58,8 +58,11 @@ notify-rust = "4.19.0"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive"] }
 rpassword = "7"
+nostr-sdk = { version = "=0.44.1", default-features = false, features = ["nip44", "nip59"] }
+aes-gcm = "0.10"
 
 [dev-dependencies]
+nostr-relay-builder = "=0.44.1"
 tempfile = "3"
 egui_kittest = { version = "0.37", features = ["wgpu", "snapshot"] }
 image = { version = "0.25", default-features = false, features = ["png"] }

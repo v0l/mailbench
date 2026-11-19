@@ -2,7 +2,7 @@ mod backfill;
 mod display;
 mod headers;
 mod model;
-mod threads;
+pub(crate) mod threads;
 mod search;
 mod worker;
 

@@ -1,6 +1,7 @@
 mod error;
 mod imap;
 mod memory;
+mod nostr_dm;
 mod smtp;
 mod store_sink;
 mod sync;
@@ -9,6 +10,7 @@ mod types;
 pub use error::{BackendError, Result};
 pub use imap::{ImapBackend, ImapConfig};
 pub use memory::MemorySink;
+pub use nostr_dm::*;
 pub use smtp::{bracket, build_message, new_message_id_for, render_message, SmtpBackend, SmtpConfig, SmtpSecurity};
 pub use store_sink::StoreSink;
 pub use sync::{SyncReport, SyncSink, sync_account};
