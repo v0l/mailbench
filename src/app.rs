@@ -177,7 +177,7 @@ impl Draft {
         d
     }
 
-    pub fn reply(m: &Message, mode: Reply, signature: &str, own: &[String], attachments: Vec<OutAttachment>) -> Draft {
+    pub fn reply(m: &Message, mode: Reply, signature: &str, own: &[String], attachments: Vec<OutAttachment>, selected: Option<&str>) -> Draft {
         let (prefix, title) = match mode {
             Reply::Forward => ("Fwd: ", "forward"),
             _ => ("Re: ", "reply to"),
@@ -201,7 +201,10 @@ impl Draft {
         } else {
             String::new()
         };
-        let text = m.paragraphs.join("\n\n");
+        let text = match selected {
+            Some(s) if mode != Reply::Forward && !s.trim().is_empty() => s.trim().to_string(),
+            _ => m.paragraphs.join("\n\n"),
+        };
         let body = if mode == Reply::Forward {
             let mut head = vec![
                 "---------- Forwarded message ----------".to_string(),
@@ -618,7 +621,7 @@ impl App {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, K::F)) {
             return vec![Action::Find];
         }
-        if ctx.egui_wants_keyboard_input() {
+        if ctx.egui_wants_keyboard_input() && !ctx.memory(|m| m.focused()).is_some_and(|f| f == egui::Id::new(PLAIN_BODY)) {
             return Vec::new();
         }
         let plain = ctx.input(|i| !i.modifiers.shift);
@@ -944,7 +947,8 @@ impl App {
                         let own: Vec<String> = accounts.iter().map(|a| a.address.clone()).collect();
                         let signature = accounts.get(m.summary.account).map(|a| a.signature.clone()).unwrap_or_default();
                         let attachments = if mode == Reply::Forward { self.store.attachments(m.summary.id).unwrap_or_default().into_iter().map(|a| OutAttachment { name: a.name, mime: a.mime, data: a.data.to_vec() }).collect() } else { Vec::new() };
-                        self.draft = Some(Draft::reply(m, mode, &signature, &own, attachments));
+                        let picked = self.html_state.selected_text.as_ref().filter(|(id, _)| *id == m.summary.id.0).map(|(_, t)| t.clone());
+                        self.draft = Some(Draft::reply(m, mode, &signature, &own, attachments, picked.as_deref()));
                     }
                 }
                 Action::Compose => {
@@ -1993,9 +1997,10 @@ impl App {
                 }
             }
             if m.html.is_empty() {
-                for p in &m.paragraphs {
-                    body_text(ui, p, self.prefs.reading.zoom());
-                    ui.add_space(4.0);
+                let text = m.paragraphs.join("\n\n");
+                let picked = plain_body(ui, &text, self.prefs.reading.zoom());
+                if picked.is_some() || ui.ctx().memory(|mem| mem.focused().is_none()) {
+                    self.html_state.selected_text = picked.map(|t| (m.summary.id.0, t));
                 }
                 if quoted_fold(ui, m.quoted.len(), self.quotes_open) {
                     actions.push(Action::ToggleQuotes);

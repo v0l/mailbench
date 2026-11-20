@@ -33,6 +33,53 @@ pub fn setup(ctx: &egui::Context) {
             }],
         ));
     }
+    add_fallbacks(ctx);
+}
+
+const CJK_FONTS: &[&str] = &[
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "C:\\Windows\\Fonts\\msyh.ttc",
+    "C:\\Windows\\Fonts\\YuGothM.ttc",
+];
+
+const EMOJI_FONTS: &[&str] = &[
+    "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+    "/usr/share/fonts/noto/NotoColorEmoji.ttf",
+    "/usr/share/fonts/google-noto-emoji/NotoColorEmoji.ttf",
+    "/usr/share/fonts/truetype/ancient-scripts/Symbola_hint.ttf",
+    "/System/Library/Fonts/Apple Color Emoji.ttc",
+    "C:\\Windows\\Fonts\\seguiemj.ttf",
+];
+
+fn add_fallbacks(ctx: &egui::Context) {
+    let defaults = egui::FontDefinitions::default();
+    let mut stack: Vec<(String, std::sync::Arc<egui::FontData>)> = defaults
+        .families
+        .get(&FontFamily::Proportional)
+        .into_iter()
+        .flatten()
+        .filter_map(|n| defaults.font_data.get(n).map(|d| (format!("fallback-{n}"), d.clone())))
+        .collect();
+    if let Some(bytes) = CJK_FONTS.iter().find_map(|p| std::fs::read(p).ok()) {
+        stack.push(("fallback-cjk".into(), std::sync::Arc::new(egui::FontData::from_owned(bytes))));
+    }
+    if let Some(bytes) = EMOJI_FONTS.iter().find_map(|p| std::fs::read(p).ok()) {
+        stack.push(("fallback-emoji".into(), std::sync::Arc::new(egui::FontData::from_owned(bytes))));
+    }
+    for (name, data) in stack {
+        let families = ["body", "body-strong", "body-italic"]
+            .into_iter()
+            .map(|f| FontFamily::Name(f.into()))
+            .chain([FontFamily::Proportional, FontFamily::Monospace])
+            .map(|family| egui::epaint::text::InsertFontFamily { family, priority: egui::epaint::text::FontPriority::Lowest })
+            .collect();
+        ctx.add_font(egui::FontInsert { name, data: (*data).clone(), families });
+    }
 }
 
 pub fn put(p: &egui::Painter, x: f32, w: f32, cy: f32, text: &str, font: FontId, col: Color32) {
@@ -148,6 +195,7 @@ pub struct HtmlState {
     pub find: Option<FindState>,
     pub selection: Option<(crate::htmlview::TextPos, crate::htmlview::TextPos)>,
     pub selection_for: Option<crate::htmlview::RenderKey>,
+    pub selected_text: Option<(u64, String)>,
     pub match_count: usize,
 }
 
@@ -343,6 +391,10 @@ pub fn html_body(
     ui.ctx().accesskit_node_builder(resp.id, |node| node.set_label("message body"));
 
     let wants_copy = !ui.ctx().egui_wants_keyboard_input() && ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
+    state.selected_text = match state.selection {
+        Some((a, b)) if a != b => Some(page.selected_text(a, b)).filter(|t| !t.trim().is_empty()).map(|t| (id, t)),
+        _ => None,
+    };
     if wants_copy {
         let text = match state.selection {
             Some((a, b)) if a != b || !page.blocks.is_empty() => {
@@ -410,6 +462,26 @@ pub fn body_text(ui: &mut Ui, text: &str, zoom: f32) {
         )
         .wrap(),
     );
+}
+
+pub const PLAIN_BODY: &str = "plain-body";
+
+pub fn plain_body(ui: &mut Ui, text: &str, zoom: f32) -> Option<String> {
+    let mut shown = text;
+    let out = egui::TextEdit::multiline(&mut shown)
+        .id(egui::Id::new(PLAIN_BODY))
+        .frame(egui::Frame::NONE)
+        .font(body(BODY_SIZE * zoom))
+        .text_color(VALUE)
+        .desired_width(ui.available_width())
+        .desired_rows(1)
+        .show(ui);
+    let label = format!("message body: {text}");
+    ui.ctx().accesskit_node_builder(out.response.id, |node| node.set_label(label));
+    let range = out.cursor_range?;
+    let [a, b] = range.sorted_cursors();
+    let (a, b) = (a.index.0, b.index.0);
+    (a != b).then(|| text.chars().skip(a).take(b - a).collect::<String>()).filter(|t| !t.trim().is_empty())
 }
 
 pub fn sender_line(ui: &mut Ui, name: &str, to: &str, when: &str) {
@@ -568,22 +640,25 @@ pub fn quoted_fold(ui: &mut Ui, lines: usize, open: bool) -> bool {
 }
 
 pub fn body_editor(ui: &mut Ui, text: &mut String, rows: usize) {
+    let max_h = (ui.ctx().content_rect().height() - 340.0).clamp(140.0, 520.0);
     egui::Frame::NONE
         .fill(WELL)
         .stroke(Stroke::new(1.0, ETCH))
         .corner_radius(2)
         .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
-            let r = ui.add(
-                egui::TextEdit::multiline(text)
-                    .frame(egui::Frame::NONE)
-                    .font(body(BODY_SIZE))
-                    .text_color(VALUE)
-                    .desired_rows(rows)
-                    .desired_width(ui.available_width())
-                    .return_key(None),
-            );
-            ui.ctx().accesskit_node_builder(r.id, |node| node.set_label("message body"));
+            egui::ScrollArea::vertical().max_height(max_h).auto_shrink([false, true]).stick_to_bottom(false).show(ui, |ui| {
+                let r = ui.add(
+                    egui::TextEdit::multiline(text)
+                        .frame(egui::Frame::NONE)
+                        .font(body(BODY_SIZE))
+                        .text_color(VALUE)
+                        .desired_rows(rows)
+                        .desired_width(ui.available_width())
+                        .return_key(None),
+                );
+                ui.ctx().accesskit_node_builder(r.id, |node| node.set_label("message body"));
+            });
         });
 }
 

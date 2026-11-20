@@ -438,11 +438,78 @@ fn open_disabled_writes_nothing() {
 fn reply_quotes_the_original_with_an_attribution_line() {
     let h = harness(FakeStore::concept());
     let m = h.state().1.store.get(h.state().1.store.list(&Query::new(Folder::Inbox), 0, 1).items[0].id).unwrap();
-    let d = mailbench::app::Draft::reply(&m, mailbench::app::Reply::One, "", &[], Vec::new());
+    let d = mailbench::app::Draft::reply(&m, mailbench::app::Reply::One, "", &[], Vec::new(), None);
     assert!(d.body.contains(&format!("On {}, ", m.sent)));
     assert!(d.body.contains(" wrote:\n> "));
     for line in d.body.lines().skip_while(|l| !l.ends_with("wrote:")).skip(1) {
         assert!(line.starts_with('>'), "{line}");
+    }
+}
+
+#[test]
+fn reply_with_a_selection_quotes_only_the_selection() {
+    let h = harness(FakeStore::concept());
+    let m = h.state().1.store.get(h.state().1.store.list(&Query::new(Folder::Inbox), 0, 1).items[0].id).unwrap();
+    let d = mailbench::app::Draft::reply(&m, mailbench::app::Reply::One, "", &[], Vec::new(), Some("just this line"));
+    assert!(d.body.ends_with("wrote:\n> just this line"), "{}", d.body);
+    let f = mailbench::app::Draft::reply(&m, mailbench::app::Reply::Forward, "", &[], Vec::new(), Some("just this line"));
+    assert!(f.body.contains(&m.paragraphs[0]), "forward keeps the whole message");
+}
+
+fn select_in_body(h: &mut Harness<'static, (bool, App)>, from: usize, to: usize) {
+    let id = egui::Id::new(mailbench::kit::PLAIN_BODY);
+    h.ctx.memory_mut(|m| m.request_focus(id));
+    let mut state = egui::text_edit::TextEditState::load(&h.ctx, id).unwrap_or_default();
+    state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(from), egui::text::CCursor::new(to))));
+    state.store(&h.ctx, id);
+    h.run();
+    h.run();
+}
+
+#[test]
+fn pressing_r_with_text_selected_in_the_reader_quotes_only_that_text() {
+    let mut h = harness(FakeStore::concept());
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    let id = h.state().1.store.list(&Query::new(Folder::Inbox), 0, 1).items[0].id;
+    let first = h.state().1.store.get(id).unwrap().paragraphs[0].clone();
+    let picked: String = first.chars().take(12).collect();
+    select_in_body(&mut h, 0, 12);
+    h.key_press(egui::Key::R);
+    h.run();
+    h.run();
+    let d = h.state().1.draft.clone().expect("r opens a reply while the body has focus");
+    assert!(d.body.ends_with(&format!("wrote:\n> {}", picked.trim())), "{}", d.body);
+    assert!(!d.body.contains(&first[12..]), "the rest of the message was quoted");
+}
+
+#[test]
+fn the_reply_window_fits_the_screen_with_a_long_quote() {
+    let mut store = FakeStore::concept();
+    let long = (0..400).map(|n| format!("line {n} of a very long message")).collect::<Vec<_>>();
+    store.set_paragraphs(0, long);
+    let mut h = harness(store);
+    h.key_press(egui::Key::R);
+    h.run();
+    h.run();
+    let send = h.get_by_label("send").rect();
+    let discard = h.get_by_label("discard").rect();
+    assert!(send.bottom() <= 800.0 && send.top() > 300.0, "send is at {send:?}");
+    assert!(discard.bottom() <= 800.0, "discard is off screen at {discard:?}");
+    let img = h.render().expect("render");
+    img.save(out_dir().join("composer-long.png")).unwrap();
+}
+
+#[test]
+fn chinese_punctuation_and_emoji_render_with_a_fallback_font() {
+    let ctx = egui::Context::default();
+    mailbench::kit::setup(&ctx);
+    let mut out = ctx.run_ui(Default::default(), |_| {});
+    out.textures_delta.clear();
+    for c in ['\u{ff1a}', '\u{3010}', '\u{4e2d}', '\u{1f600}'] {
+        let found = ctx.fonts_mut(|f| f.has_glyph(&mailbench::kit::body(14.0), c));
+        assert!(found, "no glyph for {c:?}");
     }
 }
 
@@ -452,10 +519,10 @@ fn reply_sets_threading_headers_and_forward_does_not() {
     let mut m = h.state().1.store.get(h.state().1.store.list(&Query::new(Folder::Inbox), 0, 1).items[0].id).unwrap();
     m.message_id = Some("orig@x.test".into());
     m.references = vec!["root@x.test".into()];
-    let r = mailbench::app::Draft::reply(&m, mailbench::app::Reply::One, "", &[], Vec::new());
+    let r = mailbench::app::Draft::reply(&m, mailbench::app::Reply::One, "", &[], Vec::new(), None);
     assert_eq!(r.in_reply_to.as_deref(), Some("orig@x.test"));
     assert_eq!(r.references, vec!["root@x.test", "orig@x.test"]);
-    let f = mailbench::app::Draft::reply(&m, mailbench::app::Reply::Forward, "", &[], Vec::new());
+    let f = mailbench::app::Draft::reply(&m, mailbench::app::Reply::Forward, "", &[], Vec::new(), None);
     assert!(f.in_reply_to.is_none());
     assert!(f.body.contains("---------- Forwarded message ----------"));
     assert!(f.body.contains("Subject: "));

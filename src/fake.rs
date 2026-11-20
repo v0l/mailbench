@@ -121,6 +121,12 @@ fn draft(id: u64, subject: &str, when: &str) -> Message {
 }
 
 impl FakeStore {
+    pub fn set_paragraphs(&mut self, index: usize, paragraphs: Vec<String>) {
+        if let Some(m) = self.messages.get_mut(index) {
+            m.paragraphs = paragraphs;
+        }
+    }
+
     fn base_accounts() -> Vec<AccountInfo> {
         ACCOUNTS
             .iter()
