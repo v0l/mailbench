@@ -100,7 +100,7 @@ fn reply_arrives_quoted_with_threading_headers_and_a_copy_lands_in_sent() {
     let original = first_inbox(&real);
     assert_eq!(original.message_id.as_deref(), Some("orig-123@peer.test"));
 
-    let mut draft = Draft::reply(&original, Reply::One, "", &[format!("{me}@localhost")], Vec::new());
+    let mut draft = Draft::reply(&original, Reply::One, "", &[format!("{me}@localhost")], Vec::new(), None);
     draft.body = format!("my answer{}", draft.body);
     real.append(ms::Folder::Sent, draft.outgoing()).unwrap();
 
