@@ -505,6 +505,110 @@ fn o_writes_a_private_copy_and_says_so() {
 }
 
 #[test]
+fn o_and_shift_s_act_on_the_focused_older_message_while_the_newest_is_shown() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("older.zip");
+    let opened = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let store = FakeStore::concept();
+    let head = store.list(&Query::new(Folder::Inbox), 0, 1).items[0].id;
+    let store = store.without_attachments(head).with_older_attachment(head, 0, "older-notes.pdf");
+    let mut h = harness(store);
+    let older = h.state().1.store.thread(head)[0].summary.id;
+    {
+        let app = &mut h.state_mut().1;
+        app.open_dir = dir.path().join("open");
+        app.save_picker = picker_to(target.clone());
+        let sink = opened.clone();
+        app.opener = Box::new(move |p| {
+            sink.lock().unwrap().push(p.to_path_buf());
+            true
+        });
+    }
+    h.key_press(egui::Key::O);
+    h.run();
+    assert!(opened.lock().unwrap().is_empty());
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.key_press(egui::Key::K);
+    h.run();
+    h.key_press(egui::Key::K);
+    h.run();
+    assert_eq!(h.state().1.thread_focus, Some(older));
+    assert_eq!(h.state().1.expanded, None);
+    h.key_press(egui::Key::O);
+    h.run();
+    let paths = opened.lock().unwrap().clone();
+    assert_eq!(paths.len(), 1);
+    assert_eq!(std::fs::read(&paths[0]).unwrap(), b"fake content of older-notes.pdf");
+    h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::S);
+    h.run();
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(&target).unwrap()).unwrap();
+    assert_eq!(zip.len(), 1);
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("older-notes.pdf").unwrap(), &mut text).unwrap();
+    assert_eq!(text, "fake content of older-notes.pdf");
+}
+
+#[test]
+fn an_expanded_older_message_shows_its_own_chip_and_preview() {
+    let store = FakeStore::concept();
+    let head = store.list(&Query::new(Folder::Inbox), 0, 1).items[0].id;
+    let store = store
+        .with_older_attachment(head, 0, "older-scan.pdf")
+        .with_attachment_bytes("older-scan.pdf", TINY_PDF.as_bytes().to_vec());
+    let mut h = harness(store);
+    assert!(h.query_by_label_contains("older-scan.pdf").is_none());
+    h.get_by_label_contains("Wed 15 Nov 16:20").click();
+    h.run();
+    h.run();
+    h.get_by_label_contains("older-scan.pdf");
+    assert!(h.query_by_label_contains("stencil-quote-revc.pdf").is_none());
+    assert!(h.query_by_role(egui::accesskit::Role::Image).is_some());
+}
+
+#[test]
+fn o_and_save_as_act_on_the_expanded_older_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("older.pdf");
+    let opened = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let store = FakeStore::concept();
+    let head = store.list(&Query::new(Folder::Inbox), 0, 1).items[0].id;
+    let store = store.with_older_attachment(head, 0, "older-notes.pdf");
+    let mut h = harness(store);
+    let older = h.state().1.store.thread(head)[0].summary.id;
+    {
+        let app = &mut h.state_mut().1;
+        app.open_dir = dir.path().join("open");
+        app.save_picker = picker_to(target.clone());
+        let sink = opened.clone();
+        app.opener = Box::new(move |p| {
+            sink.lock().unwrap().push(p.to_path_buf());
+            true
+        });
+    }
+    h.get_by_label_contains("Wed 15 Nov 16:20").click();
+    h.run();
+    h.run();
+    assert_eq!(h.state().1.expanded, Some(older));
+    h.get_by_label_contains("older-notes.pdf");
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.key_press(egui::Key::K);
+    h.run();
+    assert_eq!(h.state().1.thread_focus, Some(older));
+    h.key_press(egui::Key::O);
+    h.run();
+    let paths = opened.lock().unwrap().clone();
+    assert_eq!(paths.len(), 1);
+    assert_eq!(std::fs::read(&paths[0]).unwrap(), b"fake content of older-notes.pdf");
+    h.get_by_label_contains("older-notes.pdf").click();
+    h.run();
+    h.get_by_label("save as").click();
+    h.run();
+    assert_eq!(std::fs::read(&target).unwrap(), b"fake content of older-notes.pdf");
+}
+
+#[test]
 fn open_disabled_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let open_dir = dir.path().join("open");

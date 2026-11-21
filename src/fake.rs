@@ -128,6 +128,21 @@ impl FakeStore {
         }
     }
 
+    pub fn with_older_attachment(mut self, head: MessageId, index: usize, name: &str) -> FakeStore {
+        let id = self.older.iter().find(|(h, _)| *h == head.0).map(|(_, ids)| ids[index]);
+        if let Some(m) = self.messages.iter_mut().find(|m| Some(m.summary.id.0) == id) {
+            m.attachments = vec![AttachmentInfo { name: name.into(), size: "1 KB".into(), mime: mime_of(name) }];
+        }
+        self
+    }
+
+    pub fn without_attachments(mut self, id: MessageId) -> FakeStore {
+        if let Some(m) = self.messages.iter_mut().find(|m| m.summary.id == id) {
+            m.attachments = Vec::new();
+        }
+        self
+    }
+
     pub fn with_attachment_bytes(mut self, name: &str, data: Vec<u8>) -> FakeStore {
         self.blobs.insert(name.to_string(), data);
         self

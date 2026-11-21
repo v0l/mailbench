@@ -47,6 +47,7 @@ pub enum Action {
     GoTo(Folder),
     Label(String),
     Expand(MessageId),
+    FocusThread(MessageId),
     One(Box<Action>),
     OpenAttachment(usize),
     SaveAttachment(usize),
@@ -848,6 +849,7 @@ impl App {
             match a {
                 Action::One(_) => {}
                 Action::Expand(id) => self.expanded = Some(id),
+                Action::FocusThread(id) => self.thread_focus = Some(id),
                 Action::Next | Action::Previous if self.reader_focus && v.thread.len() > 1 => {
                     let shown = v.current.as_ref().map(|m| m.summary.id);
                     let at = self
@@ -1053,12 +1055,21 @@ impl App {
         }
     }
 
+    fn attachment_target(&self, v: &View) -> Option<MessageId> {
+        let id = self
+            .thread_focus
+            .filter(|f| self.reader_focus && v.thread.iter().any(|t| t.summary.id == *f))
+            .or_else(|| v.current.as_ref().map(|m| m.summary.id))?;
+        let has = match &v.current {
+            Some(m) if m.summary.id == id => !m.attachments.is_empty(),
+            _ => self.store.get(id).is_ok_and(|m| !m.attachments.is_empty()),
+        };
+        has.then_some(id)
+    }
+
     fn attachment_data(&mut self, v: &View) -> Option<Vec<AttachmentData>> {
-        let m = v.current.as_ref()?;
-        if m.attachments.is_empty() {
-            return None;
-        }
-        match self.store.attachments(m.summary.id) {
+        let id = self.attachment_target(v)?;
+        match self.store.attachments(id) {
             Ok(items) if !items.is_empty() => Some(items),
             Ok(_) => None,
             Err(e) => {
@@ -1091,7 +1102,7 @@ impl App {
 
     fn open_attachment(&mut self, v: &View, index: usize) {
         if !self.allow_open {
-            if v.current.as_ref().is_some_and(|m| !m.attachments.is_empty()) {
+            if self.attachment_target(v).is_some() {
                 self.notice = Some("Opening attachments is turned off in settings. Use save as instead.".into());
             }
             return;
@@ -2099,16 +2110,19 @@ impl App {
                     egui::Popup::menu(&chip).show(|ui| {
                         ui.set_min_width(120.0);
                         if self.allow_open && ui.add(Key::new("open").outline(VALUE).id_salt(("open", i)).min_width(ui.available_width())).clicked() {
+                            actions.push(Action::FocusThread(m.summary.id));
                             actions.push(Action::OpenAttachment(i));
                             ui.close();
                         }
                         if ui.add(Key::new("save as").outline(VALUE).id_salt(("save", i)).min_width(ui.available_width())).clicked() {
+                            actions.push(Action::FocusThread(m.summary.id));
                             actions.push(Action::SaveAttachment(i));
                             ui.close();
                         }
                     });
                 }
                 if m.attachments.len() > 1 && ui.add(Key::new("save all").outline(VALUE)).clicked() {
+                    actions.push(Action::FocusThread(m.summary.id));
                     actions.push(Action::SaveAllAttachments);
                 }
             });
