@@ -949,7 +949,7 @@ impl SettingsForm {
         let m = egui::Modal::new(egui::Id::new("settings"))
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .show(ctx, |ui| {
-                ui.set_width(560.0);
+                ui.set_width(560.0_f32.min(ctx.content_rect().width() - 48.0));
                 modal_title(ui, "Settings");
                 let w = ui.available_width();
                 egui::ScrollArea::vertical()

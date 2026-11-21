@@ -58,6 +58,52 @@ fn phone_width_shows_one_pane_at_a_time() {
     img.save(out_dir().join("phone-folders.png")).unwrap();
 }
 
+#[test]
+fn tapping_a_row_once_opens_the_reader_at_phone_width() {
+    let mut h = harness_sized(FakeStore::concept(), egui::vec2(390.0, 844.0));
+    assert!(!h.state().1.reader_focus);
+    h.get_by_label_contains("Tomás Rivera Rev C stencil quote").click();
+    h.run();
+    h.run();
+    assert!(h.state().1.reader_focus);
+    h.get_by_label_contains("stencil-quote-revc.pdf");
+    h.get_by_label_contains("back to list").click();
+    h.run();
+    h.run();
+    assert!(!h.state().1.reader_focus);
+    h.get_by_label_contains("Tomás Rivera Rev C stencil quote");
+}
+
+#[test]
+fn picking_a_folder_at_phone_width_closes_the_folder_view() {
+    let mut h = harness_sized(FakeStore::concept(), egui::vec2(390.0, 844.0));
+    h.get_by_label_contains("folders").click();
+    h.run();
+    h.run();
+    assert!(h.state().1.folders_open);
+    h.get_by_label_contains("sent").click();
+    h.run();
+    h.run();
+    assert!(!h.state().1.folders_open);
+    assert_eq!(h.state().1.folder, Folder::Sent);
+}
+
+#[test]
+fn composer_fits_at_phone_width() {
+    let mut h = harness_sized(FakeStore::concept(), egui::vec2(390.0, 844.0));
+    h.get_by_label_contains("Tomás Rivera Rev C stencil quote").click();
+    h.run();
+    h.key_press(egui::Key::R);
+    h.run();
+    h.run();
+    let send = h.get_by_label("send").rect();
+    let discard = h.get_by_label("discard").rect();
+    assert!(send.right() <= 390.0 && send.bottom() <= 844.0, "send at {send:?}");
+    assert!(discard.right() <= 390.0 && discard.bottom() <= 844.0, "discard at {discard:?}");
+    let img = h.render().expect("render");
+    img.save(out_dir().join("phone-composer.png")).unwrap();
+}
+
 fn inbox_ids(app: &App) -> Vec<MessageId> {
     app.store.list(&Query::new(Folder::Inbox), 0, 100_000).items.iter().map(|s| s.id).collect()
 }

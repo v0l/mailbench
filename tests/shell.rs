@@ -81,7 +81,11 @@ const AUTOCONFIG: &str = r#"<clientConfig version="1.1"><emailProvider id="examp
 type State = (bool, Shell);
 
 fn harness(shell: Shell) -> Harness<'static, State> {
-    Harness::builder().with_size(egui::vec2(1280.0, 800.0)).with_pixels_per_point(1.0).build_ui_state(
+    harness_sized(shell, egui::vec2(1280.0, 800.0))
+}
+
+fn harness_sized(shell: Shell, size: egui::Vec2) -> Harness<'static, State> {
+    Harness::builder().with_size(size).with_pixels_per_point(1.0).build_ui_state(
         |ui, (ready, shell): &mut State| {
             if !*ready {
                 mailbench::kit::setup(ui.ctx());
@@ -430,6 +434,29 @@ fn removing_an_account_in_settings_deletes_its_synced_data() {
     drop(h);
     let h = boot(d.path(), kc, env(FixtureNet::default()));
     assert_eq!(h.state().1.screen_name(), "add account", "no account left after a restart");
+}
+
+#[test]
+fn settings_fit_at_phone_width() {
+    let d = dir();
+    let mut h = harness_sized(
+        Shell::new(d.path().to_path_buf(), Rc::new(MemKeychain::default()), env(FixtureNet::default()), Some(KdfParams::fast())),
+        egui::vec2(390.0, 844.0),
+    );
+    h.run();
+    h.run();
+    h.get_by_label("continue").click();
+    h.run();
+    h.run();
+    h.state_mut().1.open_settings();
+    h.run();
+    h.run();
+    h.run();
+    assert!(h.state().1.settings_open());
+    let close = h.get_by_label("close").rect();
+    assert!(close.right() <= 390.0 && close.left() >= 0.0, "close at {close:?}");
+    let img = h.render().expect("render");
+    img.save(out_dir().join("phone-settings.png")).unwrap();
 }
 
 fn out_dir() -> PathBuf {

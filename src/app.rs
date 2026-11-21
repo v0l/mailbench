@@ -1937,7 +1937,7 @@ impl App {
                         ui.close();
                     }
                 });
-                if resp.double_clicked() {
+                if resp.double_clicked() || (resp.clicked() && self.narrow && !ui.input(|inp| inp.modifiers.shift || inp.modifiers.command)) {
                     opened = Some(i);
                 }
             }
@@ -2283,7 +2283,7 @@ impl App {
         let r = egui::Modal::new(egui::Id::new("compose"))
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .show(ctx, |ui| {
-                ui.set_width(640.0);
+                ui.set_width(640.0_f32.min(ctx.content_rect().width() - 48.0));
                 modal_title(ui, &draft.title);
                 row(ui, "to", |ui| {
                     recipients(ui, "to", &mut draft.to, &mut draft.to_input, "name or address", store);
