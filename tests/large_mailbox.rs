@@ -64,14 +64,19 @@ fn a_large_mailbox_shows_its_first_page_quickly() {
         std::thread::sleep(Duration::from_millis(5));
     }
     let all = started.elapsed();
-    let frame = Instant::now();
-    for _ in 0..10 {
-        real.counts(&query);
-        real.list(&query, 0, 30);
-        real.accounts();
-    }
-    let per_frame = frame.elapsed() / 10;
+    let per_frame = (0..30)
+        .map(|_| {
+            let frame = Instant::now();
+            for _ in 0..10 {
+                real.counts(&query);
+                real.list(&query, 0, 30);
+                real.accounts();
+            }
+            frame.elapsed() / 10
+        })
+        .min()
+        .unwrap();
     eprintln!("first page {first:?}, all {all:?}, per frame {per_frame:?}");
     assert!(first < Duration::from_millis(500), "first page took {first:?}");
-    assert!(per_frame < Duration::from_micros(200), "a frame of list queries took {per_frame:?}");
+    assert!(per_frame < Duration::from_micros(18), "a frame of list queries took {per_frame:?}");
 }
