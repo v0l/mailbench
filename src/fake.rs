@@ -136,6 +136,13 @@ impl FakeStore {
         self
     }
 
+    pub fn without_attachments(mut self, id: MessageId) -> FakeStore {
+        if let Some(m) = self.messages.iter_mut().find(|m| m.summary.id == id) {
+            m.attachments = Vec::new();
+        }
+        self
+    }
+
     pub fn with_attachment_bytes(mut self, name: &str, data: Vec<u8>) -> FakeStore {
         self.blobs.insert(name.to_string(), data);
         self
