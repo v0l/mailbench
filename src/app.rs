@@ -458,6 +458,8 @@ pub struct App {
     pub headers_open: bool,
     pub rendered_rows: usize,
     pub reader_focus: bool,
+    pub narrow: bool,
+    pub folders_open: bool,
     pub force_failed: bool,
     mover: Option<Mover>,
     snoozer: Option<Snoozer>,
@@ -497,6 +499,8 @@ pub struct App {
     link_warning: Option<(String, String, String)>,
 }
 
+const NARROW_BELOW: f32 = 700.0;
+
 struct DividerOutcome {
     width: u32,
     epoch: u32,
@@ -526,6 +530,8 @@ impl App {
             headers_open: false,
             rendered_rows: 0,
             reader_focus: false,
+            narrow: false,
+            folders_open: false,
             force_failed: false,
             mover: None,
             snoozer: None,
@@ -1182,14 +1188,58 @@ impl App {
         let accounts = self.store.accounts();
         let failed = self.force_failed || accounts.iter().any(|a| a.sync == SyncState::Failed);
         let mut actions = Vec::new();
+        self.narrow = ui.available_width() < NARROW_BELOW;
+        let folder_before = self.folder.clone();
         self.header(ui, &accounts, failed, &mut actions);
-        self.hint_bar(ui);
+        if !self.narrow {
+            self.hint_bar(ui);
+        }
+        if self.narrow {
+            self.show_narrow(ui, &v, &accounts, &mut actions);
+        } else {
+            self.show_wide(ui, &v, &accounts, &mut actions);
+        }
+        self.composer(&ctx, &accounts);
+        self.viewer(&ctx, &mut actions);
+        self.move_picker(&ctx, v.current.as_ref(), &mut actions);
+        self.link_warning_dialog(&ctx, &mut actions);
+        self.snooze_picker(&ctx, &mut actions);
+        self.folder_dialog(&ctx);
+        self.undo_toast(&ctx);
+        self.apply(&ctx, actions);
+        if self.narrow && self.folder != folder_before {
+            self.folders_open = false;
+        }
+    }
+
+    fn show_narrow(&mut self, ui: &mut Ui, v: &View, accounts: &[AccountInfo], actions: &mut Vec<Action>) {
+        egui::CentralPanel::no_frame().show(ui, |ui| {
+            pane_fill(ui, CHASSIS);
+            if self.folders_open {
+                egui::Frame::NONE.inner_margin(Margin::same(8)).show(ui, |ui| {
+                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.side(ui, accounts, actions));
+                });
+            } else if self.reader_focus && v.current.is_some() {
+                egui::Frame::NONE.inner_margin(Margin { left: 12, right: 12, top: 8, bottom: 8 }).show(ui, |ui| {
+                    if ui.add(Key::new("back to list").outline(VALUE)).clicked() {
+                        self.reader_focus = false;
+                    }
+                    ui.add_space(6.0);
+                    self.reader(ui, v, accounts, actions);
+                });
+            } else {
+                self.list(ui, v, accounts, actions);
+            }
+        });
+    }
+
+    fn show_wide(&mut self, ui: &mut Ui, v: &View, accounts: &[AccountInfo], actions: &mut Vec<Action>) {
         let side = self.divider_panel("side", self.side_epoch, self.prefs.layout.side_w, prefs::SIDE_DEFAULT, prefs::SIDE_RANGE, true, ui, |this, ui| {
-            this.side(ui, &accounts, &mut actions)
+            this.side(ui, accounts, actions)
         });
         self.side_epoch = side.epoch;
         let list = self.divider_panel("list", self.list_epoch, self.prefs.layout.list_w, prefs::LIST_DEFAULT, prefs::LIST_RANGE, false, ui, |this, ui| {
-            this.list(ui, &v, &accounts, &mut actions)
+            this.list(ui, v, accounts, actions)
         });
         self.list_epoch = list.epoch;
         let layout = prefs::LayoutPrefs { side_w: side.width, list_w: list.width };
@@ -1200,17 +1250,9 @@ impl App {
         egui::CentralPanel::no_frame().show(ui, |ui| {
             pane_fill(ui, CHASSIS);
             egui::Frame::NONE.inner_margin(Margin { left: 22, right: 22, top: 16, bottom: 10 }).show(ui, |ui| {
-                self.reader(ui, &v, &accounts, &mut actions);
+                self.reader(ui, v, accounts, actions);
             });
         });
-        self.composer(&ctx, &accounts);
-        self.viewer(&ctx, &mut actions);
-        self.move_picker(&ctx, v.current.as_ref(), &mut actions);
-        self.link_warning_dialog(&ctx, &mut actions);
-        self.snooze_picker(&ctx, &mut actions);
-        self.folder_dialog(&ctx);
-        self.undo_toast(&ctx);
-        self.apply(&ctx, actions);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1246,6 +1288,10 @@ impl App {
     }
 
     fn header(&mut self, ui: &mut Ui, accounts: &[AccountInfo], failed: bool, actions: &mut Vec<Action>) {
+        if self.narrow {
+            self.narrow_header(ui, actions);
+            return;
+        }
         egui::Panel::top("head").frame(header_frame()).show(ui, |ui| {
             ui.horizontal(|ui| {
                 title(ui);
@@ -1282,6 +1328,29 @@ impl App {
                     }
                 });
             });
+        });
+    }
+
+    fn narrow_header(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
+        egui::Panel::top("head").frame(header_frame()).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui.add(Key::new("folders").outline(VALUE)).clicked() {
+                    self.folders_open = !self.folders_open;
+                }
+                if ui.add(Key::new("+").solid(READOUT)).clicked() {
+                    actions.push(Action::Compose);
+                }
+                if ui.add(Key::new("set").outline(VALUE)).clicked() {
+                    self.settings_requested = true;
+                }
+            });
+            ui.add_space(4.0);
+            let r = field(ui, &mut self.search, "search, press /");
+            self.search_id = Some(r.id);
+            if r.changed() {
+                self.selected = 0;
+                self.reader_focus = false;
+            }
         });
     }
 

@@ -7,10 +7,14 @@ use mailbench::search::Parsed;
 use std::path::PathBuf;
 
 fn harness(store: FakeStore) -> Harness<'static, (bool, App)> {
+    harness_sized(store, egui::vec2(1280.0, 800.0))
+}
+
+fn harness_sized(store: FakeStore, size: egui::Vec2) -> Harness<'static, (bool, App)> {
     let mut app = App::with_store(Box::new(store));
     app.selected = 0;
     let mut h = Harness::builder()
-        .with_size(egui::vec2(1280.0, 800.0))
+        .with_size(size)
         .with_pixels_per_point(1.0)
         .build_ui_state(
             |ui, (ready, app): &mut (bool, App)| {
@@ -27,6 +31,31 @@ fn harness(store: FakeStore) -> Harness<'static, (bool, App)> {
     h.run();
     h.run();
     h
+}
+
+#[test]
+fn phone_width_shows_one_pane_at_a_time() {
+    let mut h = harness_sized(FakeStore::concept(), egui::vec2(390.0, 844.0));
+    assert!(h.state().1.narrow);
+    h.get_by_label_contains("Tomás Rivera Rev C stencil quote");
+    assert!(!h.state().1.folders_open);
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    assert!(h.state().1.reader_focus);
+    h.get_by_label_contains("back to list");
+    let img = h.render().expect("render");
+    img.save(out_dir().join("phone-reader.png")).unwrap();
+    h.get_by_label_contains("back to list").click();
+    h.run();
+    h.run();
+    assert!(!h.state().1.reader_focus);
+    h.get_by_label_contains("folders").click();
+    h.run();
+    h.run();
+    assert!(h.state().1.folders_open);
+    let img = h.render().expect("render");
+    img.save(out_dir().join("phone-folders.png")).unwrap();
 }
 
 fn inbox_ids(app: &App) -> Vec<MessageId> {

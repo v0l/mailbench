@@ -515,23 +515,20 @@ pub enum ImageChoice {
 pub fn blocked_images(ui: &mut Ui, host: &str, sender: &str, domain: &str, policy: crate::prefs::RemoteImages) -> Option<ImageChoice> {
     let mut choice = None;
     rail_block(ui, WARN, WARN.gamma_multiply(0.12), |ui| {
-        ui.horizontal(|ui| {
-            ui.label(legend("remote images blocked").color(WARN));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if policy == crate::prefs::RemoteImages::Never {
-                    return;
-                }
-                if ui.add(Key::new("always from domain").outline(WARN)).on_hover_text(format!("Always load images in mail from {domain}")).clicked() {
-                    choice = Some(ImageChoice::Domain);
+        ui.label(legend("remote images blocked").color(WARN));
+        if policy != crate::prefs::RemoteImages::Never {
+            ui.horizontal_wrapped(|ui| {
+                if policy == crate::prefs::RemoteImages::Ask && ui.add(Key::new("load once").outline(WARN)).clicked() {
+                    choice = Some(ImageChoice::Once);
                 }
                 if ui.add(Key::new("always from sender").outline(WARN)).on_hover_text(format!("Always load images in mail from {sender}")).clicked() {
                     choice = Some(ImageChoice::Sender);
                 }
-                if policy == crate::prefs::RemoteImages::Ask && ui.add(Key::new("load once").outline(WARN)).clicked() {
-                    choice = Some(ImageChoice::Once);
+                if ui.add(Key::new("always from domain").outline(WARN)).on_hover_text(format!("Always load images in mail from {domain}")).clicked() {
+                    choice = Some(ImageChoice::Domain);
                 }
             });
-        });
+        }
         Line::new().note(format!("This message wants to load pictures from {host}, which tells the sender you opened it.")).size(12.0).wrapped(ui);
     });
     choice
