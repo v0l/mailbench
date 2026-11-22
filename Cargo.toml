@@ -63,6 +63,9 @@ nostr-sdk = { version = "=0.44.1", default-features = false, features = ["nip44"
 nostr-connect = "=0.44.1"
 aes-gcm = "0.10"
 hayro = "0.9.0"
+pgp = "0.21"
+openssl = "0.10"
+openssl-probe = "0.1"
 
 [dev-dependencies]
 nostr-relay-builder = "=0.44.1"

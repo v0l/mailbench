@@ -37,6 +37,33 @@ pub enum Command {
     Snooze(SnoozeArgs),
     #[command(name = "mark-all-read")]
     MarkAllRead(FolderArg),
+    #[command(subcommand)]
+    Keys(KeysCmd),
+    Decrypt(DecryptArgs),
+    #[command(name = "verify-smime")]
+    VerifySmime(VerifyArgs),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum KeysCmd {
+    List,
+    #[command(name = "import-pgp")]
+    ImportPgp { file: PathBuf },
+    #[command(name = "import-p12")]
+    ImportP12 { file: PathBuf },
+    Remove { kind: String, id: String },
+}
+
+#[derive(Args, Debug)]
+pub struct DecryptArgs {
+    pub file: PathBuf,
+    #[arg(long, help = "Treat the file as S/MIME instead of PGP")]
+    pub smime: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct VerifyArgs {
+    pub file: PathBuf,
 }
 
 #[derive(Args, Debug)]
@@ -439,9 +466,84 @@ fn mark_all_read_cmd(cli: &Cli, folder: &str) -> Res<()> {
     Ok(())
 }
 
+fn secret_prompt(what: &str, env: &str) -> Res<String> {
+    if let Ok(p) = std::env::var(env) {
+        return Ok(p);
+    }
+    rpassword::prompt_password(format!("{what}: ")).map_err(|e| e.to_string())
+}
+
+fn keys_cmd(k: &KeysCmd) -> Res<()> {
+    use crate::crypt;
+    let store = open_store()?;
+    let e = |e: crypt::CryptError| e.to_string();
+    match k {
+        KeysCmd::List => {
+            for i in crypt::list_keys(&store).map_err(e)? {
+                println!("{}\t{}\t{}", i.kind, i.id, i.label);
+            }
+        }
+        KeysCmd::ImportPgp { file } => {
+            let data = std::fs::read(file).map_err(|x| format!("{}: {x}", file.display()))?;
+            let i = crypt::import_pgp(&store, &data).map_err(e)?;
+            println!("imported {} {}", i.id, i.label);
+        }
+        KeysCmd::ImportP12 { file } => {
+            let data = std::fs::read(file).map_err(|x| format!("{}: {x}", file.display()))?;
+            let pw = secret_prompt("PKCS#12 password", "MAILBENCH_P12_PASSWORD")?;
+            let i = crypt::import_pkcs12(&store, &data, &pw).map_err(e)?;
+            println!("imported {} {}", i.id, i.label);
+        }
+        KeysCmd::Remove { kind, id } => {
+            let kind = match kind.as_str() {
+                "pgp" => crypt::PGP_KIND,
+                "smime" => crypt::SMIME_KIND,
+                other => return Err(format!("unknown key kind {other}, use pgp or smime")),
+            };
+            crypt::remove_key(&store, kind, id).map_err(e)?;
+        }
+    }
+    Ok(())
+}
+
+fn decrypt_cmd(a: &DecryptArgs) -> Res<()> {
+    use crate::crypt;
+    let store = open_store()?;
+    let data = std::fs::read(&a.file).map_err(|x| format!("{}: {x}", a.file.display()))?;
+    let plain = if a.smime {
+        crypt::smime_decrypt(&store, &data).map_err(|e| e.to_string())?
+    } else {
+        let pass = std::env::var("MAILBENCH_PGP_PASSPHRASE").unwrap_or_default();
+        crypt::pgp_decrypt(&store, &data, &pass).map_err(|e| e.to_string())?.plain
+    };
+    std::io::stdout().write_all(&plain).map_err(|e| e.to_string())
+}
+
+fn verify_cmd(a: &VerifyArgs) -> Res<()> {
+    use crate::crypt::{self, SmimeState};
+    let data = std::fs::read(&a.file).map_err(|x| format!("{}: {x}", a.file.display()))?;
+    let trust = crypt::os_trust_store().map_err(|e| e.to_string())?;
+    let v = crypt::smime_verify(&data, &trust).map_err(|e| e.to_string())?;
+    match &v.state {
+        SmimeState::Trusted => println!("signature valid, signer trusted"),
+        SmimeState::Untrusted(why) => println!("signature valid, signer not trusted: {why}"),
+        SmimeState::BadSignature(why) => println!("signature invalid: {why}"),
+    }
+    if let Some(s) = &v.signer {
+        println!("Signer: {}\nIssuer: {}\nEmail: {}\nSHA-256: {}\nValid: {} to {}{}", s.subject, s.issuer, s.emails.join(", "), s.fingerprint, s.not_before, s.not_after, if s.expired { " (expired)" } else { "" });
+    }
+    match v.state {
+        SmimeState::BadSignature(_) => Err("verification failed".into()),
+        _ => Ok(()),
+    }
+}
+
 pub fn run(cli: &Cli) -> Res<()> {
     let Some(command) = &cli.command else { return Ok(()) };
     match command {
+        Command::Keys(k) => keys_cmd(k),
+        Command::Decrypt(a) => decrypt_cmd(a),
+        Command::VerifySmime(a) => verify_cmd(a),
         Command::Accounts(f) => accounts_cmd(cli, f.json),
         Command::Folders(f) => folders_cmd(cli, f.json),
         Command::List(a) => list_cmd(cli, a),

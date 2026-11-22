@@ -6,6 +6,7 @@ pub mod attach;
 pub mod autodetect;
 pub mod backend;
 pub mod cli;
+pub mod crypt;
 pub mod data;
 pub mod dns;
 pub mod fake;
