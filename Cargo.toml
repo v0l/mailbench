@@ -59,7 +59,7 @@ zip = { version = "9.7.3", default-features = false, features = ["deflate"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive"] }
 rpassword = "7"
-nostr-sdk = { version = "=0.44.1", default-features = false, features = ["nip44", "nip59"] }
+nostr-sdk = { version = "=0.44.1", default-features = false, features = ["nip04", "nip44", "nip59"] }
 nostr-connect = "=0.44.1"
 aes-gcm = "0.10"
 hayro = "0.9.0"

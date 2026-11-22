@@ -179,6 +179,30 @@ pub fn stalwart() -> bool {
     true
 }
 
+pub const STRFRY_PORT: u16 = 7777;
+
+fn strfry_ready() -> bool {
+    TcpStream::connect_timeout(&format!("127.0.0.1:{STRFRY_PORT}").parse().unwrap(), Duration::from_secs(1)).is_ok()
+}
+
+pub fn strfry() -> Option<String> {
+    static LOCK: OnceLock<Mutex<bool>> = OnceLock::new();
+    let mut ok = LOCK.get_or_init(|| Mutex::new(false)).lock().unwrap_or_else(|e| e.into_inner());
+    if !*ok && !strfry_ready() {
+        if !docker_available() {
+            eprintln!("docker missing, skipping strfry test");
+            return None;
+        }
+        let publish = format!("127.0.0.1:{STRFRY_PORT}:7777");
+        let _ = Command::new("docker")
+            .args(["run", "-d", "--rm", "--name", "mailbench-strfry", "-p", &publish, "--entrypoint", "sh", "ghcr.io/hoytech/strfry:latest", "-c", "sed -i 's/bind = \"127.0.0.1\"/bind = \"0.0.0.0\"/; s|serviceUrl = \"\"|serviceUrl = \"ws://127.0.0.1:7777\"|' strfry.conf && exec ./strfry relay"])
+            .output();
+        wait("strfry", strfry_ready);
+    }
+    *ok = true;
+    Some(format!("ws://127.0.0.1:{STRFRY_PORT}"))
+}
+
 pub fn create_stalwart_user(name: &str) {
     let body = format!(r#"{{"type":"individual","name":"{name}","secrets":["secret"],"emails":["{name}@example.org"],"quota":0,"roles":["user"]}}"#);
     let deadline = Instant::now() + Duration::from_secs(30);

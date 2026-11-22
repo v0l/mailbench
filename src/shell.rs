@@ -1620,6 +1620,14 @@ impl Drop for Shell {
     }
 }
 
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn surface_screen_rect(width: i32, height: i32, pixels_per_point: f32) -> Option<egui::Rect> {
+    if width <= 0 || height <= 0 || pixels_per_point <= 0.0 {
+        return None;
+    }
+    Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width as f32 / pixels_per_point, height as f32 / pixels_per_point)))
+}
+
 impl eframe::App for Shell {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::CentralPanel::no_frame().show(ui, |ui| self.show(ui));
@@ -1629,6 +1637,18 @@ impl eframe::App for Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screen_follows_surface_not_monitor() {
+        let r = surface_screen_rect(2316, 1080, 2.0).unwrap();
+        assert_eq!(r.min, egui::pos2(0.0, 0.0));
+        assert_eq!(r.max, egui::pos2(1158.0, 540.0));
+    }
+
+    #[test]
+    fn empty_surface_is_ignored() {
+        assert!(surface_screen_rect(0, 0, 2.0).is_none());
+    }
 
     #[test]
     fn strength_grows_with_length_and_variety() {

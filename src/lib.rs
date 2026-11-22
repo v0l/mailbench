@@ -11,6 +11,7 @@ pub mod data;
 pub mod dns;
 pub mod fake;
 pub mod htmlview;
+pub mod insets;
 pub mod kit;
 pub mod mailstore;
 pub mod notify;
