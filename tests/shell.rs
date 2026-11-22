@@ -610,6 +610,51 @@ fn settings_fit_at_phone_width() {
     img.save(out_dir().join("phone-settings.png")).unwrap();
 }
 
+#[test]
+fn keys_panel_fits_at_phone_width() {
+    let d = dir();
+    let mut h = harness_sized(
+        Shell::new(d.path().to_path_buf(), Rc::new(MemKeychain::default()), env(FixtureNet::default()), Some(KdfParams::fast())),
+        egui::vec2(390.0, 844.0),
+    );
+    h.run();
+    h.run();
+    h.get_by_label("continue").click();
+    h.run();
+    h.run();
+    h.state_mut().1.open_settings();
+    h.run();
+    {
+        let form = h.state_mut().1.settings_form().unwrap();
+        form.panels.keys = vec![mailbench::crypt::KeyInfo {
+            kind: mailbench::crypt::PGP_KIND,
+            id: "3b2a9c41d7e05f6a8812c4d9e7f10b35a6c2d80f".into(),
+            label: "Ada Lovelace <ada@example.com>".into(),
+        }];
+        form.panels.key_path = "/home/ada/keys/ada-secret.asc".into();
+        form.panels.key_note = Some((true, "Imported Ada Lovelace <ada@example.com>".into()));
+    }
+    h.run();
+    h.run();
+    h.get_by_label_contains("import pkcs12").scroll_to_me();
+    h.run();
+    h.run();
+    for label in ["import pgp key", "import pkcs12"] {
+        let r = h.get_by_label_contains(label).rect();
+        assert!(r.left() >= 0.0 && r.right() <= 390.0, "{label} at {r:?}");
+    }
+    let r = h.get_by_label("path to a PGP key or .p12 file").rect();
+    assert!(r.left() >= 0.0 && r.right() <= 390.0, "path at {r:?}");
+    let secrets: Vec<_> = h.get_all_by_label("secret").collect();
+    let r = secrets.last().unwrap().rect();
+    assert!(r.left() >= 0.0 && r.right() <= 390.0, "passphrase at {r:?}");
+    let removes: Vec<_> = h.get_all_by_label_contains("remove").collect();
+    let r = removes.last().unwrap().rect();
+    assert!(r.left() >= 0.0 && r.right() <= 390.0, "remove at {r:?}");
+    let img = h.render().expect("render");
+    img.save(out_dir().join("phone-keys-panel.png")).unwrap();
+}
+
 fn out_dir() -> PathBuf {
     let d = std::env::var_os("SCREENS_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/screens"));
     std::fs::create_dir_all(&d).unwrap();

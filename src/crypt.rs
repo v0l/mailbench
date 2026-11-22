@@ -271,3 +271,12 @@ pub fn signed_smime(raw: &[u8]) -> Option<Vec<u8>> {
         && ct.attribute("smime-type").is_some_and(|t| t.eq_ignore_ascii_case("signed-data"));
     (multipart_signed || opaque).then(|| raw.to_vec())
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn smime_cfg_follows_feature_and_target() {
+        let expected = cfg!(all(feature = "smime-openssl", not(any(windows, target_os = "android"))));
+        assert_eq!(cfg!(smime), expected);
+    }
+}
