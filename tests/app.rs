@@ -312,6 +312,27 @@ fn crypt_reader(size: egui::Vec2, name: &str) {
     img.save(out_dir().join(name)).unwrap();
 }
 
+fn pgp_reader(size: egui::Vec2, name: &str, state: mailbench::openpgp::PgpState) {
+    let mut store = FakeStore::concept();
+    store.set_headers(
+        0,
+        Headers {
+            pgp: Some(mailbench::openpgp::PgpStatus {
+                state,
+                signer: Some("Tomas Reyes <tomas@kestrel-instruments.example>".into()),
+                fingerprint: "3B2A9C41D7E05F6A8812C4D9E7F10B35A6C2D80F".into(),
+            }),
+            ..Default::default()
+        },
+    );
+    let mut h = harness_sized(store, size);
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    let img = h.render().expect("render");
+    img.save(out_dir().join(name)).unwrap();
+}
+
 #[test]
 fn crypt_chips_and_certificate_render_on_desktop() {
     crypt_reader(egui::vec2(1280.0, 800.0), "crypt-reader.png");
@@ -320,6 +341,15 @@ fn crypt_chips_and_certificate_render_on_desktop() {
 #[test]
 fn crypt_chips_and_certificate_render_on_phone() {
     crypt_reader(egui::vec2(390.0, 844.0), "phone-crypt-reader.png");
+}
+
+#[test]
+fn pgp_chips_render_on_desktop_and_phone() {
+    use mailbench::openpgp::PgpState::*;
+    for (state, label) in [(Good, "good"), (Bad, "bad"), (UnknownKey, "unknown")] {
+        pgp_reader(egui::vec2(1280.0, 800.0), &format!("pgp-{label}.png"), state.clone());
+        pgp_reader(egui::vec2(390.0, 844.0), &format!("phone-pgp-{label}.png"), state);
+    }
 }
 
 #[test]
