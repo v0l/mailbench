@@ -1,4 +1,6 @@
 pub mod accounts;
+#[cfg(target_os = "android")]
+mod android;
 pub mod app;
 pub mod attach;
 pub mod autodetect;

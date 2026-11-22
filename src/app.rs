@@ -71,6 +71,7 @@ pub enum Action {
 
 pub type SavePicker = Box<dyn FnMut(&str, &str) -> Option<std::path::PathBuf>>;
 
+#[cfg(not(target_os = "android"))]
 fn rfd_picker() -> SavePicker {
     Box::new(|name, ext| {
         let mut dialog = rfd::FileDialog::new().set_file_name(name);
@@ -79,6 +80,24 @@ fn rfd_picker() -> SavePicker {
         }
         dialog.save_file()
     })
+}
+
+#[cfg(target_os = "android")]
+fn rfd_picker() -> SavePicker {
+    Box::new(|name, _| {
+        let dir = dirs::download_dir().or_else(dirs::data_dir)?;
+        Some(dir.join(name))
+    })
+}
+
+#[cfg(not(target_os = "android"))]
+fn pick_attachment_files() -> Vec<std::path::PathBuf> {
+    rfd::FileDialog::new().set_title("Attach files").pick_files().unwrap_or_default()
+}
+
+#[cfg(target_os = "android")]
+fn pick_attachment_files() -> Vec<std::path::PathBuf> {
+    Vec::new()
 }
 
 #[derive(Clone, Debug)]
@@ -2247,7 +2266,7 @@ impl App {
         let (tx, rx) = std::sync::mpsc::channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let files = rfd::FileDialog::new().set_title("Attach files").pick_files().unwrap_or_default();
+            let files = pick_attachment_files();
             let _ = tx.send(files);
             ctx.request_repaint();
         });

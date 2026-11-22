@@ -125,8 +125,60 @@ jobs:
             dist/*.deb
             dist/*.sha256
 
+  android:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: SDK, build tools and NDK
+        run: |
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sdkmanager" --licenses >/dev/null || true
+          "$sdkmanager" "platforms;android-34" "build-tools;34.0.0" "ndk;28.2.13676358"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+      - run: cargo install cargo-ndk --locked
+      - name: Decode signing keystore
+        env:
+          SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+        run: |
+          [ -n "$SIGNING_KEYSTORE_BASE64" ] || { echo "SIGNING_KEYSTORE_BASE64 is not set"; exit 1; }
+          echo "$SIGNING_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+      - name: Build and sign
+        env:
+          RELEASE: "1"
+          KEYSTORE_PASS: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          KEY_PASS: ${{ secrets.SIGNING_KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+        run: |
+          export KEYSTORE="$RUNNER_TEMP/release.keystore"
+          export PATH="$ANDROID_HOME/build-tools/34.0.0:$PATH"
+          ./packaging/android/build.sh
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          mkdir -p dist
+          cp target/android/mailbench.apk "dist/mailbench-${tag}-android-arm64.apk"
+          (cd dist && sha256sum "mailbench-${tag}-android-arm64.apk" > "mailbench-${tag}-android-arm64.apk.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-arm64
+          if-no-files-found: error
+          path: dist/*
+
   release:
-    needs: build
+    needs: [build, android]
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     steps:

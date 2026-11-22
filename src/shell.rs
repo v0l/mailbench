@@ -1191,6 +1191,10 @@ pub fn default_data_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("MAILBENCH_DATA") {
         return PathBuf::from(dir);
     }
+    #[cfg(target_os = "android")]
+    if let Some(dir) = crate::store::android::data_dir() {
+        return dir;
+    }
     dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("mailbench")
 }
 
