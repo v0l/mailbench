@@ -162,7 +162,75 @@ fn resembles(domain: &str, known: &str) -> bool {
     name.chars().count() >= 6 && tld == ktld && digitless(&name) != digitless(&kname) && edit_distance_one(&name, &kname)
 }
 
+pub const OPENED_MESSAGES_TO_KNOW: u32 = 2;
+
+pub struct HistoryItem<'a> {
+    pub from: &'a str,
+    pub to: Vec<&'a str>,
+    pub written_by_user: bool,
+    pub opened: bool,
+    pub flagged: bool,
+    pub date: i64,
+}
+
+#[derive(Default, Clone, Debug)]
+pub struct Familiarity {
+    addresses: std::collections::HashSet<String>,
+    domains: std::collections::HashSet<String>,
+    earliest: std::collections::HashMap<String, i64>,
+}
+
+impl Familiarity {
+    pub fn build(items: &[HistoryItem], contacts: &[String]) -> Familiarity {
+        let mut f = Familiarity::default();
+        let mut opened: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        for c in contacts {
+            f.addresses.insert(c.trim().to_lowercase());
+        }
+        for item in items {
+            let from = item.from.trim().to_lowercase();
+            if from.is_empty() {
+                continue;
+            }
+            if item.written_by_user {
+                for t in &item.to {
+                    let t = t.trim().to_lowercase();
+                    if let Some(d) = domain_of(&t) {
+                        f.domains.insert(d);
+                    }
+                    f.addresses.insert(t);
+                }
+                continue;
+            }
+            let e = f.earliest.entry(from.clone()).or_insert(item.date);
+            *e = (*e).min(item.date);
+            if item.flagged {
+                f.addresses.insert(from.clone());
+            }
+            if item.opened {
+                let n = opened.entry(from.clone()).or_default();
+                *n += 1;
+                if *n >= OPENED_MESSAGES_TO_KNOW {
+                    f.addresses.insert(from);
+                }
+            }
+        }
+        f
+    }
+
+    pub fn knows(&self, address: &str, received: i64) -> bool {
+        let a = address.trim().to_lowercase();
+        self.addresses.contains(&a)
+            || domain_of(&a).is_some_and(|d| self.domains.contains(&d))
+            || self.earliest.get(&a).is_some_and(|first| *first < received)
+    }
+}
+
 pub fn assess(from_name: &str, from_address: &str, known: &[String]) -> Vec<SpoofWarning> {
+    assess_with(from_name, from_address, known, None, 0)
+}
+
+pub fn assess_with(from_name: &str, from_address: &str, known: &[String], familiar: Option<&Familiarity>, received: i64) -> Vec<SpoofWarning> {
     let from = from_address.trim().to_lowercase();
     let mut out = Vec::new();
     if let Some(shown) = embedded_address(from_name).filter(|a| domain_of(a) != domain_of(&from)) {
@@ -187,7 +255,7 @@ pub fn assess(from_name: &str, from_address: &str, known: &[String]) -> Vec<Spoo
             break;
         }
     }
-    if !known_lower.contains(&from) {
+    if !known_lower.contains(&from) && !familiar.is_some_and(|f| f.knows(&from, received)) {
         out.push(SpoofWarning::FirstTimeSender);
     }
     out
@@ -307,6 +375,64 @@ mod tests {
     fn lookalike_text_shows_the_decoded_domain() {
         let w = SpoofWarning::Lookalike { domain: "xn--ypal-43d9g.com".into(), resembles: "paypal.com".into() };
         assert_eq!(w.text(), "раypal.com looks like paypal.com");
+    }
+
+    fn item<'a>(from: &'a str, to: &[&'a str], written: bool, opened: bool, flagged: bool, date: i64) -> HistoryItem<'a> {
+        HistoryItem { from, to: to.to_vec(), written_by_user: written, opened, flagged, date }
+    }
+
+    fn badge(f: &Familiarity, address: &str, date: i64) -> bool {
+        assess_with("x", address, &[], Some(f), date).contains(&SpoofWarning::FirstTimeSender)
+    }
+
+    #[test]
+    fn anyone_the_user_wrote_to_in_any_folder_is_known() {
+        let f = Familiarity::build(&[item("me@home.test", &["zoe@zed.test"], true, true, false, 5)], &[]);
+        assert!(!badge(&f, "zoe@zed.test", 10));
+        assert!(badge(&f, "yan@other.test", 10));
+    }
+
+    #[test]
+    fn address_book_contacts_are_known() {
+        let f = Familiarity::build(&[], &["Kit@Book.test".to_string()]);
+        assert!(!badge(&f, "kit@book.test", 10));
+    }
+
+    #[test]
+    fn flagged_sender_is_known() {
+        let f = Familiarity::build(&[item("flo@flag.test", &[], false, false, true, 5)], &[]);
+        assert!(!badge(&f, "flo@flag.test", 1));
+    }
+
+    #[test]
+    fn sender_opened_repeatedly_is_known_but_once_is_not() {
+        let once = Familiarity::build(&[item("ola@open.test", &[], false, true, false, 50)], &[]);
+        assert!(badge(&once, "ola@open.test", 10));
+        let twice = Familiarity::build(
+            &[item("ola@open.test", &[], false, true, false, 50), item("ola@open.test", &[], false, true, false, 60)],
+            &[],
+        );
+        assert!(!badge(&twice, "ola@open.test", 10));
+    }
+
+    #[test]
+    fn domain_of_a_sent_recipient_is_known() {
+        let f = Familiarity::build(&[item("me@home.test", &["boss@corp.test"], true, true, false, 5)], &[]);
+        assert!(!badge(&f, "hr@corp.test", 10));
+    }
+
+    #[test]
+    fn sender_with_an_earlier_message_is_known_but_the_first_message_is_not() {
+        let f = Familiarity::build(&[item("new@fresh.test", &[], false, false, false, 100), item("new@fresh.test", &[], false, false, false, 200)], &[]);
+        assert!(badge(&f, "new@fresh.test", 100));
+        assert!(!badge(&f, "new@fresh.test", 200));
+    }
+
+    #[test]
+    fn familiarity_never_hides_alarms() {
+        let f = Familiarity::build(&[item("x@evil.test", &[], false, true, true, 1)], &[]);
+        let w = assess_with("support@paypal.com", "x@evil.test", &[], Some(&f), 9);
+        assert!(w.iter().any(SpoofWarning::is_alarm));
     }
 
     #[test]
