@@ -5,6 +5,37 @@ fn senders() -> Vec<(String, String)> {
 }
 
 #[test]
+#[ignore]
+fn rate_on_extracted_pairs() {
+    let dir = std::env::var("SPOOF_DATA").expect("SPOOF_DATA");
+    let inbox = std::fs::read_to_string(format!("{dir}/inbox.tsv")).unwrap();
+    let known: Vec<String> = std::fs::read_to_string(format!("{dir}/known.txt")).unwrap().lines().map(String::from).collect();
+    let (mut name_alarm, mut lookalike, mut first_time, mut clean) = (0, 0, 0, 0);
+    for line in inbox.lines() {
+        let Some((name, address)) = line.split_once('\t') else { continue };
+        let w = assess(name, address, &known);
+        let domain = |a: &str| a.rsplit_once('@').map(|(_, d)| d.to_lowercase()).unwrap_or_default();
+        for x in &w {
+            match x {
+                SpoofWarning::NameHasOtherAddress(shown) => {
+                    name_alarm += 1;
+                    eprintln!("NAME_ADDR sender_domain={} shown_domain={}", domain(address), domain(shown));
+                }
+                SpoofWarning::Lookalike { domain, resembles } => {
+                    lookalike += 1;
+                    eprintln!("LOOKALIKE {domain} vs {resembles}");
+                }
+                SpoofWarning::FirstTimeSender => first_time += 1,
+            }
+        }
+        if w.is_empty() {
+            clean += 1;
+        }
+    }
+    eprintln!("name_alarm {name_alarm} lookalike {lookalike} first_time {first_time} clean {clean} known {}", known.len());
+}
+
+#[test]
 fn ordinary_mail_never_raises_an_alarm() {
     let all = senders();
     let mut distinct: Vec<String> = all.iter().map(|(_, a)| a.clone()).collect();
