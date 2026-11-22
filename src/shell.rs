@@ -336,18 +336,18 @@ impl TestRun {
         }
         for step in Step::ALL {
             match self.results.iter().find(|(s, _)| *s == step) {
-                Some((_, Ok(()))) => status(ui, true, &format!("{}: connected and signed in", step.label())),
+                Some((_, Ok(()))) => status(ui, true, &format!("{}: {}", step.label_for(cfg), step.ok_text_for(cfg))),
                 Some((_, Err(e))) => {
-                    status(ui, false, &format!("{}: {e}", step.label()));
+                    status(ui, false, &format!("{}: {e}", step.label_for(cfg)));
                     if let Some(cfg) = cfg {
                         note(ui, accounts::fix_hint(cfg, e, oauth_offered), LEGEND);
                     }
                 }
                 None if self.running() => {
-                    Line::new().measured(format!("{}: checking", step.label())).size(11.0).show(ui);
+                    Line::new().measured(format!("{}: checking", step.label_for(cfg))).size(11.0).show(ui);
                 }
                 None => {
-                    Line::new().note(format!("{}: not tested", step.label())).size(11.0).show(ui);
+                    Line::new().note(format!("{}: not tested", step.label_for(cfg))).size(11.0).show(ui);
                 }
             }
         }

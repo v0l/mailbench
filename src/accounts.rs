@@ -381,6 +381,21 @@ pub enum Step {
 impl Step {
     pub const ALL: [Step; 2] = [Step::Imap, Step::Smtp];
 
+    pub fn label_for(self, cfg: Option<&AccountConfig>) -> &'static str {
+        match (self, cfg.is_some_and(|c| c.is_jmap())) {
+            (Step::Imap, true) => "JMAP session",
+            (Step::Smtp, true) => "sending (EmailSubmission)",
+            _ => self.label(),
+        }
+    }
+
+    pub fn ok_text_for(self, cfg: Option<&AccountConfig>) -> &'static str {
+        match (self, cfg.is_some_and(|c| c.is_jmap())) {
+            (Step::Smtp, true) => "ready",
+            _ => "connected and signed in",
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Step::Imap => "incoming mail (IMAP)",
@@ -483,6 +498,18 @@ mod tests {
             notify: Default::default(),
             sync: Default::default(),
         }
+    }
+
+    #[test]
+    fn jmap_checks_are_labelled_for_jmap() {
+        let jmap = jmap_config("https://x.test/jmap", "a@b.c", "a@b.c", "pw");
+        assert_eq!(Step::Imap.label_for(Some(&jmap)), "JMAP session");
+        assert_eq!(Step::Smtp.label_for(Some(&jmap)), "sending (EmailSubmission)");
+        assert_eq!(Step::Smtp.ok_text_for(Some(&jmap)), "ready");
+        let imap = cfg("x.test");
+        assert_eq!(Step::Imap.label_for(Some(&imap)), "incoming mail (IMAP)");
+        assert_eq!(Step::Smtp.label_for(Some(&imap)), "outgoing mail (SMTP)");
+        assert_eq!(Step::Smtp.ok_text_for(Some(&imap)), "connected and signed in");
     }
 
     #[test]
