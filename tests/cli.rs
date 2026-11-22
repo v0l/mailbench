@@ -148,6 +148,37 @@ fn send_delivers_through_smtp_and_a_second_account_run_sees_it() {
 }
 
 #[test]
+fn a_jmap_account_sends_and_lists_through_the_cli() {
+    if !common::stalwart() {
+        return;
+    }
+    let name = format!("cj{}", std::process::id());
+    common::create_stalwart_user(&name);
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::create(&dir.path().join("mail.db"), None, Some(("pw", KdfParams::fast()))).unwrap();
+    let address = format!("{name}@example.org");
+    let mut cfg = accounts::jmap_config(&format!("http://127.0.0.1:{}", common::SW_HTTP), &address, &name, "secret");
+    cfg.id = "acct".into();
+    accounts::save(&store, &cfg).unwrap();
+    drop(store);
+    let d = dir.path();
+    let body = d.join("body.txt");
+    std::fs::write(&body, "Sent from the terminal over JMAP.").unwrap();
+    let out = mailbench(d, &["send", "--to", &address, "--subject", "JMAP from the CLI", "--body-file", body.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let mut seen = false;
+    for _ in 0..30 {
+        let list = json_of(d, &["list", "--json"]);
+        if list.as_array().unwrap().iter().any(|m| m["subject"] == "JMAP from the CLI") {
+            seen = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    assert!(seen, "the sent mail never reached the inbox");
+}
+
+#[test]
 fn send_dry_run_sends_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::create(&dir.path().join("mail.db"), None, Some(("pw", KdfParams::fast()))).unwrap();

@@ -132,6 +132,65 @@ pub fn dovecot() -> bool {
     true
 }
 
+pub const SW_HTTP: u16 = 8090;
+pub const SW_ADMIN: &str = "admin:adminsecret";
+
+fn stalwart_ready() -> bool {
+    Command::new("curl")
+        .args(["-sf", "-m", "2", "-o", "/dev/null", "-u", SW_ADMIN, &format!("localhost:{SW_HTTP}/api/principal?limit=1")])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn stalwart_post(path: &str, body: &str) -> String {
+    let out = Command::new("curl")
+        .args([
+            "-s", "-m", "5", "-u", SW_ADMIN, "-XPOST", &format!("localhost:{SW_HTTP}{path}"),
+            "-H", "content-type: application/json", "-d", body,
+        ])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+pub fn stalwart() -> bool {
+    static LOCK: OnceLock<Mutex<bool>> = OnceLock::new();
+    let mut ok = LOCK.get_or_init(|| Mutex::new(false)).lock().unwrap_or_else(|e| e.into_inner());
+    if *ok {
+        return true;
+    }
+    if !stalwart_ready() {
+        if !docker_available() {
+            eprintln!("docker missing, skipping stalwart test");
+            return false;
+        }
+        let conf = format!("{}/tests/fixtures/stalwart/config.toml:/opt/stalwart/etc/config.toml:ro", env!("CARGO_MANIFEST_DIR"));
+        let _ = Command::new("docker")
+            .args([
+                "run", "-d", "--rm", "--name", "mailbench-stalwart",
+                "-p", "127.0.0.1:8090:8090", "-v", &conf, "stalwartlabs/stalwart:v0.13",
+            ])
+            .output();
+        wait("stalwart", stalwart_ready);
+    }
+    stalwart_post("/api/principal", r#"{"type":"domain","name":"example.org"}"#);
+    *ok = true;
+    true
+}
+
+pub fn create_stalwart_user(name: &str) {
+    let body = format!(r#"{{"type":"individual","name":"{name}","secrets":["secret"],"emails":["{name}@example.org"],"quota":0,"roles":["user"]}}"#);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if stalwart_post("/api/principal", &body).contains("\"data\"") {
+            return;
+        }
+        assert!(Instant::now() < deadline, "could not create stalwart user {name}");
+        std::thread::sleep(Duration::from_millis(300));
+    }
+}
+
 pub fn create_greenmail_user(name: &str) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {

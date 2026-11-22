@@ -12,6 +12,7 @@ Code lives in `src/backend/`.
 | `smtp.rs` | `SmtpBackend` |
 | `sync.rs` | `SyncSink` and `sync_account` |
 | `store_sink.rs` | `StoreSink`, a `SyncSink` over the encrypted `Store` (summaries, flags, tokens, optional bodies and search index) |
+| `jmap.rs` | `JmapBackend`, JMAP mail (RFC 8620/8621) |
 | `nostr_dm.rs` | `NostrBackend`, NIP-17 private DMs |
 | `memory.rs` | `MemorySink`, an in memory sink for tests |
 
@@ -50,6 +51,50 @@ Sync is token based. `sync_folder(folder, since)` returns a `FolderDelta`: the n
 - When the account has no kind 10050 list, the add account screen asks whether to publish one before saving.
 
 Tests: `tests/backend_nostr.rs` uses rust-nostr's in-process `MockRelay`, never a public relay.
+
+## JMAP
+
+`JmapConfig::new(url, auth)` takes a server URL (a bare host is resolved through `/.well-known/jmap`, redirects are followed with the credentials kept) or a full session URL. `Auth::Password` sends HTTP Basic, `Auth::XOAuth2` sends the token as a Bearer. Fastmail and Stalwart work the same way.
+
+- Session: the primary mail account, `apiUrl`, `downloadUrl`, `uploadUrl` and `eventSourceUrl` come from the session resource. A 401 is `BackendError::Auth`.
+- Folders: `Mailbox/get`, with the mailbox tree flattened to `Parent/Child` paths and JMAP roles mapped to `FolderRole`. Create, rename and delete use `Mailbox/set`.
+- UIDs: JMAP ids are strings, so each email id is mapped to a stable `u32` (FNV hash, probed on collision) for the life of the backend. The sync token is `uid_validity` 1 and `uid_next` above the largest UID; real sync state is the JMAP `Email` state kept in the backend.
+- Sync: the first sync pages `Email/query` plus a back-referenced `Email/get` for mailbox ids and keywords. Later syncs call `Email/changes` (paged with `hasMoreChanges`) and fall back to a full load on `cannotCalculateChanges`. Only created or updated emails are fetched with `Email/get` headers, so an unchanged mailbox costs one request. Flag changes and expunges ride in the delta.
+- Bodies: `fetch` downloads the RFC 5322 blob through `downloadUrl`.
+- Flags: `$seen`, `$answered`, `$flagged`, `$draft` and other keywords map to `Flags` and write back through `Email/set` patches. Move rewrites `mailboxIds`, delete destroys the email.
+- Search: `Email/query` with a `text` filter inside the mailbox. The query is plain text, not IMAP SEARCH syntax, and `ALL` or an empty string lists the folder.
+- Send: the rendered message is uploaded, imported into Drafts and submitted with `EmailSubmission/set` in one request. On success the server clears `$draft` and moves it to Sent, so `sent_copy_by_server` is true. A sending identity is created if the account has none.
+- Append: `Email/import` with the given keywords.
+- Watch: the `eventSourceUrl` stream filtered to `Email`, one `FolderChanged` per new state. A dropped stream sends `Disconnected`.
+- Capabilities: `idle` (push available), `move_command`, `send` (submission capability present), `server_folders`, `server_search` and `server_flags` are true. `condstore`, `qresync`, `uidplus` and `gmail_ext` are false.
+
+Tests: `tests/backend_jmap.rs` runs against Stalwart 0.13 in Docker (`tests/fixtures/stalwart/config.toml`, HTTP on 8090, admin `admin:adminsecret`, users created per test in the `example.org` domain; Stalwart rejects dotless and `.example` domains for identities). It starts `stalwartlabs/stalwart:v0.13` itself when port 8090 is closed and skips without docker.
+
+## Capability flags
+
+The UI reads these flags through `RealStore` (`caps_of`). A backend that leaves one false hides or reroutes the matching action:
+
+| Flag | Read by | When false |
+| --- | --- | --- |
+| `server_folders` | `src/app.rs` folder tree (the `+ new folder` row and folder actions), `src/real/mod.rs` move | no folder create or rename, moves are kept in the local store only |
+| `server_search` | `src/real/search.rs` `ask_servers` | the search bar only uses the local index, no server query |
+| `server_flags` | `src/app.rs` reader `...` menu (the `flag` entry), `src/real/mod.rs` flag changes | no flag entry, read state is kept locally |
+| `send` | `Account::capabilities` (outbound backend) | the account cannot send |
+| `idle` | not read by the UI; the sync worker calls `watch` and falls back to polling when it returns `Unsupported` | polling at the account poll interval |
+
+JMAP search sends the parsed server query as plain text to `Email/query`, so IMAP only operators are not understood there.
+
+| Flag | IMAP | SMTP | JMAP | Nostr |
+| --- | --- | --- | --- | --- |
+| `server_folders` | yes | no | yes | no |
+| `server_search` | yes | no | yes | no |
+| `server_flags` | yes | no | yes | no |
+| `send` | no (via SMTP in `Account`) | yes | yes | yes |
+| `idle` (push) | if advertised | no | yes (EventSource) | no |
+
+## Account setup
+
+The add account screen has a `JMAP account (Fastmail, Stalwart)` checkbox beside the nostr one. It takes the email address, the session URL or server host, a user name (defaults to the address) and a password, then `test connection` runs `JmapBackend::check` before `save and sync` enables. The account is stored as `Credential::Jmap { url, password }` in the encrypted store, `accounts::setup_for` builds the `JmapBackend`, and the CLI reads the same stored accounts. `tests/shell.rs` (`add_jmap_account_through_the_form_syncs_opens_and_sends`) walks add, sync, open and send against Stalwart.
 
 ## Adding a backend
 

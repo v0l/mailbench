@@ -1,5 +1,6 @@
 mod error;
 mod imap;
+mod jmap;
 mod memory;
 mod nostr_dm;
 mod smtp;
@@ -9,6 +10,7 @@ mod types;
 
 pub use error::{BackendError, Result};
 pub use imap::{ImapBackend, ImapConfig};
+pub use jmap::{JmapBackend, JmapConfig};
 pub use memory::MemorySink;
 pub use nostr_dm::*;
 pub use smtp::{bracket, build_message, new_message_id_for, render_message, SmtpBackend, SmtpConfig, SmtpSecurity};
