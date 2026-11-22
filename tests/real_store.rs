@@ -195,7 +195,10 @@ fn html_mail_renders_with_its_inline_logo_and_no_fake_attachments() {
         }
         std::thread::sleep(Duration::from_millis(100));
     };
-    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/screens");
+    let dir = std::env::var_os("SCREENS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/screens"));
+    std::fs::create_dir_all(&dir).unwrap();
     img.save(dir.join("reader-html.png")).unwrap();
     assert!(red(&img) > 2000, "the DPD red header and button were not painted");
     assert!(green(&img) > 1000, "the inline cid logo was not painted");

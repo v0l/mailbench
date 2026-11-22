@@ -460,7 +460,7 @@ fn settings_fit_at_phone_width() {
 }
 
 fn out_dir() -> PathBuf {
-    let d = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/screens");
+    let d = std::env::var_os("SCREENS_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/screens"));
     std::fs::create_dir_all(&d).unwrap();
     d
 }
