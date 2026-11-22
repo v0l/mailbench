@@ -45,6 +45,16 @@ fn method_result(value: &str, method: &str) -> Option<String> {
     results.iter().find(|r| *r == "pass").cloned().or_else(|| results.into_iter().next())
 }
 
+pub fn from_name(all: &[(String, String)]) -> String {
+    let Some(v) = first(all, "From") else {
+        return String::new();
+    };
+    match v.rfind('<') {
+        Some(i) => v[..i].trim().to_string(),
+        None => String::new(),
+    }
+}
+
 fn spam(all: &[(String, String)]) -> (Option<f32>, bool) {
     let score = first(all, "X-Spam-Score").and_then(|v| {
         let tail = v.split_once("score=").map(|(_, t)| t).unwrap_or(v);
@@ -113,6 +123,7 @@ pub fn parse_headers(raw: &[u8]) -> Headers {
         unsubscribe: unsubscribe(&all),
         auth: authentication(&all),
         reply_to_differs: reply_to_differs(&all),
+        spoof: Vec::new(),
         bulk: bulk(&all),
         hops: all.iter().filter(|(k, _)| k.eq_ignore_ascii_case("Received")).count(),
         all,
@@ -159,6 +170,13 @@ mod tests {
         assert_eq!(parse_headers(NEWSLETTER).reply_to_differs.as_deref(), Some("bounce@tracker.example.net"));
         let same = parse_headers(b"From: A <a@x.test>\r\nReply-To: b@x.test\r\n\r\n");
         assert_eq!(same.reply_to_differs, None);
+    }
+
+    #[test]
+    fn from_name_is_the_display_part() {
+        let h = parse_headers(b"From: \"ceo@corp.test\" <x@evil.test>\r\n\r\n");
+        assert_eq!(from_name(&h.all), "\"ceo@corp.test\"");
+        assert_eq!(from_name(&parse_headers(b"From: a@b.test\r\n\r\n").all), "");
     }
 
     #[test]

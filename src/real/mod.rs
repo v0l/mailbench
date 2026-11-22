@@ -551,7 +551,9 @@ impl Shared {
             return;
         };
         let body = display::parse_body(&raw);
-        let headers = headers::parse_headers(&raw);
+        let mut headers = headers::parse_headers(&raw);
+        let known: Vec<String> = lock(&self.contacts).values().map(|c| c.address.clone()).collect();
+        headers.spoof = crate::spoof::assess(&headers::from_name(&headers.all), &e.from_address, &known);
         let envelope = display::envelope(&raw);
         let message = Message {
             summary: summary(e, now()),

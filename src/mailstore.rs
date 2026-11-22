@@ -182,6 +182,7 @@ pub struct Headers {
     pub unsubscribe: Option<Unsubscribe>,
     pub auth: AuthResult,
     pub reply_to_differs: Option<String>,
+    pub spoof: Vec<crate::spoof::SpoofWarning>,
     pub bulk: bool,
     pub hops: usize,
     pub spam: bool,
