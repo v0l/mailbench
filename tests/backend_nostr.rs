@@ -1,3 +1,5 @@
+mod common;
+
 use mailbench::accounts::{self, AccountConfig, Credential};
 use mailbench::backend::*;
 use nostr_relay_builder::MockRelay;
@@ -73,6 +75,58 @@ async fn a_second_session_backfills_the_history_from_the_relay() {
 
     let mut fresh = backend(1, &url).await;
     assert_eq!(summaries(&mut fresh, "Sent").await.len(), 2);
+}
+
+async fn publish_legacy(client: &Client, from: &Keys, to: &PublicKey, text: &str) {
+    let content = nostr_sdk::nips::nip04::encrypt(from.secret_key(), to, text).unwrap();
+    let event = EventBuilder::new(Kind::EncryptedDirectMessage, content).tag(Tag::public_key(*to)).sign_with_keys(from).unwrap();
+    client.send_event(&event).await.unwrap();
+}
+
+async fn legacy_dms_are_read_into_inbox_and_sent(url: &str, alice_keys: Keys, bob_keys: Keys) {
+    let client = Client::new(alice_keys.clone());
+    client.add_relay(url).await.unwrap();
+    client.connect().await;
+    client.wait_for_connection(std::time::Duration::from_secs(5)).await;
+    publish_legacy(&client, &alice_keys, &bob_keys.public_key(), "old hello").await;
+    publish_legacy(&client, &bob_keys, &alice_keys.public_key(), "old reply").await;
+
+    let mut alice = NostrBackend::new(NostrConfig::new(&alice_keys.secret_key().to_secret_hex(), vec![url.to_string()])).unwrap();
+    let inbox = summaries(&mut alice, "Inbox").await;
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].from[0].address, address_of(&bob_keys.public_key()));
+    let sent = summaries(&mut alice, "Sent").await;
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].to[0].address, address_of(&bob_keys.public_key()));
+    let raw = alice.fetch("Inbox", inbox[0].uid).await.unwrap();
+    assert!(String::from_utf8_lossy(&raw).contains("old reply"));
+    assert_eq!(summaries(&mut alice, "Inbox").await.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_nip04_dms_are_read_into_inbox_and_sent() {
+    let relay = MockRelay::run().await.unwrap();
+    legacy_dms_are_read_into_inbox_and_sent(&relay.url().await.to_string(), Keys::generate(), Keys::generate()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn strfry_container_carries_nip17_and_nip04_dms() {
+    let Some(url) = common::strfry() else { return };
+    let mut alice = NostrBackend::new(NostrConfig::new(&Keys::generate().secret_key().to_secret_hex(), vec![url.clone()])).unwrap();
+    let mut bob = NostrBackend::new(NostrConfig::new(&Keys::generate().secret_key().to_secret_hex(), vec![url.clone()])).unwrap();
+    alice.send(&mail(&alice, &bob, "Plans", "lunch friday?", None)).await.unwrap();
+    let mut inbox = summaries(&mut bob, "Inbox").await;
+    for _ in 0..10 {
+        if !inbox.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        inbox = summaries(&mut bob, "Inbox").await;
+    }
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].subject.as_deref(), Some("Plans"));
+    assert_eq!(summaries(&mut alice, "Sent").await.len(), 1);
+    legacy_dms_are_read_into_inbox_and_sent(&url, Keys::generate(), Keys::generate()).await;
 }
 
 fn serve_once(body: Vec<u8>) -> String {
