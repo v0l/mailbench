@@ -114,6 +114,11 @@ pub struct DesktopNotifier;
 
 impl Notifier for DesktopNotifier {
     fn show(&self, notice: Notice, on_click: Box<dyn FnOnce() + Send>) {
+        #[cfg(target_os = "android")]
+        {
+            let _ = (notice, on_click);
+        }
+        #[cfg(not(target_os = "android"))]
         std::thread::spawn(move || {
             let mut n = notify_rust::Notification::new();
             n.appname("mailbench").summary(&notice.title).body(&notice.body);

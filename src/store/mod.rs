@@ -11,6 +11,26 @@ use rusqlite::{Connection, OptionalExtension, params};
 use sha2::Sha256;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
+pub mod vault;
+
+#[cfg(target_os = "android")]
+pub mod android;
+
+#[cfg(target_os = "android")]
+impl Keychain for OsKeychain {
+    fn get(&self, account: &str) -> Result<Option<Vec<u8>>> {
+        android::keychain()?.get(account)
+    }
+
+    fn set(&self, account: &str, secret: &[u8]) -> Result<()> {
+        android::keychain()?.set(account, secret)
+    }
+
+    fn delete(&self, account: &str) -> Result<()> {
+        android::keychain()?.delete(account)
+    }
+}
+
 const KEYCHAIN_SERVICE: &str = "mailbench";
 const NONCE_LEN: usize = 24;
 const WRAP_KEYCHAIN: &str = "keychain";
@@ -49,12 +69,14 @@ pub trait Keychain {
 
 pub struct OsKeychain;
 
+#[cfg(not(target_os = "android"))]
 impl OsKeychain {
     fn entry(account: &str) -> Result<keyring::Entry> {
         keyring::Entry::new(KEYCHAIN_SERVICE, account).map_err(|e| StoreError::Keychain(e.to_string()))
     }
 }
 
+#[cfg(not(target_os = "android"))]
 impl Keychain for OsKeychain {
     fn available(&self) -> bool {
         self.get("availability-probe").is_ok()

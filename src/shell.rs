@@ -993,7 +993,12 @@ impl SettingsForm {
                                 });
                                 self.panels.account_sync(ui, draft, i);
                                 ui.horizontal(|ui| {
+                                    if cfg!(target_os = "android") {
+                                        draft.notify.enabled = false;
+                                        ui.add_enabled(false, egui::Checkbox::new(&mut false, "notifications (not available on Android yet)"));
+                                    } else {
                                     ui.checkbox(&mut draft.notify.enabled, "notifications");
+                                    }
                                     if draft.notify.enabled {
                                         let mut quiet = draft.notify.quiet.is_some();
                                         ui.checkbox(&mut quiet, "quiet hours");
@@ -1190,6 +1195,10 @@ pub fn allow_open_setting(store: &Store) -> bool {
 pub fn default_data_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("MAILBENCH_DATA") {
         return PathBuf::from(dir);
+    }
+    #[cfg(target_os = "android")]
+    if let Some(dir) = crate::store::android::data_dir() {
+        return dir;
     }
     dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("mailbench")
 }
