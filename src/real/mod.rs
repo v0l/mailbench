@@ -557,6 +557,38 @@ impl Shared {
         }
     }
 
+    fn open_body(&self, raw: &[u8]) -> (display::Body, Option<crate::crypt::SmimeVerdict>, Option<(bool, String)>) {
+        use crate::crypt::{self, Opened};
+        let mut note = None;
+        let mut inner: Option<Vec<u8>> = None;
+        let opened = crypt::encrypted_kind(raw).map(|_| {
+            let store = self.lock_store();
+            crypt::open_encrypted(&store, raw, "")
+        });
+        match opened.flatten() {
+            Some(Opened::Plain(p)) => {
+                note = Some((true, "decrypted with an imported key".to_string()));
+                inner = Some(crypt::as_entity(&p));
+            }
+            Some(Opened::Failed(why)) => note = Some((false, format!("could not decrypt: {why}"))),
+            None => {}
+        }
+        let source: &[u8] = inner.as_deref().unwrap_or(raw);
+        let mut body = display::parse_body(source);
+        let mut smime = None;
+        if crypt::signed_smime(source).is_some() {
+            if let Ok(verdict) = crypt::smime_verify_default(source) {
+                if body.paragraphs.is_empty() && body.html.is_empty() {
+                    if let Some(content) = &verdict.content {
+                        body = display::parse_body(&crypt::as_entity(content));
+                    }
+                }
+                smime = Some(verdict);
+            }
+        }
+        (body, smime, note)
+    }
+
     fn parse_one(&self, e: &Entry) {
         let raw = {
             let store = self.lock_store();
@@ -569,11 +601,14 @@ impl Shared {
             self.repaint();
             return;
         };
-        let body = display::parse_body(&raw);
+        let (body, smime, decrypt_note) = self.open_body(&raw);
         let mut headers = headers::parse_headers(&raw);
+        headers.smime = smime;
+        headers.decrypt_note = decrypt_note;
         let known: Vec<String> = lock(&self.contacts).values().map(|c| c.address.clone()).collect();
         let familiar = self.familiarity();
         headers.spoof = crate::spoof::assess_with(&headers::from_name(&headers.all), &e.from_address, &known, Some(&familiar), e.date);
+        headers.pgp = crate::openpgp::verify(&raw, &[]);
         let envelope = display::envelope(&raw);
         let message = Message {
             summary: summary(e, now()),

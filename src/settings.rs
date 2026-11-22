@@ -46,6 +46,10 @@ pub struct Panels {
     pub capturing: Option<&'static str>,
     pub note: Option<(bool, String)>,
     folders: HashMap<String, Vec<String>>,
+    pub key_path: String,
+    pub key_secret: String,
+    pub key_note: Option<(bool, String)>,
+    pub keys: Vec<crate::crypt::KeyInfo>,
 }
 
 pub fn default_backup_path(dir: &std::path::Path) -> PathBuf {
@@ -77,6 +81,10 @@ impl Panels {
             capturing: None,
             note: None,
             folders,
+            key_path: String::new(),
+            key_secret: String::new(),
+            key_note: None,
+            keys: crate::crypt::list_keys(store).unwrap_or_default(),
         }
     }
 
@@ -119,6 +127,8 @@ impl Panels {
         self.bodies(ui, store, accounts);
         ui.add_space(8.0);
         self.store_panel(ui, store, accounts);
+        ui.add_space(8.0);
+        self.keys_panel(ui, store);
         ui.add_space(8.0);
         self.reading(ui);
         ui.add_space(8.0);
@@ -247,6 +257,66 @@ impl Panels {
             });
             hint(ui, "The copy stays encrypted with the same unlock methods as this store.");
             if let Some((ok, text)) = &self.note {
+                status(ui, *ok, text);
+            }
+        });
+    }
+
+    pub fn import_key(&mut self, store: &Store, pkcs12: bool) {
+        use crate::crypt;
+        let path = PathBuf::from(self.key_path.trim());
+        let result = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display())).and_then(|data| {
+            let r = if pkcs12 { crypt::import_pkcs12(store, &data, &self.key_secret) } else { crypt::import_pgp(store, &data, &self.key_secret) };
+            r.map_err(|e| e.to_string())
+        });
+        self.key_note = Some(match result {
+            Ok(info) => {
+                self.key_path.clear();
+                self.key_secret.clear();
+                (true, format!("Imported {}", if info.label.is_empty() { info.id } else { info.label }))
+            }
+            Err(e) => (false, e),
+        });
+        self.keys = crypt::list_keys(store).unwrap_or_default();
+    }
+
+    fn keys_panel(&mut self, ui: &mut Ui, store: &Store) {
+        section(ui, "keys", "PGP and S/MIME keys kept in the encrypted store", |ui| {
+            if self.keys.is_empty() {
+                hint(ui, "No keys imported. Imported keys decrypt mail and never leave the store.");
+            }
+            let mut remove = None;
+            for k in &self.keys {
+                ui.horizontal_wrapped(|ui| {
+                    let kind = if k.kind == crate::crypt::PGP_KIND { "pgp" } else { "s/mime" };
+                    Line::new().legend(kind).show(ui);
+                    Line::new().value(if k.label.is_empty() { &k.id } else { &k.label }).size(12.0).show(ui);
+                    if ui.add(Key::new("remove").outline(LEGEND).id_salt(("remove key", &k.id))).clicked() {
+                        remove = Some((k.kind, k.id.clone()));
+                    }
+                });
+            }
+            if let Some((kind, id)) = remove {
+                let _ = crate::crypt::remove_key(store, kind, &id);
+                self.keys = crate::crypt::list_keys(store).unwrap_or_default();
+            }
+            ui.add_space(4.0);
+            row(ui, "key file", |ui| {
+                field(ui, &mut self.key_path, "path to a PGP key or .p12 file");
+            });
+            row(ui, "passphrase", |ui| {
+                secret(ui, &mut self.key_secret);
+            });
+            ui.horizontal_wrapped(|ui| {
+                if ui.add(Key::new("import pgp key").outline(VALUE)).clicked() {
+                    self.import_key(store, false);
+                }
+                if ui.add(Key::new("import pkcs12").outline(VALUE)).clicked() {
+                    self.import_key(store, true);
+                }
+            });
+            hint(ui, "The passphrase unlocks the file once. The key is then stored without it, inside the encrypted store.");
+            if let Some((ok, text)) = &self.key_note {
                 status(ui, *ok, text);
             }
         });

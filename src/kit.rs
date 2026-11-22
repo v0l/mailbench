@@ -583,6 +583,18 @@ pub fn header_notes(ui: &mut Ui, h: &crate::mailstore::Headers, open: bool) -> H
         for w in &h.spoof {
             chip(ui, &w.text(), if w.is_alarm() { FAULT } else { LEGEND }, w.is_alarm());
         }
+        if let Some(p) = &h.pgp {
+            chip(ui, &p.text(), if p.is_alarm() { FAULT } else { LEGEND }, p.is_alarm());
+        }
+        if let Some((ok, text)) = &h.decrypt_note {
+            chip(ui, text, if *ok { OK } else { FAULT }, !*ok);
+        }
+        if let Some(v) = &h.smime {
+            let tint = if v.is_alarm() { FAULT } else { OK };
+            if chip_button(ui, &v.text(), tint).clicked() {
+                click = HeaderClick::Toggle;
+            }
+        }
         if h.unsubscribe.is_some() && chip_button(ui, "unsubscribe", WARN).clicked() {
             click = HeaderClick::Unsubscribe;
         }
@@ -617,6 +629,14 @@ pub fn chip_button(ui: &mut Ui, text: &str, tint: Color32) -> egui::Response {
 pub fn all_headers(ui: &mut Ui, h: &crate::mailstore::Headers) {
     egui::Frame::NONE.fill(WELL).stroke(Stroke::new(1.0, ETCH)).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
+        if let Some(v) = &h.smime {
+            for (k, val) in v.detail_lines() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(legend(&format!("cert {k}")).color(LEGEND));
+                    ui.add(egui::Label::new(egui::RichText::new(val).font(figure(11.0)).color(VALUE)).wrap());
+                });
+            }
+        }
         for (k, v) in &h.all {
             ui.horizontal_wrapped(|ui| {
                 ui.label(legend(k).color(LEGEND));

@@ -278,6 +278,50 @@ fn spoof_reader(size: egui::Vec2, name: &str) {
     img.save(out_dir().join(name)).unwrap();
 }
 
+fn crypt_headers() -> Headers {
+    use mailbench::crypt::{SignerCert, SmimeState, SmimeVerdict};
+    Headers {
+        decrypt_note: Some((false, "could not decrypt: no imported key can open this message".into())),
+        smime: Some(SmimeVerdict {
+            state: SmimeState::Untrusted("unable to get local issuer certificate".into()),
+            signer: Some(SignerCert {
+                subject: "CN=Ada Lovelace".into(),
+                issuer: "CN=Example Root CA".into(),
+                emails: vec!["ada@example.com".into()],
+                fingerprint: "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12".into(),
+                not_before: "Jan  1 00:00:00 2026 GMT".into(),
+                not_after: "Jan  1 00:00:00 2027 GMT".into(),
+                expired: false,
+            }),
+            content: None,
+        }),
+        ..Default::default()
+    }
+}
+
+fn crypt_reader(size: egui::Vec2, name: &str) {
+    let mut store = FakeStore::concept();
+    store.set_headers(0, crypt_headers());
+    let mut h = harness_sized(store, size);
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.get_by_label_contains("certificate not trusted").click();
+    h.run();
+    h.run();
+    let img = h.render().expect("render");
+    img.save(out_dir().join(name)).unwrap();
+}
+
+#[test]
+fn crypt_chips_and_certificate_render_on_desktop() {
+    crypt_reader(egui::vec2(1280.0, 800.0), "crypt-reader.png");
+}
+
+#[test]
+fn crypt_chips_and_certificate_render_on_phone() {
+    crypt_reader(egui::vec2(390.0, 844.0), "phone-crypt-reader.png");
+}
+
 #[test]
 fn spoof_chips_render_on_desktop() {
     spoof_reader(egui::vec2(1280.0, 800.0), "spoof-reader.png");

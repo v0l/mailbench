@@ -485,7 +485,7 @@ fn keys_cmd(k: &KeysCmd) -> Res<()> {
         }
         KeysCmd::ImportPgp { file } => {
             let data = std::fs::read(file).map_err(|x| format!("{}: {x}", file.display()))?;
-            let i = crypt::import_pgp(&store, &data).map_err(e)?;
+            let i = crypt::import_pgp(&store, &data, &std::env::var("MAILBENCH_PGP_PASSPHRASE").unwrap_or_default()).map_err(e)?;
             println!("imported {} {}", i.id, i.label);
         }
         KeysCmd::ImportP12 { file } => {
@@ -522,8 +522,7 @@ fn decrypt_cmd(a: &DecryptArgs) -> Res<()> {
 fn verify_cmd(a: &VerifyArgs) -> Res<()> {
     use crate::crypt::{self, SmimeState};
     let data = std::fs::read(&a.file).map_err(|x| format!("{}: {x}", a.file.display()))?;
-    let trust = crypt::os_trust_store().map_err(|e| e.to_string())?;
-    let v = crypt::smime_verify(&data, &trust).map_err(|e| e.to_string())?;
+    let v = crypt::smime_verify_default(&data).map_err(|e| e.to_string())?;
     match &v.state {
         SmimeState::Trusted => println!("signature valid, signer trusted"),
         SmimeState::Untrusted(why) => println!("signature valid, signer not trusted: {why}"),

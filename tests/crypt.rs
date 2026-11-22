@@ -1,3 +1,4 @@
+#![cfg(smime)]
 use mailbench::crypt::*;
 use mailbench::store::{KdfParams, Store};
 use openssl::asn1::Asn1Time;
@@ -47,7 +48,7 @@ fn pgp_encrypt(public: &SignedPublicKey, text: &[u8]) -> Vec<u8> {
 fn pgp_key_is_held_in_the_store_and_decrypts() {
     let (dir, store) = store();
     let (secret, public) = pgp_pair("Ada <ada@example.com>");
-    let info = import_pgp(&store, &secret.to_bytes().unwrap()).unwrap();
+    let info = import_pgp(&store, &secret.to_bytes().unwrap(), "").unwrap();
     assert_eq!(info.label, "Ada <ada@example.com>");
     let cipher = pgp_encrypt(&public, b"meet at noon");
     let out = pgp_decrypt(&store, &cipher, "").unwrap();
@@ -62,7 +63,7 @@ fn pgp_key_is_held_in_the_store_and_decrypts() {
 fn pgp_decrypt_fails_without_the_right_key() {
     let (_dir, store) = store();
     let (other, _) = pgp_pair("Eve <eve@example.com>");
-    import_pgp(&store, &other.to_bytes().unwrap()).unwrap();
+    import_pgp(&store, &other.to_bytes().unwrap(), "").unwrap();
     let (_, public) = pgp_pair("Ada <ada@example.com>");
     let cipher = pgp_encrypt(&public, b"secret");
     assert_eq!(pgp_decrypt(&store, &cipher, "").err(), Some(CryptError::NoKey));
@@ -79,7 +80,7 @@ fn pgp_decrypt_with_no_keys_imported_fails() {
 #[test]
 fn garbage_is_not_a_key() {
     let (_dir, store) = store();
-    assert!(matches!(import_pgp(&store, b"not a key"), Err(CryptError::BadKey(_))));
+    assert!(matches!(import_pgp(&store, b"not a key", ""), Err(CryptError::BadKey(_))));
     assert!(matches!(import_pkcs12(&store, b"nope", "x"), Err(CryptError::BadKey(_))));
 }
 

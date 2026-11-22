@@ -22,6 +22,11 @@ pub mod runtime;
 pub mod search;
 pub mod settings;
 pub mod shell;
+#[cfg(smime)]
+pub mod smime;
+#[cfg(not(smime))]
+pub mod smime_off;
 pub mod snooze;
+pub mod openpgp;
 pub mod spoof;
 pub mod store;
