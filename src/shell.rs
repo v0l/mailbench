@@ -539,7 +539,7 @@ impl AddForm {
         })
     }
 
-    fn key(&self) -> String {
+    pub fn key(&self) -> String {
         if self.nostr {
             return format!("nostr\0{}\0{}", self.password.trim(), self.relays.trim());
         }

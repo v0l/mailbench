@@ -454,6 +454,27 @@ fn jmap_form_fits_at_phone_width() {
     assert!(key.right() <= 390.0 && key.left() >= 0.0, "test connection at {key:?}");
     let img = h.render().expect("render");
     img.save(out_dir().join("phone-jmap-add-account.png")).unwrap();
+    {
+        let f = h.state_mut().1.add_form().unwrap();
+        f.email = "someone@example.org".into();
+        f.username = "someone".into();
+        f.password = "secret".into();
+        f.jmap_url = "https://api.fastmail.com/jmap/session".into();
+        f.test.for_key = f.key();
+        f.test.results = vec![(mailbench::accounts::Step::Imap, Ok(())), (mailbench::accounts::Step::Smtp, Ok(()))];
+    }
+    h.run();
+    h.run();
+    for text in ["JMAP session: connected and signed in", "sending (EmailSubmission): ready"] {
+        let r = h.get_by_label_contains(text).rect();
+        assert!(r.left() >= 0.0 && r.right() <= 390.0 && r.bottom() <= 844.0, "{text} at {r:?}");
+    }
+    for label in ["test connection", "save and sync"] {
+        let r = h.get_by_label(label).rect();
+        assert!(r.left() >= 0.0 && r.right() <= 390.0 && r.bottom() <= 844.0, "{label} at {r:?}");
+    }
+    let img = h.render().expect("render");
+    img.save(out_dir().join("phone-jmap-add-account-tested.png")).unwrap();
 }
 
 fn setup_greenmail_account(h: &mut Harness<'static, State>, name: &str) {
