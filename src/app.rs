@@ -2360,7 +2360,10 @@ impl App {
                     ui.add_space(4.0);
                 }
                 ui.horizontal(|ui| {
-                    attach = ui.add(Key::new("attach").outline(VALUE).min_width(90.0)).clicked();
+                    attach = ui.add(Key::new("attach").outline(VALUE).min_width(90.0).enabled(!cfg!(target_os = "android"))).clicked();
+                    if cfg!(target_os = "android") {
+                        Line::new().note("Attachments are not available on Android yet").size(11.0).show(ui);
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let note = if draft.saved && !draft.is_dirty() { "Saved to drafts, encrypted" } else { "Not saved yet" };
                         Line::new().note(note).size(11.0).show(ui);
