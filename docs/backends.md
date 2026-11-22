@@ -43,6 +43,7 @@ Sync is token based. `sync_folder(folder, since)` returns a `FolderDelta`: the n
 
 - Relays: the account's kind 10050 list, else its NIP-65 read relays, else the configured relays, else `DEFAULT_RELAYS`. `publish_inbox` publishes a kind 10050 when none exists.
 - Folders: Inbox (received), Sent (own messages, from the self copy gift wrap) and Archive (local only, empty).
+- Legacy NIP-04: kind 4 events sent to or by the account are decrypted with the signer's NIP-04 support (including bunkers) and land in Inbox (received) and Sent (own). They are read only: sending is always NIP-17. They have no subject, so the first line of the text is used. Dedupe is by event id, and later syncs ask only for events since the newest one seen.
 - Sync: kind 1059 events tagged with the account's key, going back 2 days from the newest wrap seen (wrap times are randomised), capped at `BACKFILL_CAP` events. Wraps are opened with NIP-44, the seal and rumor authors must match, and messages dedupe by rumor id.
 - Mapping: kind 14 becomes a plain text mail, kind 15 a mail with the decrypted file attached. `From` and `To` are `<npub>@nostr` with kind 0 names, refreshed daily. The thread key (participants plus normalised subject) goes in `References`, and `e` tags become `In-Reply-To`.
 - Send: one kind 14 gift wrap per recipient on that recipient's 10050 relays, plus a self copy. Recipients can be an npub, hex key or NIP-05 name.
@@ -50,7 +51,7 @@ Sync is token based. `sync_folder(folder, since)` returns a `FolderDelta`: the n
 - Profiles: kind 0 name, picture and NIP-05 are cached for a day. The picture shows only after the user allows remote images for that message. A NIP-05 badge needs `/.well-known/nostr.json` to return the sender's key.
 - When the account has no kind 10050 list, the add account screen asks whether to publish one before saving.
 
-Tests: `tests/backend_nostr.rs` uses rust-nostr's in-process `MockRelay`, never a public relay.
+Tests: `tests/backend_nostr.rs` uses rust-nostr's in-process `MockRelay`. `strfry_container_carries_nip17_and_nip04_dms` runs against `ghcr.io/hoytech/strfry` in Docker (`common::strfry`, port 7777, container `mailbench-strfry`, NIP-42 auth required for kinds 4 and 1059 so the client authenticates automatically) and skips without docker. No test uses a public relay.
 
 ## JMAP
 

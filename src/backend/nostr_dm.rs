@@ -205,6 +205,25 @@ pub async fn open_wrap<T: NostrSigner>(keys: &T, wrap: &NostrEvent) -> std::resu
     })
 }
 
+pub async fn open_legacy<T: NostrSigner>(keys: &T, me: &PublicKey, event: &NostrEvent) -> std::result::Result<Dm, Rejected> {
+    if event.kind != Kind::EncryptedDirectMessage {
+        return Err(Rejected::WrongKind);
+    }
+    let to: Vec<PublicKey> = event.tags.public_keys().copied().take(1).collect();
+    let other = if event.pubkey == *me { *to.first().ok_or(Rejected::Undecryptable)? } else { event.pubkey };
+    let content = keys.nip04_decrypt(&other, &event.content).await.map_err(|_| Rejected::Undecryptable)?;
+    Ok(Dm {
+        id: event.id,
+        sender: event.pubkey,
+        to,
+        created_at: event.created_at.as_secs() as i64,
+        subject: None,
+        file: None,
+        content,
+        reply_to: event.tags.event_ids().next().copied(),
+    })
+}
+
 impl Dm {
     pub fn participants(&self) -> Vec<PublicKey> {
         let mut all = vec![self.sender];
@@ -416,6 +435,7 @@ pub struct NostrBackend {
     msgs: BTreeMap<u32, Dm>,
     seen_wraps: HashSet<EventId>,
     newest_wrap: Option<u64>,
+    newest_legacy: Option<u64>,
     names: Names,
     relays: Vec<String>,
 }
@@ -439,7 +459,7 @@ impl NostrBackend {
             }
         };
         let relays = if cfg.relays.is_empty() { DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect() } else { cfg.relays.clone() };
-        Ok(Self { cfg, signer, me, client: None, msgs: BTreeMap::new(), seen_wraps: HashSet::new(), newest_wrap: None, names: Names::default(), relays })
+        Ok(Self { cfg, signer, me, client: None, msgs: BTreeMap::new(), seen_wraps: HashSet::new(), newest_wrap: None, newest_legacy: None, names: Names::default(), relays })
     }
 
     pub fn public_key(&self) -> PublicKey {
@@ -569,9 +589,39 @@ impl NostrBackend {
                 }
             }
         }
+        added += self.refresh_legacy(&client, &mut people).await?;
         people.sort();
         people.dedup();
         self.refresh_names(&client, people).await;
+        Ok(added)
+    }
+
+    async fn refresh_legacy(&mut self, client: &Client, people: &mut Vec<PublicKey>) -> Result<usize> {
+        let me = self.public_key();
+        let since = |f: Filter| match self.newest_legacy {
+            Some(t) => f.since(Timestamp::from_secs(t)),
+            None => f,
+        };
+        let received = since(Filter::new().kind(Kind::EncryptedDirectMessage).pubkey(me).limit(BACKFILL_CAP));
+        let sent = since(Filter::new().kind(Kind::EncryptedDirectMessage).author(me).limit(BACKFILL_CAP));
+        let mut events = Vec::new();
+        for filter in [received, sent] {
+            let found = client.fetch_events_from(self.relays.clone(), filter, FETCH_TIMEOUT).await.map_err(conn)?;
+            events.extend(found.into_iter());
+        }
+        let mut added = 0;
+        for event in events {
+            if !self.seen_wraps.insert(event.id) {
+                continue;
+            }
+            self.newest_legacy = Some(self.newest_legacy.unwrap_or(0).max(event.created_at.as_secs()));
+            if let Ok(dm) = open_legacy(&self.signer, &me, &event).await {
+                if self.insert(dm.clone()) {
+                    added += 1;
+                    people.extend(dm.participants());
+                }
+            }
+        }
         Ok(added)
     }
 

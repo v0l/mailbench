@@ -530,6 +530,25 @@ impl Shared {
         self.repaint();
     }
 
+    fn familiarity(&self) -> crate::spoof::Familiarity {
+        let cache = lock(&self.cache).clone();
+        let own: Vec<String> = self.accounts.iter().map(|a| a.address.trim().to_lowercase()).collect();
+        let items: Vec<crate::spoof::HistoryItem> = cache
+            .entries
+            .iter()
+            .map(|e| crate::spoof::HistoryItem {
+                from: &e.from_address,
+                to: e.to_key.split_whitespace().map(|t| t.trim_matches(|c: char| matches!(c, '<' | '>' | ',' | ';' | '(' | ')' | '"'))).filter(|t| t.contains('@')).collect(),
+                written_by_user: e.folder == ms::Folder::Sent || own.contains(&e.from_address.trim().to_lowercase()),
+                opened: !e.unread,
+                flagged: e.flagged,
+                date: e.date,
+            })
+            .collect();
+        let contacts: Vec<String> = lock(&self.contacts).values().map(|c| c.address.clone()).collect();
+        crate::spoof::Familiarity::build(&items, &contacts)
+    }
+
     fn queue_parse(&self, e: &Entry) {
         if lock(&self.parse_pending).insert(e.id) {
             if let Some(tx) = lock(&self.parser).as_ref() {
@@ -553,7 +572,8 @@ impl Shared {
         let body = display::parse_body(&raw);
         let mut headers = headers::parse_headers(&raw);
         let known: Vec<String> = lock(&self.contacts).values().map(|c| c.address.clone()).collect();
-        headers.spoof = crate::spoof::assess(&headers::from_name(&headers.all), &e.from_address, &known);
+        let familiar = self.familiarity();
+        headers.spoof = crate::spoof::assess_with(&headers::from_name(&headers.all), &e.from_address, &known, Some(&familiar), e.date);
         headers.pgp = crate::openpgp::verify(&raw, &[]);
         let envelope = display::envelope(&raw);
         let message = Message {
