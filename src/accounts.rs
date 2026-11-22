@@ -18,6 +18,10 @@ pub enum Credential {
         #[serde(default)]
         publish_inbox: bool,
     },
+    Jmap {
+        url: String,
+        password: String,
+    },
     NostrBunker {
         url: String,
         app_key: String,
@@ -91,6 +95,36 @@ impl AccountConfig {
     pub fn is_nostr(&self) -> bool {
         matches!(self.credential, Credential::Nostr { .. } | Credential::NostrBunker { .. })
     }
+
+    pub fn is_jmap(&self) -> bool {
+        matches!(self.credential, Credential::Jmap { .. })
+    }
+}
+
+pub fn jmap_backend(cfg: &AccountConfig) -> Result<JmapBackend> {
+    match &cfg.credential {
+        Credential::Jmap { url, .. } => Ok(JmapBackend::new(JmapConfig::new(url, auth_of(cfg)))),
+        _ => Err(BackendError::Auth("not a jmap account".into())),
+    }
+}
+
+pub fn jmap_config(url: &str, address: &str, user: &str, password: &str) -> AccountConfig {
+    let none = ServerSettings::new("", 0, Security::Plain);
+    let address = address.trim().to_string();
+    AccountConfig {
+        id: new_id(),
+        name: address.split('@').next().unwrap_or(&address).to_string(),
+        display_name: String::new(),
+        signature: String::new(),
+        username: if user.trim().is_empty() { address.clone() } else { user.trim().to_string() },
+        address,
+        imap: none.clone(),
+        smtp: none,
+        credential: Credential::Jmap { url: url.trim().to_string(), password: password.to_string() },
+        backfill: Default::default(),
+        notify: Default::default(),
+        sync: Default::default(),
+    }
 }
 
 pub fn new_id() -> String {
@@ -135,6 +169,7 @@ pub fn auth_of(cfg: &AccountConfig) -> Auth {
         Credential::OAuth { tokens, .. } => {
             Auth::XOAuth2 { user: cfg.username.clone(), access_token: tokens.access_token.clone() }
         }
+        Credential::Jmap { password, .. } => Auth::Password { user: cfg.username.clone(), password: password.clone() },
         Credential::Nostr { secret, .. } => Auth::Password { user: cfg.username.clone(), password: secret.clone() },
         Credential::NostrBunker { app_key, .. } => Auth::Password { user: cfg.username.clone(), password: app_key.clone() },
     }
@@ -324,6 +359,7 @@ pub fn nostr_lacks_inbox_list(cfg: &AccountConfig) -> bool {
 pub fn setup_for(cfg: &AccountConfig, store: &Store) -> Result<AccountSetup> {
     let backend: Box<dyn Backend> = match cfg.credential {
         Credential::Nostr { .. } | Credential::NostrBunker { .. } => Box::new(nostr_backend(cfg)?),
+        Credential::Jmap { .. } => Box::new(jmap_backend(cfg)?),
         Credential::Password(_) => Box::new(build_account(cfg)),
         Credential::OAuth { .. } => Box::new(Fresh { cfg: cfg.clone(), store_path: Some(store.try_clone()?), inner: None }),
     };
@@ -371,6 +407,14 @@ pub fn run_checks(cfg: &AccountConfig, mut report: impl FnMut(Step, std::result:
     }
     if matches!(cfg.credential, Credential::Nostr { .. } | Credential::NostrBunker { .. }) {
         let result = nostr_backend(&cfg).map_err(|e| e.to_string()).and_then(|mut b| crate::runtime::block_on(b.check()).map_err(|e| e.to_string()));
+        report(Step::Imap, result.clone());
+        if result.is_ok() {
+            report(Step::Smtp, Ok(()));
+        }
+        return;
+    }
+    if cfg.is_jmap() {
+        let result = jmap_backend(&cfg).map_err(|e| e.to_string()).and_then(|mut b| crate::runtime::block_on(b.check()).map_err(|e| e.to_string()));
         report(Step::Imap, result.clone());
         if result.is_ok() {
             report(Step::Smtp, Ok(()));

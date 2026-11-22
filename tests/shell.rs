@@ -326,6 +326,136 @@ fn greenmail_user() -> String {
     format!("lf{}", std::process::id())
 }
 
+fn jmap_user(tag: &str) -> String {
+    assert!(common::stalwart(), "docker is required for stalwart tests");
+    let name = format!("sh{tag}{}", std::process::id());
+    common::create_stalwart_user(&name);
+    name
+}
+
+#[test]
+fn add_jmap_account_through_the_form_syncs_opens_and_sends() {
+    if !common::stalwart() {
+        return;
+    }
+    let name = jmap_user("ok");
+    let address = format!("{name}@example.org");
+    let mut seed = JmapBackend::new(JmapConfig::new(
+        &format!("http://127.0.0.1:{}", common::SW_HTTP),
+        Auth::Password { user: name.clone(), password: "secret".into() },
+    ));
+    mailbench::runtime::block_on(seed.send(&OutgoingMessage {
+        from: Address { name: Some("Zed".into()), address: address.clone() },
+        to: vec![Address { name: None, address: address.clone() }],
+        subject: "Hello over JMAP".into(),
+        body: "first jmap body".into(),
+        ..Default::default()
+    }))
+    .unwrap();
+
+    let d = dir();
+    let kc: Rc<dyn Keychain> = Rc::new(MemKeychain::default());
+    let mut h = boot(d.path(), kc.clone(), env(FixtureNet::default()));
+    h.get_by_label("continue").click();
+    h.run();
+    h.run();
+    h.get_by_label_contains("JMAP account").click();
+    h.run();
+    {
+        let f = h.state_mut().1.add_form().unwrap();
+        f.email = address.clone();
+        f.username = name.clone();
+        f.password = "secret".into();
+        f.jmap_url = format!("http://127.0.0.1:{}", common::SW_HTTP);
+    }
+    save(&mut h, "jmap-add-account");
+    assert!(h.get_by_label("save and sync").accesskit_node().is_disabled());
+    h.get_by_label("test connection").click();
+    until(&mut h, "both steps ok", |s| s.add_form().unwrap().test.all_ok());
+    save(&mut h, "jmap-add-account-tested");
+    h.get_by_label("save and sync").click();
+    h.run();
+    assert_eq!(h.state().1.screen_name(), "mail");
+    until(&mut h, "message synced", |s| s.app().is_some_and(|a| a.store.counts(&Query::new(ms::Folder::Inbox)).all == 1));
+    {
+        let app = h.state().1.app().unwrap();
+        assert_eq!(app.store.list(&Query::new(ms::Folder::Inbox), 0, 5).items[0].subject, "Hello over JMAP");
+    }
+    h.key_press(egui::Key::Enter);
+    until(&mut h, "body shown", |s| s.app().is_some_and(|a| a.store.list(&Query::new(ms::Folder::Inbox), 0, 1).items.first().is_some_and(|m| a.store.get(m.id).is_ok_and(|m| !m.paragraphs.is_empty()))));
+    h.get_by_label_contains("first jmap body");
+    save(&mut h, "jmap-inbox-reader");
+
+    h.key_press(egui::Key::C);
+    h.run();
+    h.run();
+    {
+        let app = h.state_mut().1.app_mut().unwrap();
+        let draft = app.draft.as_mut().expect("composer");
+        draft.to = address.clone();
+        draft.subject = "Sent from the UI".into();
+        draft.body = "second jmap body".into();
+    }
+    save(&mut h, "jmap-composer");
+    h.get_by_label("send").click();
+    until(&mut h, "sent mail arrives in the inbox", |s| s.app().is_some_and(|a| a.store.counts(&Query::new(ms::Folder::Inbox)).all == 2));
+    let subjects: Vec<String> = h.state().1.app().unwrap().store.list(&Query::new(ms::Folder::Inbox), 0, 5).items.iter().map(|m| m.subject.clone()).collect();
+    assert!(subjects.contains(&"Sent from the UI".to_string()), "{subjects:?}");
+    save(&mut h, "jmap-after-send");
+    drop(h);
+
+    let mut h = boot(d.path(), kc, env(FixtureNet::default()));
+    assert_eq!(h.state().1.screen_name(), "mail", "the saved jmap account is back after a restart");
+    until(&mut h, "messages from the store", |s| s.app().is_some_and(|a| a.store.counts(&Query::new(ms::Folder::Inbox)).all == 2));
+}
+
+#[test]
+fn jmap_form_rejects_a_wrong_password_and_keeps_saving_disabled() {
+    if !common::stalwart() {
+        return;
+    }
+    let name = jmap_user("bad");
+    let d = dir();
+    let mut h = boot(d.path(), Rc::new(MemKeychain::default()), env(FixtureNet::default()));
+    h.get_by_label("continue").click();
+    h.run();
+    h.run();
+    h.get_by_label_contains("JMAP account").click();
+    h.run();
+    {
+        let f = h.state_mut().1.add_form().unwrap();
+        f.email = format!("{name}@example.org");
+        f.password = "wrong".into();
+        f.jmap_url = format!("http://127.0.0.1:{}", common::SW_HTTP);
+    }
+    h.run();
+    h.get_by_label("test connection").click();
+    until(&mut h, "test finished", |s| !s.add_form().unwrap().test.running());
+    h.get_by_label_contains("authentication failed");
+    assert!(h.get_by_label("save and sync").accesskit_node().is_disabled());
+}
+
+#[test]
+fn jmap_form_fits_at_phone_width() {
+    let d = dir();
+    let mut h = harness_sized(
+        Shell::new(d.path().to_path_buf(), Rc::new(MemKeychain::default()), env(FixtureNet::default()), Some(KdfParams::fast())),
+        egui::vec2(390.0, 844.0),
+    );
+    h.run();
+    h.run();
+    h.get_by_label("continue").click();
+    h.run();
+    h.run();
+    h.get_by_label_contains("JMAP account").click();
+    h.run();
+    h.run();
+    let key = h.get_by_label("test connection").rect();
+    assert!(key.right() <= 390.0 && key.left() >= 0.0, "test connection at {key:?}");
+    let img = h.render().expect("render");
+    img.save(out_dir().join("phone-jmap-add-account.png")).unwrap();
+}
+
 fn setup_greenmail_account(h: &mut Harness<'static, State>, name: &str) {
     h.get_by_label("continue").click();
     h.run();

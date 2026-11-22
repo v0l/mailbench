@@ -374,6 +374,8 @@ pub struct AddForm {
     pub smtp_security: Security,
     pub edit: bool,
     pub nostr: bool,
+    pub jmap: bool,
+    pub jmap_url: String,
     pub publish_inbox: Option<bool>,
     pub relays: String,
     app_key: String,
@@ -424,6 +426,8 @@ impl AddForm {
             smtp_security: Security::StartTls,
             edit: false,
             nostr: false,
+            jmap: false,
+            jmap_url: String::new(),
             publish_inbox: None,
             relays: String::new(),
             app_key: crate::backend::new_app_key(),
@@ -491,6 +495,20 @@ impl AddForm {
             return Ok(cfg);
         }
         let email = self.email();
+        if self.jmap {
+            if autodetect::split_address(&email).is_none() {
+                return Err("Enter your email address".into());
+            }
+            if self.jmap_url.trim().is_empty() {
+                return Err("Enter the JMAP session url or server host".into());
+            }
+            if self.password.is_empty() {
+                return Err("Enter the password".into());
+            }
+            let mut cfg = accounts::jmap_config(&self.jmap_url, &email, &self.username, &self.password);
+            cfg.id = self.id.clone();
+            return Ok(cfg);
+        }
         if autodetect::split_address(&email).is_none() {
             return Err("Enter your email address".into());
         }
@@ -664,7 +682,12 @@ impl AddForm {
         let mut sign_in = None;
         page(ui, |ui| {
             section(ui, "add account", "your address first, the rest is looked up", |ui| {
-                ui.checkbox(&mut self.nostr, "nostr account (NIP-17 private messages)");
+                if !self.jmap {
+                    ui.checkbox(&mut self.nostr, "nostr account (NIP-17 private messages)");
+                }
+                if !self.nostr {
+                    ui.checkbox(&mut self.jmap, "JMAP account (Fastmail, Stalwart)");
+                }
                 if self.nostr {
                     row(ui, "nsec or bunker", |ui| {
                         secret(ui, &mut self.password);
@@ -733,6 +756,43 @@ impl AddForm {
                         detect = true;
                     }
                 });
+                if self.jmap {
+                    row(ui, "session url", |ui| {
+                        field(ui, &mut self.jmap_url, "https://api.fastmail.com or a session url");
+                    });
+                    row(ui, "user name", |ui| {
+                        field(ui, &mut self.username, "usually your email address");
+                    });
+                    row(ui, "password", |ui| {
+                        secret(ui, &mut self.password);
+                    });
+                    let parsed = self.config();
+                    self.test.show(ui, parsed.as_ref().ok(), false);
+                    if let Err(e) = &parsed {
+                        if !self.email.is_empty() && self.test.results.is_empty() {
+                            hint(ui, e);
+                        }
+                    }
+                    if let Some(e) = &self.saved_error {
+                        status(ui, false, e);
+                    }
+                    let tested = self.test.all_ok() && self.test.for_key == self.key();
+                    form_footer(ui, |ui| {
+                        let ok = parsed.is_ok();
+                        if ui.add(Key::new("save and sync").solid(READOUT).min_width(130.0).enabled(tested && ok)).clicked() {
+                            if let Ok(cfg) = &parsed {
+                                event = AddEvent::Save(cfg.clone());
+                            }
+                        }
+                        if ui.add(Key::new("test connection").outline(VALUE).min_width(130.0).enabled(ok && !self.test.running())).clicked() {
+                            run_test = true;
+                        }
+                        if !self.first && ui.add(Key::new("cancel").outline(VALUE).min_width(90.0)).clicked() {
+                            event = AddEvent::Cancel;
+                        }
+                    });
+                    return;
+                }
                 match &self.detect {
                     Detect::Idle => {}
                     Detect::Running(_) => {
@@ -969,8 +1029,12 @@ impl SettingsForm {
                                 row(ui, "signature", |ui| {
                                     prose(ui, &mut draft.signature, "added to new messages", 3);
                                 });
-                                reading(ui, "incoming", sec_summary(&draft.imap));
-                                reading(ui, "outgoing", sec_summary(&draft.smtp));
+                                if let Credential::Jmap { url, .. } = &draft.credential {
+                                    reading(ui, "jmap", url.clone());
+                                } else {
+                                    reading(ui, "incoming", sec_summary(&draft.imap));
+                                    reading(ui, "outgoing", sec_summary(&draft.smtp));
+                                }
                                 if let Some((id, run)) = &self.retest {
                                     if *id == draft.id {
                                         run.show(ui, Some(draft), false);

@@ -72,7 +72,17 @@ Tests: `tests/backend_jmap.rs` runs against Stalwart 0.13 in Docker (`tests/fixt
 
 ## Capability flags
 
-The UI reads `server_folders` (folder create and rename), `server_search` (server search fallback), `server_flags` (flag action) and `send`. A backend that leaves them false hides the matching action.
+The UI reads these flags through `RealStore` (`caps_of`). A backend that leaves one false hides or reroutes the matching action:
+
+| Flag | Read by | When false |
+| --- | --- | --- |
+| `server_folders` | `src/app.rs` folder tree (the `+ new folder` row and folder actions), `src/real/mod.rs` move | no folder create or rename, moves are kept in the local store only |
+| `server_search` | `src/real/search.rs` `ask_servers` | the search bar only uses the local index, no server query |
+| `server_flags` | `src/app.rs` reader `...` menu (the `flag` entry), `src/real/mod.rs` flag changes | no flag entry, read state is kept locally |
+| `send` | `Account::capabilities` (outbound backend) | the account cannot send |
+| `idle` | not read by the UI; the sync worker calls `watch` and falls back to polling when it returns `Unsupported` | polling at the account poll interval |
+
+JMAP search sends the parsed server query as plain text to `Email/query`, so IMAP only operators are not understood there.
 
 | Flag | IMAP | SMTP | JMAP | Nostr |
 | --- | --- | --- | --- | --- |
@@ -81,6 +91,10 @@ The UI reads `server_folders` (folder create and rename), `server_search` (serve
 | `server_flags` | yes | no | yes | no |
 | `send` | no (via SMTP in `Account`) | yes | yes | yes |
 | `idle` (push) | if advertised | no | yes (EventSource) | no |
+
+## Account setup
+
+The add account screen has a `JMAP account (Fastmail, Stalwart)` checkbox beside the nostr one. It takes the email address, the session URL or server host, a user name (defaults to the address) and a password, then `test connection` runs `JmapBackend::check` before `save and sync` enables. The account is stored as `Credential::Jmap { url, password }` in the encrypted store, `accounts::setup_for` builds the `JmapBackend`, and the CLI reads the same stored accounts. `tests/shell.rs` (`add_jmap_account_through_the_form_syncs_opens_and_sends`) walks add, sync, open and send against Stalwart.
 
 ## Adding a backend
 
