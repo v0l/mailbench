@@ -122,6 +122,12 @@ fn draft(id: u64, subject: &str, when: &str) -> Message {
 }
 
 impl FakeStore {
+    pub fn set_headers(&mut self, index: usize, headers: Headers) {
+        if let Some(m) = self.messages.get_mut(index) {
+            m.headers = headers;
+        }
+    }
+
     pub fn set_paragraphs(&mut self, index: usize, paragraphs: Vec<String>) {
         if let Some(m) = self.messages.get_mut(index) {
             m.paragraphs = paragraphs;

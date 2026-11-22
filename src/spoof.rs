@@ -9,7 +9,7 @@ impl SpoofWarning {
     pub fn text(&self) -> String {
         match self {
             SpoofWarning::NameHasOtherAddress(a) => format!("name shows {a}, sender is different"),
-            SpoofWarning::Lookalike { domain, resembles } => format!("{domain} looks like {resembles}"),
+            SpoofWarning::Lookalike { domain, resembles } => format!("{} looks like {}", unicode_domain(domain), unicode_domain(resembles)),
             SpoofWarning::FirstTimeSender => "first time sender".to_string(),
         }
     }
@@ -158,13 +158,14 @@ fn resembles(domain: &str, known: &str) -> bool {
     }
     let (name, tld) = labels(&unicode_domain(domain));
     let (kname, ktld) = labels(&unicode_domain(known));
-    name.chars().count() >= 6 && tld == ktld && edit_distance_one(&name, &kname)
+    let digitless = |s: &str| s.chars().filter(|c| !c.is_ascii_digit()).collect::<String>();
+    name.chars().count() >= 6 && tld == ktld && digitless(&name) != digitless(&kname) && edit_distance_one(&name, &kname)
 }
 
 pub fn assess(from_name: &str, from_address: &str, known: &[String]) -> Vec<SpoofWarning> {
     let from = from_address.trim().to_lowercase();
     let mut out = Vec::new();
-    if let Some(shown) = embedded_address(from_name).filter(|a| *a != from) {
+    if let Some(shown) = embedded_address(from_name).filter(|a| domain_of(a) != domain_of(&from)) {
         out.push(SpoofWarning::NameHasOtherAddress(shown));
     }
     let Some(domain) = domain_of(&from) else {
@@ -269,6 +270,43 @@ mod tests {
     fn unrelated_domains_are_not_lookalikes() {
         let w = assess("x", "a@totally-different.net", &known());
         assert_eq!(w, vec![SpoofWarning::FirstTimeSender]);
+    }
+
+    #[test]
+    fn another_mailbox_on_a_known_domain_is_not_flagged() {
+        let known = vec!["service@paypal.com".to_string()];
+        assert_eq!(assess("PayPal", "info@paypal.com", &known), vec![SpoofWarning::FirstTimeSender]);
+    }
+
+    #[test]
+    fn short_company_names_one_letter_apart_are_different_companies() {
+        let known = vec!["me@bank.example".to_string()];
+        let w = assess("Banc", "hello@banc.example", &known);
+        assert_eq!(w, vec![SpoofWarning::FirstTimeSender]);
+    }
+
+    #[test]
+    fn numbered_domains_are_not_lookalikes() {
+        let known = vec!["a@example1.test".to_string()];
+        assert_eq!(assess("B", "b@example2.test", &known), vec![SpoofWarning::FirstTimeSender]);
+    }
+
+    #[test]
+    fn name_with_its_own_address_in_brackets_is_fine() {
+        let known = vec!["support@vendor.com".to_string()];
+        assert!(assess("Support (support@vendor.com)", "support@vendor.com", &known).is_empty());
+    }
+
+    #[test]
+    fn list_sender_naming_a_list_address_on_its_own_domain_is_fine() {
+        let w = assess("dev@lists.example.org via Dev", "noreply@lists.example.org", &[]);
+        assert_eq!(w, vec![SpoofWarning::FirstTimeSender]);
+    }
+
+    #[test]
+    fn lookalike_text_shows_the_decoded_domain() {
+        let w = SpoofWarning::Lookalike { domain: "xn--ypal-43d9g.com".into(), resembles: "paypal.com".into() };
+        assert_eq!(w.text(), "раypal.com looks like paypal.com");
     }
 
     #[test]

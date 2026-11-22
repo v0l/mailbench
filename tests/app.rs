@@ -250,9 +250,42 @@ fn go_archive_chord_and_unread_filter() {
 }
 
 fn out_dir() -> PathBuf {
-    let d = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/screens");
+    let d = std::env::var_os("SCREENS_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/screens"));
     std::fs::create_dir_all(&d).unwrap();
     d
+}
+
+fn spoof_headers() -> Headers {
+    use mailbench::spoof::SpoofWarning::*;
+    Headers {
+        spoof: vec![
+            NameHasOtherAddress("support@paypal.com".into()),
+            Lookalike { domain: "xn--ypal-43d9g.com".into(), resembles: "paypal.com".into() },
+            FirstTimeSender,
+        ],
+        ..Default::default()
+    }
+}
+
+fn spoof_reader(size: egui::Vec2, name: &str) {
+    let mut store = FakeStore::concept();
+    store.set_headers(0, spoof_headers());
+    let mut h = harness_sized(store, size);
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    let img = h.render().expect("render");
+    img.save(out_dir().join(name)).unwrap();
+}
+
+#[test]
+fn spoof_chips_render_on_desktop() {
+    spoof_reader(egui::vec2(1280.0, 800.0), "spoof-reader.png");
+}
+
+#[test]
+fn spoof_chips_render_on_phone() {
+    spoof_reader(egui::vec2(390.0, 844.0), "phone-spoof-reader.png");
 }
 
 fn save(h: &mut Harness<'static, (bool, App)>, name: &str) {
