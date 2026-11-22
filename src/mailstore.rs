@@ -183,6 +183,7 @@ pub struct Headers {
     pub auth: AuthResult,
     pub reply_to_differs: Option<String>,
     pub spoof: Vec<crate::spoof::SpoofWarning>,
+    pub pgp: Option<crate::openpgp::PgpStatus>,
     pub bulk: bool,
     pub hops: usize,
     pub spam: bool,

@@ -21,5 +21,6 @@ pub mod search;
 pub mod settings;
 pub mod shell;
 pub mod snooze;
+pub mod openpgp;
 pub mod spoof;
 pub mod store;

@@ -63,6 +63,7 @@ nostr-sdk = { version = "=0.44.1", default-features = false, features = ["nip44"
 nostr-connect = "=0.44.1"
 aes-gcm = "0.10"
 hayro = "0.9.0"
+pgp = { version = "0.21", default-features = false }
 
 [dev-dependencies]
 nostr-relay-builder = "=0.44.1"

@@ -583,6 +583,9 @@ pub fn header_notes(ui: &mut Ui, h: &crate::mailstore::Headers, open: bool) -> H
         for w in &h.spoof {
             chip(ui, &w.text(), if w.is_alarm() { FAULT } else { LEGEND }, w.is_alarm());
         }
+        if let Some(p) = &h.pgp {
+            chip(ui, &p.text(), if p.is_alarm() { FAULT } else { LEGEND }, p.is_alarm());
+        }
         if h.unsubscribe.is_some() && chip_button(ui, "unsubscribe", WARN).clicked() {
             click = HeaderClick::Unsubscribe;
         }

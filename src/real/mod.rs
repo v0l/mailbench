@@ -554,6 +554,7 @@ impl Shared {
         let mut headers = headers::parse_headers(&raw);
         let known: Vec<String> = lock(&self.contacts).values().map(|c| c.address.clone()).collect();
         headers.spoof = crate::spoof::assess(&headers::from_name(&headers.all), &e.from_address, &known);
+        headers.pgp = crate::openpgp::verify(&raw, &[]);
         let envelope = display::envelope(&raw);
         let message = Message {
             summary: summary(e, now()),
