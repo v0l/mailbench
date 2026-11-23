@@ -345,6 +345,40 @@ fn n_and_p_step_through_the_message_list_while_the_reader_has_focus() {
     assert_eq!(h.state().1.selected, start);
 }
 
+fn sent_specs() -> Vec<ConvSpec> {
+    [("14:20", "Thu 23 Nov 14:20:11"), ("14:31", "Thu 23 Nov 14:31:40"), ("14:52", "Thu 23 Nov 14:52:03")]
+        .iter()
+        .map(|(when, sent)| ConvSpec {
+            from: "Kieran",
+            address: "kieran@harkin.me",
+            to: &["info@owon.com.cc"],
+            when,
+            sent,
+            unread: false,
+            attach: false,
+            account: 0,
+            paragraphs: &["Could you send the datasheet for the PCT513."],
+            quoted: &[],
+        })
+        .collect()
+}
+
+#[test]
+#[ignore]
+fn render_sent_recipient_screens() {
+    for size in [egui::vec2(1280.0, 800.0), egui::vec2(392.0, 844.0)] {
+        let mut h = harness_sized(FakeStore::conversation("Datasheet", &sent_specs()), size);
+        h.key_press(egui::Key::Enter);
+        h.run();
+        h.run();
+        h.get_by_label("collapse all").click();
+        h.run();
+        h.run();
+        let name = if size.x > 800.0 { "thread-sent-recipients.png" } else { "thread-sent-recipients-phone.png" };
+        shot(&mut h, name);
+    }
+}
+
 fn shot(h: &mut Harness<'static, (bool, App)>, name: &str) {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/screens");
     let img = h.render().expect("render");

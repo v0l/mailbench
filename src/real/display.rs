@@ -268,6 +268,27 @@ mod tests {
     }
 
     #[test]
+    fn a_name_that_looks_like_an_address_gives_way_to_the_address() {
+        let a = Address { name: Some("info@owon".into()), address: "info@owon.com.cc".into() };
+        assert_eq!(person(&a), "info@owon.com.cc");
+        let b = Address { name: Some("Ann".into()), address: "ann@x.test".into() };
+        assert_eq!(person(&b), "Ann");
+    }
+
+    #[test]
+    fn local_recipients_are_split_and_a_draft_has_none() {
+        assert_eq!(local_people("\"info@owon\" <info@owon.com.cc>, Ann <ann@x.test>; b@x.test"), vec!["info@owon.com.cc", "Ann", "b@x.test"]);
+        assert!(local_people("  ").is_empty());
+    }
+
+    #[test]
+    fn bcc_is_the_last_resort_for_a_sent_copy() {
+        let bcc = vec![Address { name: None, address: "b@x.test".into() }];
+        assert_eq!(recipients_of(&[], &[], &bcc), vec!["b@x.test"]);
+        assert!(recipients_of(&[], &[], &[]).is_empty());
+    }
+
+    #[test]
     fn sent_has_weekday_date_and_time() {
         assert_eq!(sent(1_700_220_000), "Fri 17 Nov 11:20:00");
         assert_ne!(sent(1_700_220_007), sent(1_700_220_000));
