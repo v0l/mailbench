@@ -188,7 +188,7 @@ fn list_row(ui: &mut Ui, h: f32, on: bool, label: &str) -> (Rect, egui::Response
 
 impl SettingsForm {
     pub fn new(store: &Store, dir: &std::path::Path) -> Self {
-        let drafts = accounts::load_all(store);
+        let drafts = accounts::mail_accounts(store);
         SettingsForm {
             panels: crate::settings::Panels::new(store, &drafts, crate::settings::default_backup_path(dir)),
             agents: agents::AgentsPanel::new(store),

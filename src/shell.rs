@@ -1092,7 +1092,7 @@ impl Shell {
     }
 
     fn opened(&mut self, store: Store) {
-        let accounts = accounts::load_all(&store);
+        let accounts = accounts::mail_accounts(&store);
         self.store = Some(store);
         if accounts.is_empty() {
             self.screen = Screen::Add(Box::new(AddForm::new(true)), None);
@@ -1103,7 +1103,7 @@ impl Shell {
 
     fn build_main(&mut self) {
         let Some(store) = &self.store else { return };
-        let configs = accounts::load_all(store);
+        let configs = accounts::mail_accounts(store);
         if configs.is_empty() {
             self.screen = Screen::Add(Box::new(AddForm::new(true)), None);
             return;
@@ -1132,6 +1132,17 @@ impl Shell {
         app.html_state.dark = prefs.reading.dark_html;
         app.html_state.default_zoom = prefs.reading.zoom_milli();
         app.prefs = prefs;
+        if let Some(chat_store) = store.try_clone().ok() {
+            app.chat_opener = Some(Box::new(move || {
+                let cfg = accounts::ensure_chat_account(&chat_store).ok()?;
+                let backend = accounts::chat_backend(&cfg).ok()?;
+                let local = crate::chat::ChatStore::new(chat_store.try_clone().ok()?, &cfg.id);
+                let ctrl = crate::chat::ChatController::start(backend, Some(local));
+                let mut view = crate::chat::ChatView::new(ctrl);
+                view.notifier = Some(std::sync::Arc::new(crate::notify::DesktopNotifier));
+                Some(view)
+            }));
+        }
         self.screen = Screen::Main(Box::new(Main { app }));
         self.apply_open_settings();
         self.attach();
