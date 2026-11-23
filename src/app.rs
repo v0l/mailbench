@@ -1630,7 +1630,19 @@ impl App {
             if resp.clicked() {
                 actions.push(Action::AccountOnly(Some(account)));
             }
-            for f in self.store.account_folders(account) {
+            let listed = self.store.account_folders(account);
+            let waiting = listed.is_empty() && !tree.iter().any(|n| n.account == account);
+            if waiting {
+                for f in Folder::UNIFIED {
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), self.row_h()), egui::Sense::hover());
+                    put(ui.painter(), rect.left() + 12.0, 120.0, rect.center().y, f.name(), body(13.0), LEGEND.gamma_multiply(0.4));
+                }
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), egui::Sense::hover());
+                put(ui.painter(), rect.left() + 12.0, 160.0, rect.center().y, "syncing folders", body(12.0), LEGEND);
+                ui.ctx().accesskit_node_builder(resp.id, |n| n.set_label(format!("{} syncing folders", info.name)));
+                continue;
+            }
+            for f in listed {
                 let on = scoped && f.folder == self.folder;
                 let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), self.row_h()), egui::Sense::click());
                 let p = ui.painter();
