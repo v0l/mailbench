@@ -124,6 +124,7 @@ pub struct Summary {
     pub account: usize,
     pub thread: u32,
     pub remote: bool,
+    pub date: Option<i64>,
 }
 
 #[derive(Clone, Debug)]

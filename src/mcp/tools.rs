@@ -15,6 +15,32 @@ pub fn text_result(text: &str, structured: Value) -> Value {
     json!({"content": [{"type": "text", "text": text}], "structuredContent": structured, "isError": false})
 }
 
+pub const TEXT_LIMIT: usize = 20_000;
+
+pub fn with_items(summary: &str, items: &[String], separator: &str, omitted: impl Fn(usize, usize) -> String) -> String {
+    let mut out = format!("{summary}\n\n");
+    let reserve = 300;
+    let mut shown = 0;
+    for item in items {
+        let added = item.len() + separator.len();
+        if shown > 0 && out.len() + added + reserve > TEXT_LIMIT {
+            break;
+        }
+        out.push_str(item);
+        out.push_str(separator);
+        shown += 1;
+    }
+    if shown < items.len() {
+        out.push_str(&omitted(shown, items.len() - shown));
+    }
+    out.trim_end().to_string()
+}
+
+pub fn iso_date(seconds: Option<i64>) -> Option<String> {
+    let t = chrono::DateTime::from_timestamp(seconds?, 0)?;
+    Some(t.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+}
+
 pub fn error_result(message: &str) -> Value {
     json!({"content": [{"type": "text", "text": message}], "isError": true})
 }
