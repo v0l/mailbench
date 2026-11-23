@@ -333,7 +333,19 @@ pub(crate) struct Shared {
     notifier: Mutex<Option<Arc<dyn Notifier>>>,
     focus: Mutex<Option<u64>>,
     built: AtomicU64,
+    builds: AtomicU64,
+    pending: Mutex<Option<Pending>>,
+    build_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
+
+struct Pending {
+    first: std::time::Instant,
+    last: std::time::Instant,
+    reason: &'static std::panic::Location<'static>,
+}
+
+const QUIET: Duration = Duration::from_millis(500);
+const STARVATION: Duration = Duration::from_secs(5);
 
 fn now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
@@ -422,7 +434,20 @@ impl Shared {
         lock(&self.states)[index] = (state, detail);
     }
 
+    #[track_caller]
     pub fn refresh(&self) {
+        let at = std::time::Instant::now();
+        let reason = std::panic::Location::caller();
+        {
+            let mut pending = lock(&self.pending);
+            match pending.as_mut() {
+                Some(p) => {
+                    p.last = at;
+                    p.reason = reason;
+                }
+                None => *pending = Some(Pending { first: at, last: at, reason }),
+            }
+        }
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.wake.notify_all();
         if let Some(ctx) = lock(&self.ctx).as_ref() {
@@ -1335,9 +1360,23 @@ impl Shared {
     }
 }
 
+fn quiet_left(shared: &Shared, user_seen: u64) -> Option<Duration> {
+    if shared.user_gen.load(Ordering::SeqCst) != user_seen {
+        return None;
+    }
+    let pending = lock(&shared.pending);
+    let p = pending.as_ref()?;
+    let quiet = QUIET.saturating_sub(p.last.elapsed());
+    let starved = STARVATION.saturating_sub(p.first.elapsed());
+    Some(quiet.min(starved)).filter(|d| !d.is_zero())
+}
+
 fn builder(shared: Arc<Shared>) {
     let mut seen = 0;
     let mut first = true;
+    let mut user_seen = 0;
+    let log = std::env::var_os("MAILBENCH_BUILD_LOG").is_some_and(|v| v == "1");
+    let mut window = (std::time::Instant::now(), 0u32);
     while !shared.stop.load(Ordering::Relaxed) {
         let generation = shared.generation.load(Ordering::SeqCst);
         if generation == seen {
@@ -1345,8 +1384,35 @@ fn builder(shared: Arc<Shared>) {
             let _ = shared.wake.wait_timeout(guard, Duration::from_millis(250));
             continue;
         }
+        if !first {
+            if let Some(wait) = quiet_left(&shared, user_seen) {
+                let guard = lock(&shared.wake_lock);
+                let _ = shared.wake.wait_timeout(guard, wait);
+                continue;
+            }
+        }
         let user = shared.user_gen.load(Ordering::SeqCst);
+        let reason = lock(&shared.pending).take().map(|p| p.reason);
+        let started = std::time::Instant::now();
         let fresh = Arc::new(shared.build(first));
+        let hook = lock(&shared.build_hook).clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+        shared.builds.fetch_add(1, Ordering::SeqCst);
+        if log {
+            if window.0.elapsed() >= Duration::from_secs(60) {
+                window = (std::time::Instant::now(), 0);
+            }
+            window.1 += 1;
+            eprintln!(
+                "mailbench build #{} in window {} took {:?} reason {}",
+                shared.builds.load(Ordering::SeqCst),
+                window.1,
+                started.elapsed(),
+                reason.map(|r| format!("{}:{}", r.file(), r.line())).unwrap_or_else(|| "initial".into())
+            );
+        }
         {
             let mut current = lock(&shared.cache);
             if shared.user_gen.load(Ordering::SeqCst) != user {
@@ -1354,6 +1420,7 @@ fn builder(shared: Arc<Shared>) {
             }
             *current = fresh;
         }
+        user_seen = user;
         if !first {
             seen = generation;
             shared.built.store(generation, Ordering::SeqCst);
@@ -1463,6 +1530,9 @@ impl RealStore {
             notifier: Mutex::new(None),
             focus: Mutex::new(None),
             built: AtomicU64::new(0),
+            builds: AtomicU64::new(0),
+            pending: Mutex::new(None),
+            build_hook: Mutex::new(None),
         });
         {
             let store = shared.lock_store();
@@ -1567,6 +1637,30 @@ impl RealStore {
 
     pub fn set_send_hold(&self, hold: Duration) {
         *lock(&self.shared.hold) = hold;
+    }
+
+    #[doc(hidden)]
+    pub fn builds(&self) -> u64 {
+        self.shared.builds.load(Ordering::SeqCst)
+    }
+
+    #[doc(hidden)]
+    pub fn request_rebuild(&self) {
+        self.shared.refresh();
+    }
+
+    #[doc(hidden)]
+    pub fn bump_handle(&self) -> Arc<dyn Fn() + Send + Sync> {
+        let shared = self.shared.clone();
+        Arc::new(move || {
+            shared.user_gen.fetch_add(1, Ordering::SeqCst);
+            shared.refresh();
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn on_build(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *lock(&self.shared.build_hook) = Some(hook);
     }
 
     pub fn pending(&self) -> usize {
