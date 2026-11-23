@@ -237,3 +237,26 @@ async fn smtp_rejects_message_without_recipients() {
     m.to.clear();
     assert!(smtp(&name).send(&m).await.is_err());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn inline_image_arrives_as_related_part_with_matching_content_id() {
+    let name = user();
+    let img = image::RgbaImage::from_fn(6, 6, |x, y| image::Rgba([(x * 40) as u8, (y * 40) as u8, 9, 255]));
+    let mut png = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    let mut m = mail(&name, "inline pic");
+    m.body = "hello **there**\n\n![dot.png](cid:feed01)\n".into();
+    m.html_alternative = true;
+    m.attachments.push(Attachment { name: "dot.png".into(), mime: "image/png".into(), data: png.clone(), cid: Some("feed01".into()) });
+    smtp(&name).send(&m).await.unwrap();
+    let mut i = imap(&name);
+    let uids = wait_for(&mut i, 1).await;
+    let raw = i.fetch("INBOX", uids[0]).await.unwrap();
+    let text = String::from_utf8_lossy(&raw).to_string();
+    assert!(text.contains("multipart/related"), "{text}");
+    let parsed = mail_parser::MessageParser::default().parse(&raw).unwrap();
+    assert!(parsed.body_html(0).unwrap().contains("cid:feed01"));
+    let part = parsed.attachments().next().unwrap();
+    assert_eq!(part.content_id(), Some("feed01"));
+    assert_eq!(part.decoded().into_owned(), png);
+}
