@@ -324,6 +324,15 @@ pub struct Outgoing {
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
     pub message_id: Option<String>,
+    pub bcc: String,
+    pub agent: bool,
+}
+
+pub const AGENT_HEADER: &str = "X-Mailbench-Agent";
+pub const AGENT_BANNER: &str = "Created by an agent, press Ctrl+Enter to send";
+
+pub fn is_agent_draft(headers: &Headers) -> bool {
+    headers.all.iter().any(|(k, _)| k.eq_ignore_ascii_case(AGENT_HEADER))
 }
 
 pub const SEND_HOLD_SECS: u64 = 10;

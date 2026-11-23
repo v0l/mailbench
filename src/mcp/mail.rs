@@ -96,6 +96,10 @@ impl MailTools {
         self
     }
 
+    pub fn store_for_tests(&self) -> std::sync::MutexGuard<'_, Box<dyn MailStore + Send>> {
+        self.store()
+    }
+
     fn store(&self) -> std::sync::MutexGuard<'_, Box<dyn MailStore + Send>> {
         self.store.lock().unwrap_or_else(|e| e.into_inner())
     }

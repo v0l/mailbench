@@ -453,6 +453,9 @@ impl MailStore for FakeStore {
             .collect();
         m.message_id = message.message_id.clone();
         m.references = message.references.clone();
+        if message.agent {
+            m.headers.all.push((AGENT_HEADER.to_string(), "1".to_string()));
+        }
         self.stash.insert(id.0, message);
         self.messages.insert(0, m);
         Ok(id)

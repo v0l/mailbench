@@ -156,6 +156,8 @@ pub struct Draft {
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
     pub message_id: Option<String>,
+    pub bcc: String,
+    pub agent: bool,
     pub signature: String,
     fingerprint: u64,
     changed_at: Option<std::time::Instant>,
@@ -223,6 +225,8 @@ impl Draft {
             in_reply_to: None,
             references: Vec::new(),
             message_id: None,
+            bcc: String::new(),
+            agent: false,
             signature: String::new(),
             fingerprint: 0,
             changed_at: None,
@@ -324,6 +328,8 @@ impl Draft {
             in_reply_to: out.in_reply_to,
             references: out.references,
             message_id: out.message_id,
+            bcc: out.bcc,
+            agent: out.agent,
             signature: signature.to_string(),
             ..Draft::blank()
         };
@@ -360,6 +366,8 @@ impl Draft {
             in_reply_to: self.in_reply_to.clone(),
             references: self.references.clone(),
             message_id: self.message_id.clone(),
+            bcc: self.bcc.clone(),
+            agent: self.agent,
         }
     }
 
@@ -2474,6 +2482,9 @@ impl App {
             .show(ctx, |ui| {
                 ui.set_width(640.0_f32.min(ctx.content_rect().width() - 48.0));
                 modal_title(ui, &draft.title);
+                if draft.agent {
+                    Line::new().note(crate::mailstore::AGENT_BANNER).size(12.0).show(ui);
+                }
                 row(ui, "to", |ui| {
                     recipients(ui, "to", &mut draft.to, &mut draft.to_input, "name or address", store);
                 });

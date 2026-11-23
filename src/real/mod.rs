@@ -869,6 +869,7 @@ impl Shared {
             },
             to: recipients(&msg.to, lenient),
             cc: recipients(&msg.cc, lenient),
+            bcc: recipients(&msg.bcc, lenient),
             subject: msg.subject,
             body: msg.body,
             in_reply_to: msg.in_reply_to,
@@ -913,6 +914,8 @@ impl Shared {
             rev: self.seq.fetch_add(1, Ordering::SeqCst) + 1,
             dirty: true,
             sent_ok: false,
+            bcc: message.bcc.clone(),
+            agent: message.agent,
         };
         let store = self.lock_store();
         store.delete_prefix(ATTACH, &format!("{key}\0")).map_err(backend_err)?;
@@ -975,6 +978,8 @@ impl Shared {
             in_reply_to: msg.in_reply_to,
             references: msg.references,
             message_id: msg.message_id,
+            bcc: msg.bcc,
+            agent: msg.agent,
         })
     }
 
@@ -1760,7 +1765,10 @@ impl MailStore for RealStore {
                         .collect(),
                     ..Default::default()
                 },
-                Headers::default(),
+                Headers {
+                    all: if msg.agent { vec![(ms::AGENT_HEADER.to_string(), "1".to_string())] } else { Vec::new() },
+                    ..Headers::default()
+                },
                 BodyState::Ready,
             )
         } else {
@@ -2306,6 +2314,8 @@ impl MailStore for RealStore {
             in_reply_to: env.in_reply_to,
             references: env.references,
             message_id: env.message_id,
+            bcc: String::new(),
+            agent: false,
         })
     }
 
