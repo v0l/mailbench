@@ -74,6 +74,31 @@ fn a_user_change_during_a_build_causes_exactly_one_more_build() {
 }
 
 #[test]
+fn a_refresh_during_a_running_build_causes_exactly_one_more_build() {
+    let (real, _dir) = open();
+    let before = settle(&real);
+    let entered = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    let (e, r) = (entered.clone(), release.clone());
+    real.on_build(Arc::new(move || {
+        e.store(true, Ordering::SeqCst);
+        while !r.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }));
+    real.request_rebuild();
+    let started = Instant::now();
+    while !entered.load(Ordering::SeqCst) {
+        assert!(started.elapsed() < Duration::from_secs(10), "build never started");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    real.request_rebuild();
+    release.store(true, Ordering::SeqCst);
+    let after = settle(&real);
+    assert_eq!(after - before, 2, "expected the running build plus exactly one more, got {}", after - before);
+}
+
+#[test]
 fn an_idle_store_builds_nothing() {
     let (real, _dir) = open();
     let before = settle(&real);

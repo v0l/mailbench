@@ -334,6 +334,7 @@ pub(crate) struct Shared {
     focus: Mutex<Option<u64>>,
     built: AtomicU64,
     builds: AtomicU64,
+    urgent: AtomicBool,
     pending: Mutex<Option<Pending>>,
     build_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
@@ -432,6 +433,20 @@ impl Shared {
 
     pub fn set_state(&self, index: usize, state: SyncState, detail: Option<String>) {
         lock(&self.states)[index] = (state, detail);
+    }
+
+    pub fn catch_up(&self) {
+        let target = self.generation.load(Ordering::SeqCst);
+        if self.built.load(Ordering::SeqCst) >= target {
+            return;
+        }
+        self.urgent.store(true, Ordering::SeqCst);
+        self.wake.notify_all();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while self.built.load(Ordering::SeqCst) < target && std::time::Instant::now() < deadline && !self.stop.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        self.urgent.store(false, Ordering::SeqCst);
     }
 
     #[track_caller]
@@ -1361,7 +1376,7 @@ impl Shared {
 }
 
 fn quiet_left(shared: &Shared, user_seen: u64) -> Option<Duration> {
-    if shared.user_gen.load(Ordering::SeqCst) != user_seen {
+    if shared.urgent.load(Ordering::SeqCst) || shared.user_gen.load(Ordering::SeqCst) != user_seen {
         return None;
     }
     let pending = lock(&shared.pending);
@@ -1531,6 +1546,7 @@ impl RealStore {
             focus: Mutex::new(None),
             built: AtomicU64::new(0),
             builds: AtomicU64::new(0),
+            urgent: AtomicBool::new(false),
             pending: Mutex::new(None),
             build_hook: Mutex::new(None),
         });
@@ -1956,6 +1972,7 @@ impl MailStore for RealStore {
     }
 
     fn set_flags(&mut self, id: MessageId, change: FlagChange) -> Result<(), StoreError> {
+        self.shared.catch_up();
         let e = self.entry(id)?;
         if e.local.is_some() {
             return Ok(());
@@ -2018,6 +2035,7 @@ impl MailStore for RealStore {
     }
 
     fn move_to(&mut self, id: MessageId, folder: ms::Folder) -> Result<(), StoreError> {
+        self.shared.catch_up();
         let e = self.entry(id)?;
         if e.folder == folder {
             return Ok(());
@@ -2080,6 +2098,7 @@ impl MailStore for RealStore {
     }
 
     fn snooze(&mut self, id: MessageId, wake_at: i64) -> Result<(), StoreError> {
+        self.shared.catch_up();
         let e = self.entry(id)?;
         if e.local.is_some() {
             return self.move_to(id, ms::Folder::Snoozed);
@@ -2094,6 +2113,7 @@ impl MailStore for RealStore {
     }
 
     fn bulk_snooze(&mut self, ids: &[MessageId], wake_at: i64) -> Result<(), StoreError> {
+        self.shared.catch_up();
         let mut moving = Vec::new();
         for id in ids {
             let e = self.entry(*id)?;
@@ -2125,6 +2145,7 @@ impl MailStore for RealStore {
     }
 
     fn bulk_flags(&mut self, ids: &[MessageId], change: FlagChange) -> Result<(), StoreError> {
+        self.shared.catch_up();
         let mut groups: HashMap<(usize, String), (u32, Vec<u32>)> = HashMap::new();
         let mut touched = Vec::new();
         for id in ids {
@@ -2178,6 +2199,7 @@ impl MailStore for RealStore {
     }
 
     fn bulk_move(&mut self, ids: &[MessageId], folder: ms::Folder) -> Result<(), StoreError> {
+        self.shared.catch_up();
         let mut groups: HashMap<(usize, String), (u32, Vec<u32>)> = HashMap::new();
         let mut touched = Vec::new();
         for id in ids {
@@ -2239,6 +2261,7 @@ impl MailStore for RealStore {
     }
 
     fn delete_forever(&mut self, ids: &[MessageId]) -> Result<(), StoreError> {
+        self.shared.catch_up();
         let mut groups: HashMap<(usize, String), (u32, Vec<u32>)> = HashMap::new();
         let mut gone = Vec::new();
         for id in ids {
@@ -2287,6 +2310,7 @@ impl MailStore for RealStore {
     }
 
     fn restore(&mut self, items: &[Restore]) -> Result<(), StoreError> {
+        self.shared.catch_up();
         let mut reverse: Vec<MessageId> = Vec::new();
         let mut back_to: Option<ms::Folder> = None;
         let mut flag_groups: HashMap<(bool, bool), Vec<MessageId>> = HashMap::new();
