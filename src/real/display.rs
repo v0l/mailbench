@@ -25,9 +25,21 @@ pub fn avatar_host(headers: &[(String, String)]) -> Option<String> {
 
 pub fn person(a: &Address) -> String {
     match a.name.as_deref() {
-        Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+        Some(n) if !n.trim().is_empty() && !n.contains('@') => n.trim().to_string(),
         _ => a.address.clone(),
     }
+}
+
+pub fn recipients_of(to: &[Address], cc: &[Address], bcc: &[Address]) -> Vec<String> {
+    [to, cc, bcc].into_iter().find(|l| !l.is_empty()).map(people).unwrap_or_default()
+}
+
+pub fn local_people(list: &str) -> Vec<String> {
+    crate::mailstore::split_recipients(list)
+        .iter()
+        .map(|r| crate::mailstore::Contact::parse(r))
+        .map(|c| person(&Address { name: Some(c.name), address: c.address }))
+        .collect()
 }
 
 pub fn people(list: &[Address]) -> Vec<String> {

@@ -3,7 +3,7 @@ use egui::Color32;
 use crate::thread::{snippet, without_parent_quote, without_parent_text};
 
 fn recipients_line(list: &[String]) -> String {
-    if list.is_empty() { "nobody".into() } else { list.join(", ") }
+    if list.is_empty() { "no recipients".into() } else { list.join(", ") }
 }
 
 impl App {

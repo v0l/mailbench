@@ -696,6 +696,7 @@ impl Backend for JmapBackend {
                     from: addresses(&e["from"]),
                     to: addresses(&e["to"]),
                     cc: addresses(&e["cc"]),
+                    bcc: addresses(&e["bcc"]),
                     date: timestamp(&e["sentAt"]).or_else(|| timestamp(&e["receivedAt"])),
                     message_id: strings(&e["messageId"]).into_iter().next(),
                     in_reply_to: strings(&e["inReplyTo"]),

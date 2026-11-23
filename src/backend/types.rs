@@ -95,6 +95,8 @@ pub struct MessageSummary {
     pub from: Vec<Address>,
     pub to: Vec<Address>,
     pub cc: Vec<Address>,
+    #[serde(default)]
+    pub bcc: Vec<Address>,
     pub date: Option<i64>,
     pub message_id: Option<String>,
     pub in_reply_to: Vec<String>,

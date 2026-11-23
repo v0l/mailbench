@@ -18,7 +18,7 @@ use tokio_native_tls::TlsStream;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 const HEADER_FIELDS: &str =
-    "BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES)]";
+    "BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES)]";
 
 #[derive(Clone, Debug)]
 pub struct ImapConfig {
@@ -361,6 +361,7 @@ pub(crate) fn summarize(uid: u32, flags: Flags, size: Option<u32>, header: &[u8]
         summary.from = addresses(msg.from());
         summary.to = addresses(msg.to());
         summary.cc = addresses(msg.cc());
+        summary.bcc = addresses(msg.bcc());
         summary.date = msg.date().map(|d| d.to_timestamp());
         summary.message_id = msg.message_id().map(str::to_string);
         summary.in_reply_to = text_list(msg.in_reply_to());

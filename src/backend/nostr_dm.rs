@@ -297,6 +297,7 @@ fn summary_of(dm: &Dm, me: &PublicKey, names: &Names) -> MessageSummary {
         from: vec![name(&dm.sender)],
         to,
         cc: Vec::new(),
+        bcc: Vec::new(),
         date: Some(dm.created_at),
         message_id: Some(message_id_of(&dm.id)),
         in_reply_to: dm.reply_to.iter().map(message_id_of).collect(),
