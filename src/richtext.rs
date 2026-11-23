@@ -333,6 +333,11 @@ fn inline_format(text: &str, sa: usize, sb: usize, format: Format) -> (String, (
         Format::Code => ("`", "`"),
         _ => ("[", "](https://)"),
     };
+    if selected.is_empty() && format != Format::Link && tail.starts_with(close) && !(format == Format::Italic && tail.starts_with("**")) && head.contains(open) {
+        let at = chars_of(text, sb) + close.chars().count();
+        let out = text.to_string();
+        return (out, (at, at));
+    }
     if format == Format::Link {
         let label = if selected.is_empty() { "link" } else { selected };
         let out = format!("{head}[{label}](https://){tail}");
@@ -466,6 +471,16 @@ mod tests {
         assert_eq!(sel, (6, 11));
         let (back, _) = apply(&t, (4, 13), Format::Bold);
         assert_eq!(back, "say hello now");
+    }
+
+    #[test]
+    fn pressing_bold_again_inside_the_marks_steps_out_of_them() {
+        let (t, sel) = apply("**word**", (6, 6), Format::Bold);
+        assert_eq!(t, "**word**");
+        assert_eq!(sel, (8, 8));
+        let (t, sel) = apply("*it*", (3, 3), Format::Italic);
+        assert_eq!(t, "*it*");
+        assert_eq!(sel, (4, 4));
     }
 
     #[test]
