@@ -1304,6 +1304,7 @@ impl Shell {
             },
             Screen::Main(main) => {
                 if self.settings.is_some() {
+                    main.app.apply_theme(&ctx);
                     self.settings_ui(ui);
                 } else {
                     main.app.show(ui);

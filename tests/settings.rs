@@ -5,6 +5,7 @@ use mailbench::autodetect::{Net, ServerSettings};
 use mailbench::backend::*;
 use mailbench::dns::Srv;
 use mailbench::prefs::{self, BodyPolicy, RemoteImages};
+use mailbench::settings_page::{Section, Tab};
 use mailbench::shell::{Env, Shell};
 use mailbench::store::{KdfParams, Keychain, Store, StoreError, Unlock};
 use std::cell::RefCell;
@@ -132,15 +133,20 @@ impl Rig {
     }
 
     fn settle(&mut self) {
-        let mut last = None;
-        for _ in 0..200 {
+        for _ in 0..6 {
             self.h.run();
-            let at = self.h.query_by_label("apply").map(|n| n.rect());
-            if at.is_some() && at == last {
-                return;
-            }
-            last = at;
         }
+    }
+
+    fn go(&mut self, section: mailbench::settings_page::Section, tab: Option<mailbench::settings_page::Tab>) {
+        {
+            let f = self.h.state_mut().1.settings_form().unwrap();
+            f.page.open_section(section);
+            if let Some(tab) = tab {
+                f.page.tab = tab;
+            }
+        }
+        self.settle();
     }
 
     fn click(&mut self, label: &str) {
@@ -154,6 +160,7 @@ impl Rig {
 #[test]
 fn account_sync_options_are_saved_and_the_folder_list_is_offered() {
     let mut rig = boot();
+    rig.go(Section::Accounts, Some(Tab::Sync));
     rig.h.get_by_label_contains("folders to sync");
     {
         let f = rig.h.state_mut().1.settings_form().unwrap();
@@ -178,6 +185,7 @@ fn account_sync_options_are_saved_and_the_folder_list_is_offered() {
 #[test]
 fn bodies_policy_persists_and_free_space_drops_old_bodies() {
     let mut rig = boot();
+    rig.go(Section::MailHandling, None);
     rig.h.get_by_label_contains("OLDER THAN");
     {
         let sink_store = rig.store();
@@ -199,6 +207,7 @@ fn bodies_policy_persists_and_free_space_drops_old_bodies() {
 #[test]
 fn store_section_shows_counts_reindexes_and_writes_an_encrypted_backup() {
     let mut rig = boot();
+    rig.go(Section::MailHandling, None);
     let stats = rig.h.state_mut().1.settings_form().unwrap().panels.stats;
     assert_eq!((stats.messages, stats.bodies), (1, 1));
     assert!(stats.bytes > 0);
@@ -221,6 +230,7 @@ fn store_section_shows_counts_reindexes_and_writes_an_encrypted_backup() {
 #[test]
 fn reading_preferences_persist() {
     let mut rig = boot();
+    rig.go(Section::General, None);
     rig.h.get_by_label_contains("dark reading for HTML");
     {
         let f = rig.h.state_mut().1.settings_form().unwrap();
@@ -244,6 +254,7 @@ fn reading_preferences_persist() {
 #[test]
 fn theme_and_density_persist_and_apply() {
     let mut rig = boot();
+    rig.go(Section::General, None);
     rig.h.get_by_label("density compact");
     {
         let f = rig.h.state_mut().1.settings_form().unwrap();
@@ -289,6 +300,7 @@ fn nostr_accounts_are_recognised_so_server_sync_options_are_hidden() {
 #[test]
 fn keyboard_list_rebinds_and_persists() {
     let mut rig = boot();
+    rig.go(Section::General, None);
     rig.h.get_by_label_contains("next message");
     rig.click("rebind archive");
     rig.h.get_by_label_contains("Press the new key");

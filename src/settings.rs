@@ -422,6 +422,9 @@ impl Panels {
             if self.capturing.is_some() {
                 hint(ui, "Press the new key. Escape cancels.");
             }
+            if let Some((ok, text)) = &self.note {
+                status(ui, *ok, text);
+            }
             if ui.add(Key::new("reset all keys").outline(LEGEND)).clicked() {
                 self.prefs.keys = Bindings::default();
             }

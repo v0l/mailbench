@@ -1304,12 +1304,16 @@ impl App {
         }
     }
 
-    pub fn show(&mut self, ui: &mut Ui) {
-        let ctx = ui.ctx().clone();
+    pub fn apply_theme(&mut self, ctx: &egui::Context) {
         if self.applied_theme != Some(self.prefs.theme) {
             ctx.set_theme(self.prefs.theme.preference());
             self.applied_theme = Some(self.prefs.theme);
         }
+    }
+
+    pub fn show(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+        self.apply_theme(&ctx);
         self.follow_notification();
         self.poll_save_result(&ctx);
         let keys = self.key_actions(&ctx);
