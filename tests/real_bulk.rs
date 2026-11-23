@@ -48,7 +48,7 @@ fn open_app(path: &Path, name: &str, port: u16) -> Harness<'static, (bool, App)>
 fn until(h: &mut Harness<'static, (bool, App)>, what: &str, cond: impl Fn(&App) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while !cond(&h.state().1) {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        assert!(Instant::now() < deadline, "timed out waiting for {what} inbox={} archive={} pending={}", count(&h.state().1, UiFolder::Inbox), count(&h.state().1, UiFolder::Archive), h.state().1.store.pending_ops());
         std::thread::sleep(Duration::from_millis(100));
         h.run();
     }
@@ -113,6 +113,10 @@ fn archiving_three_selected_rows_is_one_op_per_folder_and_undo_brings_them_back(
     assert_eq!(on_server(&name, "Archive"), 3);
     assert_eq!(on_server(&name, "INBOX"), 0);
 
+    for _ in 0..12 {
+        h.run();
+        std::thread::sleep(Duration::from_millis(100));
+    }
     h.key_press(egui::Key::Z);
     h.run();
     until(&mut h, "reverse op drained", |a| a.store.pending_ops() == 0);
