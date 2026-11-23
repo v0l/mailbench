@@ -473,6 +473,14 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    pub fn count_prefix(&self, kind: &str, prefix: &str) -> Result<u64> {
+        let n: i64 = self
+            .conn
+            .prepare_cached("SELECT COUNT(*) FROM records WHERE kind = ?1 AND id >= ?2 AND id < ?3")?
+            .query_row(params![kind, prefix, prefix_end(prefix)], |r| r.get(0))?;
+        Ok(n.max(0) as u64)
+    }
+
     pub fn list_prefix(&self, kind: &str, prefix: &str) -> Result<Vec<String>> {
         let mut st = self
             .conn

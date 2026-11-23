@@ -97,7 +97,7 @@ impl PageState {
 
     pub fn open_section(&mut self, section: Section) {
         self.section = section;
-        self.level = Level::Page;
+        self.level = if self.narrow { Level::Page } else { Level::Sections };
     }
 
     pub fn select_account(&mut self, index: usize) {

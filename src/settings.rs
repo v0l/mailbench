@@ -94,6 +94,7 @@ impl Panels {
 
     pub fn account_sync(&self, ui: &mut Ui, draft: &mut AccountConfig, index: usize) {
         if draft.is_nostr() {
+            hint(ui, "Nostr accounts follow their relays, so there is no sync window or poll interval.");
             return;
         }
         let folders = self.folders_of(&draft.id);
@@ -121,18 +122,25 @@ impl Panels {
         });
     }
 
-    pub fn show(&mut self, ui: &mut Ui, store: &Store, accounts: &[AccountConfig]) -> Outcome {
+    pub fn general(&mut self, ui: &mut Ui) {
         self.appearance(ui);
-        ui.add_space(8.0);
-        self.bodies(ui, store, accounts);
-        ui.add_space(8.0);
-        self.store_panel(ui, store, accounts);
-        ui.add_space(8.0);
-        self.keys_panel(ui, store);
         ui.add_space(8.0);
         self.reading(ui);
         ui.add_space(8.0);
         self.keyboard(ui);
+    }
+
+    pub fn mail(&mut self, ui: &mut Ui, store: &Store, accounts: &[AccountConfig]) {
+        self.remote_images(ui);
+        ui.add_space(8.0);
+        self.writing(ui);
+        ui.add_space(8.0);
+        self.bodies(ui, store, accounts);
+        ui.add_space(8.0);
+        self.store_panel(ui, store, accounts);
+    }
+
+    pub fn flush(&mut self, store: &Store) -> Outcome {
         let mut out = Outcome::default();
         if self.prefs != self.saved {
             match prefs::save(store, &self.prefs) {
@@ -280,7 +288,7 @@ impl Panels {
         self.keys = crypt::list_keys(store).unwrap_or_default();
     }
 
-    fn keys_panel(&mut self, ui: &mut Ui, store: &Store) {
+    pub fn keys_panel(&mut self, ui: &mut Ui, store: &Store) {
         section(ui, "keys", "PGP and S/MIME keys kept in the encrypted store", |ui| {
             if self.keys.is_empty() {
                 hint(ui, "No keys imported. Imported keys decrypt mail and never leave the store.");
@@ -329,12 +337,6 @@ impl Panels {
                 let r = ui.add(egui::DragValue::new(&mut reading.zoom_percent).range(prefs::MIN_ZOOM..=prefs::MAX_ZOOM).speed(1.0).suffix("%"));
                 ui.ctx().accesskit_node_builder(r.id, |node| node.set_label("default zoom percent"));
             });
-            row(ui, "remote images", |ui| {
-                for option in RemoteImages::ALL {
-                    ui.selectable_value(&mut reading.remote_images, option, format!("images {}", option.label()));
-                }
-            });
-            hint(ui, "Trusted senders and domains are chosen from the banner on a message and apply when this is set to ask or trusted.");
             row(ui, "mark as read", |ui| {
                 for option in prefs::MarkRead::ALL {
                     ui.selectable_value(&mut reading.mark_read, option, option.label());
@@ -353,6 +355,21 @@ impl Panels {
             });
             ui.checkbox(&mut reading.dark_html, "dark reading for HTML");
         });
+    }
+
+    fn remote_images(&mut self, ui: &mut Ui) {
+        section(ui, "remote images", "pictures that load from the web", |ui| {
+            let reading = &mut self.prefs.reading;
+            row(ui, "remote images", |ui| {
+                for option in RemoteImages::ALL {
+                    ui.selectable_value(&mut reading.remote_images, option, format!("images {}", option.label()));
+                }
+            });
+            hint(ui, "Trusted senders and domains are chosen from the banner on a message and apply when this is set to ask or trusted.");
+        });
+    }
+
+    fn writing(&mut self, ui: &mut Ui) {
         section(ui, "writing", "how messages are sent", |ui| {
             ui.checkbox(&mut self.prefs.plain_text_only, "send as plain text only");
             hint(ui, "Off: messages with bold, links, lists, quotes or code also carry an HTML copy. On: only the text you typed is sent.");

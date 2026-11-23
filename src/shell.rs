@@ -69,7 +69,7 @@ pub fn strength(password: &str) -> (f32, &'static str) {
     (bits, label)
 }
 
-fn strength_tint(label: &str) -> egui::Color32 {
+pub(crate) fn strength_tint(label: &str) -> egui::Color32 {
     match label {
         "weak" => FAULT,
         "fair" => WARN,
@@ -414,7 +414,7 @@ fn sec_label(s: &Security) -> String {
     }
 }
 
-fn sec_summary(s: &ServerSettings) -> String {
+pub(crate) fn sec_summary(s: &ServerSettings) -> String {
     format!("{}:{} {}", s.host, s.port, sec_label(&s.security))
 }
 
@@ -914,341 +914,8 @@ impl AddForm {
     }
 }
 
-pub struct SettingsForm {
-    pub drafts: Vec<AccountConfig>,
-    original: Vec<AccountConfig>,
-    removing: Option<usize>,
-    pub new_password: String,
-    pub new_confirm: String,
-    pub message: Option<(bool, String)>,
-    retest: Option<(String, TestRun)>,
-    methods: UnlockMethods,
-    pub allow_open: bool,
-    pub panels: crate::settings::Panels,
-    updater: egui_bench::update::Updater,
-}
-
-pub enum SettingsEvent {
-    None,
-    Prefs,
-    Close,
-    Rebuild,
-    AddAccount,
-    AllowOpen,
-}
-
-fn methods_of(store: &Store) -> UnlockMethods {
-    UnlockMethods { keychain: store.has_keychain().unwrap_or(false), password: store.has_password().unwrap_or(false) }
-}
-
-impl SettingsForm {
-    fn new(store: &Store, dir: &std::path::Path) -> Self {
-        let drafts = accounts::load_all(store);
-        SettingsForm {
-            panels: crate::settings::Panels::new(store, &drafts, crate::settings::default_backup_path(dir)),
-            original: drafts.clone(),
-            drafts,
-            removing: None,
-            new_password: String::new(),
-            new_confirm: String::new(),
-            message: None,
-            retest: None,
-            methods: methods_of(store),
-            allow_open: allow_open_setting(store),
-            updater: egui_bench::update::Updater::new(UPDATE_REPO, Some(env!("CARGO_PKG_VERSION").to_string())),
-        }
-    }
-
-    fn password_problem(&self) -> Option<&'static str> {
-        if self.new_password.chars().count() < MIN_PASSWORD {
-            return Some("Use at least 8 characters");
-        }
-        if self.new_password != self.new_confirm {
-            return Some("The two passwords do not match");
-        }
-        None
-    }
-
-    fn set_password(&mut self, store: &Store, kdf: KdfParams) {
-        match store.set_password(&self.new_password, kdf) {
-            Ok(()) => self.message = Some((true, "Password saved".into())),
-            Err(e) => self.message = Some((false, format!("Could not set the password: {e}"))),
-        }
-        self.new_password.clear();
-        self.new_confirm.clear();
-        self.methods = methods_of(store);
-    }
-
-    fn show(&mut self, ctx: &egui::Context, store: &Store, kc: &dyn Keychain, kdf: KdfParams) -> SettingsEvent {
-        if let Some((_, run)) = &mut self.retest {
-            run.poll(ctx);
-        }
-        let mut event = SettingsEvent::None;
-        if let Some(i) = self.removing {
-            let name = self.drafts[i].name.clone();
-            let mut keep = false;
-            let m = egui::Modal::new(egui::Id::new("remove-account"))
-                .backdrop_color(egui::Color32::from_black_alpha(150))
-                .show(ctx, |ui| {
-                    ui.set_width(400.0);
-                    modal_title(ui, &format!("Remove {name}?"));
-                    note(
-                        ui,
-                        "This deletes the mail synced from this account on this machine. Nothing is deleted on the server, and you can add the account again.",
-                        LEGEND,
-                    );
-                    form_footer(ui, |ui| {
-                        if ui.add(Key::new("remove").solid(FAULT).min_width(100.0)).clicked() {
-                            let id = self.drafts[i].id.clone();
-                            match accounts::remove(store, &id) {
-                                Ok(()) => {
-                                    self.drafts.remove(i);
-                                    self.original.retain(|c| c.id != id);
-                                    self.message = Some((true, "Account removed".into()));
-                                    event = SettingsEvent::Rebuild;
-                                }
-                                Err(e) => self.message = Some((false, format!("Could not remove: {e}"))),
-                            }
-                            self.removing = None;
-                        }
-                        if ui.add(Key::new("keep it").outline(VALUE).min_width(100.0)).clicked() {
-                            keep = true;
-                        }
-                    });
-                });
-            if keep || m.should_close() {
-                self.removing = None;
-            }
-            return event;
-        }
-        let mut close = false;
-        let mut apply = false;
-        let mut add = false;
-        let mut remove = None;
-        let mut retest = None;
-        let mut enroll = false;
-        let mut drop_keychain = false;
-        let mut drop_password = false;
-        let mut set_password = false;
-        let mut allow_open_changed = false;
-        let mut prefs_event = false;
-        let m = egui::Modal::new(egui::Id::new("settings"))
-            .backdrop_color(egui::Color32::from_black_alpha(150))
-            .show(ctx, |ui| {
-                ui.set_width(560.0_f32.min(ctx.content_rect().width() - 48.0));
-                modal_title(ui, "Settings");
-                let w = ui.available_width();
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, true])
-                    .max_height((ctx.content_rect().height() * 0.7).max(320.0))
-                    .show(ui, |ui| {
-                        ui.set_max_width(w);
-                        for (i, draft) in self.drafts.iter_mut().enumerate() {
-                            let title = draft.address.clone();
-                            section(ui, &title, "", |ui| {
-                                row(ui, "name", |ui| {
-                                    field(ui, &mut draft.name, "shown in the account list");
-                                });
-                                row(ui, "display name", |ui| {
-                                    field(ui, &mut draft.display_name, "shown to people you write to");
-                                });
-                                row(ui, "signature", |ui| {
-                                    prose(ui, &mut draft.signature, "added to new messages", 3);
-                                });
-                                if let Credential::Jmap { url, .. } = &draft.credential {
-                                    reading(ui, "jmap", url.clone());
-                                } else {
-                                    reading(ui, "incoming", sec_summary(&draft.imap));
-                                    reading(ui, "outgoing", sec_summary(&draft.smtp));
-                                }
-                                if let Some((id, run)) = &self.retest {
-                                    if *id == draft.id {
-                                        run.show(ui, Some(draft), false);
-                                    }
-                                }
-                                ui.horizontal(|ui| {
-                                    if ui.add(Key::new("re-test").outline(VALUE).id_salt(("retest", i))).clicked() {
-                                        retest = Some(i);
-                                    }
-                                    if ui.add(Key::new("remove").outline(FAULT).id_salt(("remove", i))).clicked() {
-                                        remove = Some(i);
-                                    }
-                                    ui.checkbox(&mut draft.backfill.enabled, "index bodies offline");
-                                    if draft.backfill.enabled {
-                                        let r = ui.add(egui::DragValue::new(&mut draft.backfill.days).range(0..=36500).speed(5.0).suffix(" days"));
-                                        ui.ctx().accesskit_node_builder(r.id, |node| node.set_label("keep days, 0 for all"));
-                                        let r = ui.add(egui::DragValue::new(&mut draft.backfill.megabytes).range(0..=1_000_000).speed(20.0).suffix(" MB"));
-                                        ui.ctx().accesskit_node_builder(r.id, |node| node.set_label("size cap, 0 for none"));
-                                    }
-                                });
-                                self.panels.account_sync(ui, draft, i);
-                                ui.horizontal(|ui| {
-                                    ui.checkbox(&mut draft.notify.enabled, "notifications");
-                                    if draft.notify.enabled {
-                                        let mut quiet = draft.notify.quiet.is_some();
-                                        ui.checkbox(&mut quiet, "quiet hours");
-                                        if quiet != draft.notify.quiet.is_some() {
-                                            draft.notify.quiet = quiet.then_some(crate::notify::QuietHours { start: 22 * 60, end: 7 * 60 });
-                                        }
-                                        if let Some(q) = draft.notify.quiet.as_mut() {
-                                            let (mut from, mut to) = (q.start / 60, q.end / 60);
-                                            let r = ui.add(egui::DragValue::new(&mut from).range(0..=23).suffix(":00"));
-                                            ui.ctx().accesskit_node_builder(r.id, |node| node.set_label("quiet from hour"));
-                                            let r = ui.add(egui::DragValue::new(&mut to).range(0..=23).suffix(":00"));
-                                            ui.ctx().accesskit_node_builder(r.id, |node| node.set_label("quiet until hour"));
-                                            q.start = from * 60;
-                                            q.end = to * 60;
-                                        }
-                                    }
-                                });
-                            });
-                            ui.add_space(8.0);
-                        }
-                        if ui.add(Key::new("add account").outline(VALUE)).clicked() {
-                            add = true;
-                        }
-                        ui.add_space(8.0);
-                        section(ui, "unlock", "how mailbench opens its encrypted data", |ui| {
-                            reading(ui, "keychain", if self.methods.keychain { "on" } else { "off" });
-                            reading(ui, "password", if self.methods.password { "on" } else { "off" });
-                            ui.add_space(4.0);
-                            row(ui, "new password", |ui| {
-                                secret(ui, &mut self.new_password);
-                            });
-                            row(ui, "again", |ui| {
-                                secret(ui, &mut self.new_confirm);
-                            });
-                            if !self.new_password.is_empty() {
-                                let (_, label) = strength(&self.new_password);
-                                Line::new().legend("strength").gap(10.0).value(label).tint(strength_tint(label)).size(11.0).show(ui);
-                            }
-                            ui.horizontal(|ui| {
-                                let label = if self.methods.password { "change password" } else { "add password" };
-                                if ui.add(Key::new(label).outline(VALUE).enabled(self.password_problem().is_none())).clicked() {
-                                    set_password = true;
-                                }
-                                if self.methods.password
-                                    && ui.add(Key::new("remove password").outline(FAULT).enabled(self.methods.keychain)).clicked()
-                                {
-                                    drop_password = true;
-                                }
-                                if self.methods.keychain {
-                                    if ui.add(Key::new("remove keychain unlock").outline(FAULT).enabled(self.methods.password)).clicked() {
-                                        drop_keychain = true;
-                                    }
-                                } else if ui.add(Key::new("add keychain unlock").outline(VALUE)).clicked() {
-                                    enroll = true;
-                                }
-                            });
-                            hint(ui, "At least one way to unlock must stay on.");
-                            if let Some((ok, text)) = &self.message {
-                                status(ui, *ok, text);
-                            }
-                        });
-                        ui.add_space(8.0);
-                        let outcome = self.panels.show(ui, store, &self.drafts);
-                        prefs_event = outcome.prefs_changed;
-                        ui.add_space(8.0);
-                        section(ui, "updates", "new versions are published on GitHub releases", |ui| {
-                            reading(ui, "version", env!("CARGO_PKG_VERSION"));
-                            ui.horizontal(|ui| {
-                                if ui.add(Key::new("check for updates").outline(VALUE).enabled(!self.updater.busy())).clicked() {
-                                    self.updater.check(ui.ctx());
-                                }
-                                if ui.add(Key::new("releases page").outline(VALUE)).clicked() {
-                                    let _ = open::that(self.updater.page());
-                                }
-                            });
-                            self.updater.status(ui);
-                        });
-                        ui.add_space(8.0);
-                        section(ui, "attachments", "what happens when you open a file", |ui| {
-                            if ui.checkbox(&mut self.allow_open, "allow open (writes a plain copy to a temp folder)").changed() {
-                                let _ = store.put(SETTINGS_KIND, ALLOW_OPEN_KEY, if self.allow_open { b"1" } else { b"0" });
-                                allow_open_changed = true;
-                            }
-                            hint(ui, "Save as always works. Copies made by open are deleted when mailbench closes and on the next start.");
-                        });
-                    });
-                form_footer(ui, |ui| {
-                    if ui.add(Key::new("apply").solid(READOUT).min_width(100.0)).clicked() {
-                        apply = true;
-                    }
-                    if ui.add(Key::new("close").outline(VALUE).min_width(100.0)).clicked() {
-                        close = true;
-                    }
-                });
-            });
-        if allow_open_changed {
-            event = SettingsEvent::AllowOpen;
-        }
-        if prefs_event {
-            event = SettingsEvent::Prefs;
-        }
-        if let Some(i) = remove {
-            self.removing = Some(i);
-        }
-        if let Some(i) = retest {
-            let cfg = self.drafts[i].clone();
-            let mut run = TestRun::default();
-            run.start(&cfg, String::new(), ctx);
-            self.retest = Some((cfg.id.clone(), run));
-        }
-        if set_password {
-            self.set_password(store, kdf);
-        }
-        if enroll {
-            self.message = Some(match store.enroll_keychain(kc) {
-                Ok(()) => (true, "Keychain unlock added".into()),
-                Err(e) => (false, format!("The keychain is not available: {e}")),
-            });
-            self.methods = methods_of(store);
-        }
-        if drop_keychain {
-            self.message = Some(match store.remove_keychain(kc) {
-                Ok(()) => (true, "Keychain unlock removed".into()),
-                Err(StoreError::Locked) => (false, "Keep at least one way to unlock".into()),
-                Err(e) => (false, format!("Could not remove it: {e}")),
-            });
-            self.methods = methods_of(store);
-        }
-        if drop_password {
-            self.message = Some(match store.remove_password() {
-                Ok(()) => (true, "Password removed".into()),
-                Err(StoreError::Locked) => (false, "Keep at least one way to unlock".into()),
-                Err(e) => (false, format!("Could not remove it: {e}")),
-            });
-            self.methods = methods_of(store);
-        }
-        if apply {
-            let mut changed = false;
-            for i in 0..self.drafts.len() {
-                if self.drafts[i].is_nostr() {
-                    let unique = accounts::unique_name(&self.drafts[i].name, &self.drafts[i].id, &self.drafts);
-                    self.drafts[i].name = unique;
-                }
-            }
-            for draft in &self.drafts {
-                if self.original.iter().find(|o| o.id == draft.id) != Some(draft) {
-                    if accounts::save(store, draft).is_ok() {
-                        changed = true;
-                    }
-                }
-            }
-            if changed {
-                self.original = self.drafts.clone();
-                event = SettingsEvent::Rebuild;
-            }
-        }
-        if add {
-            event = SettingsEvent::AddAccount;
-        }
-        if close || m.should_close() {
-            event = SettingsEvent::Close;
-        }
-        event
-    }
-}
+mod settings_form;
+pub use settings_form::{SettingsEvent, SettingsForm};
 
 pub struct Main {
     pub app: App,
@@ -1271,6 +938,7 @@ pub struct Shell {
     store: Option<Store>,
     settings: Option<SettingsForm>,
     open_dir: PathBuf,
+    return_to_settings: bool,
 }
 
 pub const UPDATE_REPO: &str = "v0l/mailbench";
@@ -1306,6 +974,7 @@ impl Shell {
             store: None,
             settings: None,
             open_dir: crate::attach::default_open_dir(),
+            return_to_settings: false,
         };
         crate::attach::wipe_open_dir(&shell.open_dir);
         shell.start();
@@ -1573,13 +1242,29 @@ impl Shell {
         }
     }
 
+    fn reopen_settings(&mut self, select: Option<&str>) {
+        if !std::mem::take(&mut self.return_to_settings) || !matches!(self.screen, Screen::Main(_)) {
+            return;
+        }
+        self.open_settings();
+        if let (Some(form), Some(id)) = (&mut self.settings, select) {
+            form.focus_account(id);
+        } else if let Some(form) = &mut self.settings {
+            form.page.open_section(crate::settings_page::Section::Accounts);
+        }
+    }
+
     fn save_account(&mut self, mut cfg: AccountConfig) {
         let Some(store) = &self.store else { return };
         if cfg.is_nostr() {
             cfg.name = accounts::unique_name(&cfg.name, &cfg.id, &accounts::load_all(store));
         }
         match accounts::save(store, &cfg) {
-            Ok(()) => self.build_main(),
+            Ok(()) => {
+                let id = cfg.id.clone();
+                self.build_main();
+                self.reopen_settings(Some(&id));
+            }
             Err(e) => {
                 if let Screen::Add(form, _) = &mut self.screen {
                     form.saved_error = Some(format!("Could not save the account: {e}"));
@@ -1614,22 +1299,30 @@ impl Shell {
                         Some(main) => self.screen = Screen::Main(main),
                         None => self.build_main(),
                     }
+                    self.reopen_settings(None);
                 }
             },
             Screen::Main(main) => {
-                main.app.show(ui);
-                if std::mem::take(&mut main.app.settings_requested) {
-                    self.open_settings();
+                if self.settings.is_some() {
+                    self.settings_ui(ui);
+                } else {
+                    main.app.show(ui);
+                    if std::mem::take(&mut main.app.settings_requested) {
+                        self.open_settings();
+                    }
                 }
             }
         }
-        self.settings_ui(&ctx);
     }
 
-    fn settings_ui(&mut self, ctx: &egui::Context) {
+    fn settings_ui(&mut self, ui: &mut Ui) {
         let (Some(form), Some(store)) = (&mut self.settings, &self.store) else { return };
         let kdf = self.kdf.unwrap_or_else(|| KdfParams::calibrate(Duration::from_millis(500)));
-        match form.show(ctx, store, &*self.keychain, kdf) {
+        let infos = match &self.screen {
+            Screen::Main(m) => m.app.store.accounts(),
+            _ => Vec::new(),
+        };
+        match form.show(ui, store, &*self.keychain, kdf, &self.env, &infos) {
             SettingsEvent::None => {}
             SettingsEvent::Close => self.settings = None,
             SettingsEvent::AllowOpen => self.apply_open_settings(),
@@ -1642,6 +1335,7 @@ impl Shell {
             }
             SettingsEvent::AddAccount => {
                 self.settings = None;
+                self.return_to_settings = true;
                 let back = match std::mem::replace(&mut self.screen, Screen::First(FirstForm::new(true))) {
                     Screen::Main(m) => Some(m),
                     _ => None,

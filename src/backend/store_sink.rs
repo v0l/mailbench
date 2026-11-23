@@ -56,6 +56,11 @@ impl<'a> StoreSink<'a> {
         }
     }
 
+    pub fn local_counts(store: &Store, account: &str) -> (u64, u64) {
+        let prefix = format!("{account}\0");
+        (store.count_prefix(MESSAGE, &prefix).unwrap_or(0), store.count_prefix(BODY, &prefix).unwrap_or(0))
+    }
+
     pub fn purge(store: &Store, account: &str) -> Result<()> {
         let prefix = format!("{account}\0");
         store.transaction(|| {
