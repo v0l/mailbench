@@ -306,6 +306,9 @@ impl SettingsForm {
         if self.modal_open() || self.panels.capturing.is_some() {
             return;
         }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
+            self.acts.apply = true;
+        }
         let (esc, up, down, enter) = ctx.input(|i| {
             (i.key_pressed(egui::Key::Escape), i.key_pressed(egui::Key::ArrowUp), i.key_pressed(egui::Key::ArrowDown), i.key_pressed(egui::Key::Enter))
         });
