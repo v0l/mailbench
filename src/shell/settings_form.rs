@@ -13,6 +13,7 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::Duration;
 
 mod view;
+mod agents;
 
 const MIN_PASSWORD: usize = 8;
 const NARROW_BELOW: f32 = 700.0;
@@ -37,6 +38,7 @@ pub struct SettingsForm {
     methods: UnlockMethods,
     pub allow_open: bool,
     pub panels: crate::settings::Panels,
+    pub agents: agents::AgentsPanel,
     updater: egui_bench::update::Updater,
     relay_text: HashMap<String, String>,
     exported: Option<String>,
@@ -84,6 +86,7 @@ struct Acts {
 pub enum SettingsEvent {
     None,
     Prefs,
+    Agents,
     Close,
     Rebuild,
     AddAccount,
@@ -185,9 +188,10 @@ fn list_row(ui: &mut Ui, h: f32, on: bool, label: &str) -> (Rect, egui::Response
 
 impl SettingsForm {
     pub fn new(store: &Store, dir: &std::path::Path) -> Self {
-        let drafts = accounts::load_all(store);
+        let drafts = accounts::mail_accounts(store);
         SettingsForm {
             panels: crate::settings::Panels::new(store, &drafts, crate::settings::default_backup_path(dir)),
+            agents: agents::AgentsPanel::new(store),
             original: drafts.clone(),
             live_ids: drafts.iter().map(|d| d.id.clone()).collect(),
             drafts,
@@ -355,6 +359,9 @@ impl SettingsForm {
         }
         if outcome.prefs_changed {
             event = SettingsEvent::Prefs;
+        }
+        if self.agents.flush(store) {
+            event = SettingsEvent::Agents;
         }
         let acts = std::mem::take(&mut self.acts);
         if let Some(i) = acts.remove {

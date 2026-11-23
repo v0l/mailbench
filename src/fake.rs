@@ -183,6 +183,11 @@ impl FakeStore {
         }
     }
 
+    pub fn from_messages(messages: Vec<Message>) -> FakeStore {
+        let next = messages.iter().map(|m| m.summary.id.0).max().unwrap_or(0) + 1;
+        FakeStore { accounts: Self::base_accounts(), messages, next, older: Vec::new(), stash: Default::default(), blobs: Default::default() }
+    }
+
     pub fn set_headers(&mut self, index: usize, headers: Headers) {
         if let Some(m) = self.messages.get_mut(index) {
             m.headers = headers;
@@ -460,6 +465,9 @@ impl MailStore for FakeStore {
             .collect();
         m.message_id = message.message_id.clone();
         m.references = message.references.clone();
+        if message.agent {
+            m.headers.all.push((AGENT_HEADER.to_string(), "1".to_string()));
+        }
         self.stash.insert(id.0, message);
         self.messages.insert(0, m);
         Ok(id)

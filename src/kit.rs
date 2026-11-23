@@ -656,6 +656,53 @@ pub fn tap_key(ui: &mut Ui, narrow: bool, key: Key) -> egui::Response {
     key.paint(ui, rect)
 }
 
+pub struct Menu {
+    width: f32,
+    narrow: bool,
+}
+
+impl Menu {
+    pub fn key(&self, ui: &mut Ui, label: &str, tint: Color32) -> bool {
+        let height = if self.narrow { TAP } else { KEY_H };
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(self.width, height), Sense::hover());
+        Key::new(label).outline(tint).min_width(self.width).paint(ui, rect).clicked()
+    }
+
+    pub fn row(&self, ui: &mut Ui, labels: &[&str], tint: Color32) -> Option<usize> {
+        let mut hit = None;
+        ui.horizontal_wrapped(|ui| {
+            for (i, label) in labels.iter().enumerate() {
+                let w = Key::new(*label).width(ui).max(TAP.min(self.width / labels.len().max(1) as f32 - 6.0));
+                let h = if self.narrow { TAP } else { KEY_H };
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
+                if Key::new(*label).outline(tint).min_width(w).paint(ui, rect).clicked() {
+                    hit = Some(i);
+                }
+            }
+        });
+        hit
+    }
+
+    pub fn separator(&self, ui: &mut Ui) {
+        ui.add_space(3.0);
+        let r = ui.allocate_exact_size(Vec2::new(self.width, 1.0), Sense::hover()).0;
+        rule(ui, r);
+        ui.add_space(3.0);
+    }
+}
+
+pub fn menu_width(widest: f32, narrow: bool, screen: f32) -> f32 {
+    let max = if narrow { 320.0f32.min(screen - 32.0) } else { 260.0 };
+    widest.clamp(140.0, max.max(140.0))
+}
+
+pub fn menu_column(ui: &mut Ui, narrow: bool, labels: &[&str], add: impl FnOnce(&mut Ui, &Menu)) {
+    let widest = labels.iter().map(|l| Key::new(*l).width(ui)).fold(0.0, f32::max);
+    let width = menu_width(widest, narrow, ui.ctx().content_rect().width());
+    ui.set_width(width);
+    add(ui, &Menu { width, narrow });
+}
+
 pub fn subject_line(ui: &mut Ui, text: &str) {
     ui.add(egui::Label::new(egui::RichText::new(text).font(body_strong(18.0)).color(VALUE)).wrap());
 }

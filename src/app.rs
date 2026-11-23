@@ -9,6 +9,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 mod cards;
+pub mod menu;
 
 const AUTOSAVE: Duration = Duration::from_secs(4);
 
@@ -79,6 +80,7 @@ pub enum Action {
     SelectNone,
     Undo,
     MarkAllRead(Folder),
+    OpenChats,
 }
 
 pub type SavePicker = Box<dyn FnMut(&str, &str) -> Option<std::path::PathBuf>>;
@@ -158,6 +160,8 @@ pub struct Draft {
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
     pub message_id: Option<String>,
+    pub bcc: String,
+    pub agent: bool,
     pub signature: String,
     fingerprint: u64,
     changed_at: Option<std::time::Instant>,
@@ -234,6 +238,8 @@ impl Draft {
             in_reply_to: None,
             references: Vec::new(),
             message_id: None,
+            bcc: String::new(),
+            agent: false,
             signature: String::new(),
             fingerprint: 0,
             changed_at: None,
@@ -340,6 +346,8 @@ impl Draft {
             in_reply_to: out.in_reply_to,
             references: out.references,
             message_id: out.message_id,
+            bcc: out.bcc,
+            agent: out.agent,
             signature: signature.to_string(),
             ..Draft::blank()
         };
@@ -376,6 +384,8 @@ impl Draft {
             in_reply_to: self.in_reply_to.clone(),
             references: self.references.clone(),
             message_id: self.message_id.clone(),
+            bcc: self.bcc.clone(),
+            agent: self.agent,
         }
     }
 
@@ -629,6 +639,9 @@ pub struct App {
     side_epoch: u32,
     list_epoch: u32,
     link_warning: Option<(String, String, String)>,
+    pub chats: Option<crate::chat::ChatView>,
+    pub chat_opener: Option<Box<dyn FnMut() -> Option<crate::chat::ChatView>>>,
+    pub chats_open: bool,
 }
 
 const NARROW_BELOW: f32 = 700.0;
@@ -641,7 +654,9 @@ struct DividerOutcome {
 impl App {
     pub fn new(ctx: &egui::Context) -> App {
         crate::kit::setup(ctx);
-        App::with_store(Box::new(FakeStore::concept()))
+        let mut app = App::with_store(Box::new(FakeStore::concept()));
+        app.chat_opener = Some(Box::new(|| Some(crate::chat::ChatView::demo())));
+        app
     }
 
     pub fn with_store(store: Box<dyn MailStore>) -> App {
@@ -709,6 +724,9 @@ impl App {
             side_epoch: 0,
             list_epoch: 0,
             link_warning: None,
+            chats: None,
+            chat_opener: None,
+            chats_open: false,
         }
     }
 
@@ -833,6 +851,9 @@ impl App {
         }) {
             self.star_pending = true;
             return out;
+        }
+        if self.prefs.developer_chat && Self::pressed(ctx, prefs::CHATS_KEY) {
+            return vec![Action::OpenChats];
         }
         if !ctx.input(|i| i.modifiers.shift) && Self::pressed(ctx, K::Z) {
             return vec![Action::Undo];
@@ -1110,6 +1131,7 @@ impl App {
                     self.notice = Some(format!("{} selected", v.total));
                 }
                 Action::SelectNone => self.marked.clear(),
+                Action::OpenChats => self.open_chats(),
                 Action::Undo => self.undo_last(),
                 Action::MarkAllRead(f) => match self.store.mark_all_read_in(&f, self.account) {
                     Ok(before) => {
@@ -1456,9 +1478,33 @@ impl App {
         }
     }
 
+    pub fn open_chats(&mut self) {
+        if !self.prefs.developer_chat {
+            return;
+        }
+        if self.chats.is_none() {
+            self.chats = self.chat_opener.as_mut().and_then(|open| open());
+        }
+        self.chats_open = self.chats.is_some();
+    }
+
     pub fn show(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         self.apply_theme(&ctx);
+        if !self.prefs.developer_chat {
+            self.chats_open = false;
+        }
+        if self.chats_open {
+            if let Some(chats) = &mut self.chats {
+                let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+                if esc && chats.back() == crate::chat::ChatExit::Mail {
+                    self.chats_open = false;
+                } else if chats.show(ui) == crate::chat::ChatExit::Mail {
+                    self.chats_open = false;
+                }
+                return;
+            }
+        }
         self.follow_notification();
         self.poll_save_result(&ctx);
         let keys = self.key_actions(&ctx);
@@ -1682,6 +1728,27 @@ impl App {
 
     fn side(&mut self, ui: &mut Ui, accounts: &[AccountInfo], actions: &mut Vec<Action>) {
         ui.spacing_mut().item_spacing.y = 2.0;
+        if self.prefs.developer_chat {
+            heading(ui, "chats");
+            ui.add_space(4.0);
+            let unread = self.chats.as_ref().map_or(0, |c| c.unread());
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), if self.narrow { 44.0 } else { 26.0 }), egui::Sense::click());
+            if resp.hovered() {
+                ui.painter().rect_filled(rect, 2.0, BAND);
+            }
+            put(ui.painter(), rect.left() + 12.0, 160.0, rect.center().y, "open chats", body(13.0), LEGEND);
+            if unread > 0 {
+                put_right(ui.painter(), rect.right() - 6.0, rect.center().y, &unread.to_string(), figure(11.0), READOUT);
+            }
+            ui.ctx().accesskit_node_builder(resp.id, |n| {
+                n.set_label("open chats");
+                n.set_value(unread.to_string());
+            });
+            if resp.clicked() {
+                actions.push(Action::OpenChats);
+            }
+            ui.add_space(12.0);
+        }
         heading(ui, "accounts");
         ui.add_space(4.0);
         {
@@ -1757,11 +1824,13 @@ impl App {
             });
             let target = f.folder.clone();
             resp.context_menu(|ui| {
-                ui.set_min_width(140.0);
-                if ui.add(Key::new("mark all as read").outline(VALUE).min_width(ui.available_width())).clicked() {
-                    actions.push(Action::MarkAllRead(target.clone()));
-                    ui.close();
-                }
+                let narrow = self.narrow;
+                menu_column(ui, narrow, &["mark all as read"], |ui, menu| {
+                    if menu.key(ui, "mark all as read", VALUE) {
+                        actions.push(Action::MarkAllRead(target.clone()));
+                        ui.close();
+                    }
+                });
             });
             if resp.clicked() {
                 actions.push(Action::GoTo(f.folder));
@@ -1924,7 +1993,6 @@ impl App {
             return;
         }
         resp.context_menu(|ui| {
-            ui.set_min_width(140.0);
             let child_prefix = format!("{}{}", node.path, node.delimiter);
             let items = [
                 ("new subfolder", Action::NewFolder(node.account, child_prefix)),
@@ -1932,13 +2000,16 @@ impl App {
                 ("rename", Action::RenameFolder(node.folder.clone(), parent)),
                 ("delete", Action::DeleteFolder(node.folder.clone())),
             ];
-            for (label, action) in items {
-                let tint = if label == "delete" { FAULT } else { VALUE };
-                if ui.add(Key::new(label).outline(tint).min_width(ui.available_width())).clicked() {
-                    actions.push(action);
-                    ui.close();
+            let labels: Vec<&str> = items.iter().map(|(l, _)| *l).collect();
+            menu_column(ui, self.narrow, &labels, |ui, menu| {
+                for (label, action) in items {
+                    let tint = if label == "delete" { FAULT } else { VALUE };
+                    if menu.key(ui, label, tint) {
+                        actions.push(action);
+                        ui.close();
+                    }
                 }
-            }
+            });
         });
     }
 
@@ -2314,6 +2385,7 @@ impl App {
         let mut clicked = None;
         let mut opened = None;
         let row_h = self.prefs.density.row_height();
+        let narrow = self.narrow;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show_viewport(ui, |ui, viewport| {
             let total = v.total;
             ui.set_height(total as f32 * row_h);
@@ -2345,27 +2417,14 @@ impl App {
                     self.selected = i;
                 }
                 resp.context_menu(|ui| {
-                    let mark_label = if s.unread { "mark read" } else { "mark unread" };
-                    if ui.button(mark_label).clicked() {
-                        actions.push(Action::ToggleUnread);
-                        ui.close();
-                    }
-                    if ui.button("archive").clicked() {
-                        actions.push(Action::Archive);
-                        ui.close();
-                    }
-                    if ui.button("move to junk").clicked() {
-                        actions.push(Action::Junk);
-                        ui.close();
-                    }
-                    if ui.button("delete").clicked() {
-                        actions.push(Action::Trash);
-                        ui.close();
-                    }
-                    if ui.button("Mark all as read").clicked() {
-                        actions.push(Action::MarkAllRead(v.query.folder.clone()));
-                        ui.close();
-                    }
+                    let state = menu::MessageMenu {
+                        unread: s.unread,
+                        flagged: s.flagged,
+                        server_flags: accounts.get(s.account).is_none_or(|a| a.server_flags),
+                        folder: v.query.folder.clone(),
+                        multi: self.marked.len() > 1,
+                    };
+                    menu::show_message_menu(ui, narrow, &state, None, actions);
                 });
                 if resp.double_clicked() || (resp.clicked() && self.narrow && !ui.input(|inp| inp.modifiers.shift || inp.modifiers.command)) {
                     opened = Some(i);
@@ -2617,6 +2676,9 @@ impl App {
             .show(ctx, |ui| {
                 ui.set_width(640.0_f32.min(ctx.content_rect().width() - 48.0));
                 modal_title(ui, &draft.title);
+                if draft.agent {
+                    Line::new().note(crate::mailstore::AGENT_BANNER).size(12.0).show(ui);
+                }
                 row(ui, "to", |ui| {
                     recipients(ui, "to", &mut draft.to, &mut draft.to_input, "name or address", store);
                 });

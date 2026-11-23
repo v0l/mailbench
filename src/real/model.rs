@@ -155,6 +155,10 @@ pub struct LocalMsg {
     pub dirty: bool,
     #[serde(default)]
     pub sent_ok: bool,
+    #[serde(default)]
+    pub bcc: String,
+    #[serde(default)]
+    pub agent: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

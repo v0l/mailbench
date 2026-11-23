@@ -1,5 +1,4 @@
 use super::*;
-use egui::Color32;
 use crate::thread::{snippet, without_parent_quote, without_parent_text};
 
 fn recipients_line(list: &[String]) -> String {
@@ -86,29 +85,8 @@ impl App {
                 if r.toggle {
                     actions.push(Action::ToggleCard(id));
                 }
-                egui::Popup::menu(&r.menu).show(|ui| {
-                    ui.set_min_width(150.0);
-                    let unread_label = if t.summary.unread { "mark read" } else { "mark unread" };
-                    let flag_label = if t.summary.flagged { "unflag" } else { "flag" };
-                    let entries: Vec<(&str, Vec<Action>, Color32)> = vec![
-                        ("reply", vec![Action::Reply(Reply::One)], VALUE),
-                        ("reply all", vec![Action::Reply(Reply::All)], VALUE),
-                        ("forward", vec![Action::Reply(Reply::Forward)], VALUE),
-                        (flag_label, vec![Action::One(Box::new(Action::ToggleFlag))], VALUE),
-                        (unread_label, vec![Action::One(Box::new(Action::ToggleUnread))], VALUE),
-                        ("delete", vec![Action::One(Box::new(Action::Trash))], FAULT),
-                    ];
-                    for (label, mut acts, tint) in entries {
-                        if label.ends_with("flag") && !server_flags {
-                            continue;
-                        }
-                        if tap_key(ui, narrow, Key::new(label).outline(tint).min_width(ui.available_width()).id_salt((id.0, label))).clicked() {
-                            actions.push(Action::FocusThread(id));
-                            actions.append(&mut acts);
-                            ui.close();
-                        }
-                    }
-                });
+                let state = menu::MessageMenu { unread: t.summary.unread, flagged: t.summary.flagged, server_flags, folder: t.folder.clone(), multi: self.marked.len() > 1 };
+                egui::Popup::menu(&r.menu).show(|ui| menu::show_message_menu(ui, narrow, &state, Some(id), actions));
                 let mut body_rect = r.rect;
                 if open {
                     if let Some(msg) = msg {
@@ -148,25 +126,9 @@ impl App {
                     actions.push(Action::One(Box::new(Action::Archive)));
                 }
                 let more = tap_key(ui, narrow, Key::more());
-                egui::Popup::menu(&more).show(|ui| {
-                    ui.set_min_width(140.0);
-                    let entries = [
-                        ("mark unread", Action::ToggleUnread, VALUE),
-                        ("flag", Action::ToggleFlag, VALUE),
-                        ("snooze", Action::Snooze, VALUE),
-                        ("move to junk", Action::Junk, VALUE),
-                        ("delete", Action::Trash, FAULT),
-                    ];
-                    for (label, action, tint) in entries {
-                        if label == "flag" && !server_flags {
-                            continue;
-                        }
-                        if ui.add(Key::new(label).outline(tint).min_width(ui.available_width())).clicked() {
-                            actions.push(Action::One(Box::new(action)));
-                            ui.close();
-                        }
-                    }
-                });
+                more.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "more actions"));
+                let state = menu::MessageMenu { unread: m.summary.unread, flagged: m.summary.flagged, server_flags, folder: m.folder.clone(), multi: self.marked.len() > 1 };
+                egui::Popup::menu(&more).show(|ui| menu::show_message_menu(ui, narrow, &state, Some(m.summary.id), actions));
             });
         });
     }
@@ -273,18 +235,22 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             for (i, a) in m.attachments.iter().enumerate() {
                 let chip = attachment(ui, &a.name, &a.size);
+                let allow_open = self.allow_open;
+                let narrow = self.narrow;
                 egui::Popup::menu(&chip).show(|ui| {
-                    ui.set_min_width(120.0);
-                    if self.allow_open && ui.add(Key::new("open").outline(VALUE).id_salt(("open", i)).min_width(ui.available_width())).clicked() {
-                        actions.push(Action::FocusThread(id));
-                        actions.push(Action::OpenAttachment(i));
-                        ui.close();
-                    }
-                    if ui.add(Key::new("save as").outline(VALUE).id_salt(("save", i)).min_width(ui.available_width())).clicked() {
-                        actions.push(Action::FocusThread(id));
-                        actions.push(Action::SaveAttachment(i));
-                        ui.close();
-                    }
+                    let labels: &[&str] = if allow_open { &["open", "save as"] } else { &["save as"] };
+                    menu_column(ui, narrow, labels, |ui, menu| {
+                        if allow_open && menu.key(ui, "open", VALUE) {
+                            actions.push(Action::FocusThread(id));
+                            actions.push(Action::OpenAttachment(i));
+                            ui.close();
+                        }
+                        if menu.key(ui, "save as", VALUE) {
+                            actions.push(Action::FocusThread(id));
+                            actions.push(Action::SaveAttachment(i));
+                            ui.close();
+                        }
+                    });
                 });
             }
             if m.attachments.len() > 1 && ui.add(Key::new("save all").outline(VALUE)).clicked() {
