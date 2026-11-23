@@ -120,9 +120,9 @@ fn build(m: &OutgoingMessage, keep_bcc: bool) -> Result<Message> {
         b = b.envelope(lettre::address::Envelope::new(Some(from.clone()), vec![from]).map_err(|e| BackendError::Protocol(e.to_string()))?);
     }
     let built = if m.attachments.is_empty() {
-        b.body(m.body.clone())
+        b.singlepart(plain_part(&m.body))
     } else {
-        let mut mixed = MultiPart::mixed().singlepart(SinglePart::plain(m.body.clone()));
+        let mut mixed = MultiPart::mixed().singlepart(plain_part(&m.body));
         for a in &m.attachments {
             let mime = ContentType::parse(&a.mime).unwrap_or_else(|_| ContentType::parse("application/octet-stream").expect("valid"));
             mixed = mixed.singlepart(MimeAttachment::new(a.name.clone()).body(a.data.clone(), mime));
@@ -130,6 +130,11 @@ fn build(m: &OutgoingMessage, keep_bcc: bool) -> Result<Message> {
         b.multipart(mixed)
     };
     built.map_err(|e| BackendError::Protocol(e.to_string()))
+}
+
+fn plain_part(body: &str) -> SinglePart {
+    let kind = ContentType::parse("text/plain; charset=utf-8; format=flowed").expect("valid");
+    SinglePart::builder().header(kind).body(crate::flowed::flow(body))
 }
 
 pub fn bracket(id: &str) -> String {
