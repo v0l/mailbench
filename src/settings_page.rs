@@ -130,11 +130,10 @@ impl PageState {
                 self.level = Level::Page;
                 Outcome::Stay
             }
-            Level::Page if self.narrow => {
+            Level::Page => {
                 self.level = Level::Sections;
                 Outcome::Stay
             }
-            Level::Page => Outcome::Leave,
             Level::Sections => Outcome::Leave,
         }
     }
@@ -220,6 +219,8 @@ mod tests {
         s.select_account(1);
         assert_eq!(s.press(Nav::Back), Outcome::Stay);
         assert_eq!(s.level, Level::Page);
+        assert_eq!(s.press(Nav::Back), Outcome::Stay);
+        assert_eq!(s.level, Level::Sections);
         assert_eq!(s.press(Nav::Back), Outcome::Leave);
     }
 
