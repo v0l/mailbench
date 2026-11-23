@@ -466,10 +466,10 @@ pub fn body_text(ui: &mut Ui, text: &str, zoom: f32) {
 
 pub const PLAIN_BODY: &str = "plain-body";
 
-pub fn plain_body(ui: &mut Ui, text: &str, zoom: f32) -> Option<String> {
+pub fn plain_body(ui: &mut Ui, text: &str, zoom: f32, id: egui::Id) -> Option<String> {
     let mut shown = text;
     let out = egui::TextEdit::multiline(&mut shown)
-        .id(egui::Id::new(PLAIN_BODY))
+        .id(id)
         .frame(egui::Frame::NONE)
         .font(body(BODY_SIZE * zoom))
         .text_color(VALUE)
@@ -494,11 +494,157 @@ pub fn sender_line(ui: &mut Ui, name: &str, to: &str, when: &str) {
     });
 }
 
-pub fn collapsed_message(ui: &mut Ui, from: &str, when: &str, unread: bool, focused: bool) -> bool {
-    let font = if unread { body_strong(13.0) } else { body(13.0) };
-    let text = format!("{}{from}   {when}", if focused { "> " } else { "" });
-    let resp = ui.add(egui::Label::new(egui::RichText::new(text).font(font).color(if focused { VALUE } else { LEGEND })).sense(Sense::click()));
-    resp.clicked()
+pub struct CardHead<'a> {
+    pub name: &'a str,
+    pub address: &'a str,
+    pub to: &'a str,
+    pub when: &'a str,
+    pub full: &'a str,
+    pub unread: bool,
+    pub flagged: bool,
+    pub mine: bool,
+    pub attach: bool,
+    pub account: Option<&'a str>,
+    pub snippet: Option<&'a str>,
+    pub focused: bool,
+    pub open: bool,
+}
+
+pub struct CardResp {
+    pub toggle: bool,
+    pub menu: egui::Response,
+    pub rect: Rect,
+}
+
+pub const TAP: f32 = 44.0;
+
+pub fn card_height(narrow: bool) -> f32 {
+    if narrow { 84.0 } else { 52.0 }
+}
+
+fn lay_text(ui: &mut Ui, text: &str, font: FontId, color: Color32) -> std::sync::Arc<egui::Galley> {
+    ui.fonts_mut(|f| f.layout_no_wrap(text.to_string(), font, color))
+}
+
+pub fn ellipsize(text: &str, max_w: f32, measure: impl Fn(&str) -> f32) -> String {
+    if measure(text) <= max_w {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.trim_end_matches("...").chars().collect();
+    let (mut lo, mut hi) = (0usize, chars.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        let candidate: String = chars[..mid].iter().collect::<String>().trim_end().to_string() + "\u{2026}";
+        if measure(&candidate) <= max_w {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    chars[..lo].iter().collect::<String>().trim_end().to_string() + "\u{2026}"
+}
+
+pub fn fit_text(ui: &mut Ui, text: &str, font: FontId, color: Color32, max_w: f32) -> std::sync::Arc<egui::Galley> {
+    let fitted = ellipsize(text, max_w, |s| ui.fonts_mut(|f| f.layout_no_wrap(s.to_string(), font.clone(), color)).size().x);
+    lay_text(ui, &fitted, font, color)
+}
+
+fn badge(ui: &mut Ui, p: &egui::Painter, at: Pos2, text: &str, tint: Color32) -> f32 {
+    let g = lay_text(ui, &text.to_uppercase(), body_strong(9.5), tint);
+    let r = Rect::from_min_size(at, g.size() + Vec2::new(10.0, 4.0));
+    p.rect_stroke(r, 2.0, Stroke::new(1.0, tint), egui::StrokeKind::Inside);
+    p.galley(r.min + Vec2::new(5.0, 2.0), g, tint);
+    r.width() + 6.0
+}
+
+pub fn message_card_head(ui: &mut Ui, h: &CardHead, narrow: bool) -> CardResp {
+    let size = Vec2::new(ui.available_width(), card_height(narrow));
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let btn = if narrow { TAP } else { 30.0 };
+    let menu_rect = Rect::from_min_size(Pos2::new(rect.right() - btn - 4.0, rect.top() + if narrow { 2.0 } else { 4.0 }), Vec2::splat(btn));
+    let menu = ui.interact(menu_rect, resp.id.with("card-menu"), Sense::click());
+    let label = format!(
+        "{}{}{}, {}, {}",
+        h.name,
+        if h.mine { " (you)" } else { "" },
+        if h.unread { ", unread" } else { "" },
+        h.when,
+        if h.open || h.focused { "" } else { h.snippet.unwrap_or_default() }
+    );
+    let label = if h.attach { format!("{label}, has attachment") } else { label };
+    resp.widget_info(move || egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label.clone()));
+    let menu_label = format!("actions for {}", h.name);
+    menu.widget_info(move || egui::WidgetInfo::labeled(egui::WidgetType::Button, true, menu_label.clone()));
+    if resp.hovered() || menu.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if ui.is_rect_visible(rect) {
+        let hot = resp.hovered() || menu.hovered();
+        let whole = ui.painter().clone();
+        whole.rect_filled(rect, 2.0, if h.open || hot { BAND } else { WELL });
+        whole.rect_stroke(rect, 2.0, Stroke::new(1.0, if h.focused { READOUT } else { ETCH }), egui::StrokeKind::Inside);
+        if h.focused {
+            whole.rect_filled(Rect::from_min_size(rect.left_top(), Vec2::new(3.0, rect.height())), 0.0, READOUT);
+        }
+        let tint = if menu.hovered() { VALUE } else { LEGEND };
+        for dx in [-5.0, 0.0, 5.0] {
+            whole.circle_filled(menu_rect.center() + Vec2::new(dx, 0.0), 1.6, tint);
+        }
+        if h.unread {
+            whole.circle_filled(Pos2::new(rect.left() + 13.0, rect.top() + 16.0), 3.5, READOUT);
+        }
+        let left = rect.left() + 24.0;
+        let right = menu_rect.left() - 6.0;
+        let p = whole.with_clip_rect(Rect::from_min_max(Pos2::new(left, rect.top()), Pos2::new(right, rect.bottom())));
+        let when = lay_text(ui, h.when, figure(11.0), LEGEND);
+        p.galley(Pos2::new(right - when.size().x, rect.top() + 9.0), when.clone(), LEGEND);
+        let y1 = rect.top() + 8.0;
+        let name = lay_text(ui, h.name, body_strong(13.5), VALUE);
+        let mut x = left;
+        p.galley(Pos2::new(x, y1), name.clone(), VALUE);
+        x += name.size().x + 8.0;
+        if !narrow {
+            let extra = if h.open { format!("<{}>", h.address) } else { format!("to {}", h.to) };
+            let g = lay_text(ui, &extra, body(12.0), LEGEND);
+            p.galley(Pos2::new(x, y1 + 1.5), g.clone(), LEGEND);
+            x += g.size().x + 8.0;
+        }
+        if h.mine {
+            x += badge(ui, &p, Pos2::new(x, y1 + 1.0), "you", READOUT);
+        }
+        if let Some(a) = h.account {
+            x += badge(ui, &p, Pos2::new(x, y1 + 1.0), a, LEGEND);
+        }
+        if h.flagged {
+            x += badge(ui, &p, Pos2::new(x, y1 + 1.0), "flagged", WARN);
+        }
+        if h.attach {
+            clip_glyph(&p, Pos2::new(x + 8.0, y1 + 9.0), LEGEND);
+        }
+        let to_line = format!("to {}", h.to);
+        let snippet = h.snippet.unwrap_or_default();
+        let lines: Vec<(&str, Color32)> = match (narrow, h.open) {
+            (false, true) => vec![(to_line.as_str(), LEGEND)],
+            (false, false) => vec![(snippet, LEGEND)],
+            (true, true) => vec![(h.address, LEGEND), (to_line.as_str(), LEGEND)],
+            (true, false) => vec![(to_line.as_str(), LEGEND), (snippet, VALUE)],
+        };
+        for (i, (text, color)) in lines.into_iter().enumerate() {
+            let g = fit_text(ui, text, body(12.5), color, (right - left).max(20.0));
+            p.galley(Pos2::new(left, rect.top() + 29.0 + i as f32 * 22.0), g, color);
+        }
+    }
+    let resp = resp.on_hover_text(format!("{}\n{}", h.full, h.address));
+    CardResp { toggle: resp.clicked() && !menu.clicked(), menu, rect }
+}
+
+pub fn tap_key(ui: &mut Ui, narrow: bool, key: Key) -> egui::Response {
+    if !narrow {
+        return ui.add(key);
+    }
+    let w = key.width(ui).max(TAP);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, TAP), Sense::hover());
+    key.paint(ui, rect)
 }
 
 pub fn subject_line(ui: &mut Ui, text: &str) {

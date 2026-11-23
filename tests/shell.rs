@@ -383,7 +383,7 @@ fn add_jmap_account_through_the_form_syncs_opens_and_sends() {
     }
     h.key_press(egui::Key::Enter);
     until(&mut h, "body shown", |s| s.app().is_some_and(|a| a.store.list(&Query::new(ms::Folder::Inbox), 0, 1).items.first().is_some_and(|m| a.store.get(m.id).is_ok_and(|m| !m.paragraphs.is_empty()))));
-    h.get_by_label_contains("first jmap body");
+    h.get_by_label_contains("message body: first jmap body");
     save(&mut h, "jmap-inbox-reader");
 
     h.key_press(egui::Key::C);
