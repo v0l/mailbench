@@ -1634,8 +1634,13 @@ impl App {
             let waiting = listed.is_empty() && !tree.iter().any(|n| n.account == account);
             if waiting {
                 for f in Folder::UNIFIED {
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), self.row_h()), egui::Sense::hover());
+                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), self.row_h()), egui::Sense::hover());
                     put(ui.painter(), rect.left() + 12.0, 120.0, rect.center().y, f.name(), body(13.0), LEGEND.gamma_multiply(0.4));
+                    ui.ctx().accesskit_node_builder(resp.id, |n| {
+                        n.set_label(format!("{} {} waiting", info.name, f.name()));
+                        n.set_disabled();
+                        n.set_bounds(egui::accesskit::Rect::new(rect.min.x as f64, rect.min.y as f64, rect.max.x as f64, rect.max.y as f64));
+                    });
                 }
                 let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), egui::Sense::hover());
                 put(ui.painter(), rect.left() + 12.0, 160.0, rect.center().y, "syncing folders", body(12.0), LEGEND);
