@@ -130,9 +130,10 @@ impl Cache {
 
     fn reindex(&mut self, thread: u64) {
         let Some(members) = self.by_thread.get(&thread) else { return };
-        let count = members.len() as u32;
         let unread = members.iter().any(|i| self.entries[*i].unread);
         let flagged = members.iter().any(|i| self.entries[*i].flagged);
+        let live = members.iter().filter(|i| !matches!(self.entries[**i].folder, ms::Folder::Drafts | ms::Folder::Trash)).count() as u32;
+        let trashed = members.iter().filter(|i| self.entries[**i].folder == ms::Folder::Trash).count() as u32;
         let mut folders: Vec<ms::Folder> = Vec::new();
         for i in members.clone() {
             let e = &mut self.entries[i];
@@ -140,6 +141,11 @@ impl Cache {
             if e.head {
                 folders.push(e.folder.clone());
             }
+            let count = match e.folder {
+                ms::Folder::Drafts => 1,
+                ms::Folder::Trash => trashed.max(1),
+                _ => live.max(1),
+            };
             e.count = count;
             e.thread_unread = unread;
             e.thread_flagged = flagged;
@@ -869,12 +875,14 @@ impl Shared {
             },
             to: recipients(&msg.to, lenient),
             cc: recipients(&msg.cc, lenient),
+            bcc: recipients(&msg.bcc, lenient),
             subject: msg.subject,
             body: msg.body,
             in_reply_to: msg.in_reply_to,
             references: msg.references,
             message_id: msg.message_id,
             html_alternative: self.send_html.load(Ordering::Relaxed),
+            agent: msg.agent && msg.folder == ms::Folder::Drafts.name(),
             attachments,
             ..Default::default()
         })
@@ -913,6 +921,8 @@ impl Shared {
             rev: self.seq.fetch_add(1, Ordering::SeqCst) + 1,
             dirty: true,
             sent_ok: false,
+            bcc: message.bcc.clone(),
+            agent: message.agent,
         };
         let store = self.lock_store();
         store.delete_prefix(ATTACH, &format!("{key}\0")).map_err(backend_err)?;
@@ -975,6 +985,8 @@ impl Shared {
             in_reply_to: msg.in_reply_to,
             references: msg.references,
             message_id: msg.message_id,
+            bcc: msg.bcc,
+            agent: msg.agent,
         })
     }
 
@@ -1548,6 +1560,10 @@ impl RealStore {
         self.sync_now();
     }
 
+    pub fn sent_drafts(&self, account: usize) -> Vec<String> {
+        self.shared.with_cache(|c| worker::sent_drafts(c, account))
+    }
+
     pub fn set_send_hold(&self, hold: Duration) {
         *lock(&self.shared.hold) = hold;
     }
@@ -1704,15 +1720,38 @@ impl MailStore for RealStore {
         self.shared.with_cache(|c| {
             let Some(i) = c.by_id.get(&id.0) else { return Vec::new() };
             let Some(members) = c.by_thread.get(&c.entries[*i].thread) else { return Vec::new() };
+            let asked = &c.entries[*i];
+            let sent_ids: std::collections::HashSet<String> = members
+                .iter()
+                .map(|m| &c.entries[*m])
+                .filter(|e| !matches!(e.folder, ms::Folder::Drafts | ms::Folder::Trash))
+                .filter_map(|e| e.message_id.as_deref().map(threads::clean))
+                .collect();
+            let newest_draft = members
+                .iter()
+                .find(|m| {
+                    let e = &c.entries[**m];
+                    e.folder == ms::Folder::Drafts && !e.message_id.as_deref().is_some_and(|id| sent_ids.contains(&threads::clean(id)))
+                })
+                .copied();
             members
                 .iter()
+                .copied()
+                .filter(|m| {
+                    let e = &c.entries[*m];
+                    match e.folder {
+                        ms::Folder::Drafts => Some(*m) == newest_draft || e.id == asked.id,
+                        ms::Folder::Trash => asked.folder == ms::Folder::Trash,
+                        _ => true,
+                    }
+                })
                 .rev()
                 .map(|m| {
-                    let e = &c.entries[*m];
+                    let e = &c.entries[m];
                     let own = self.shared.accounts.get(e.account).map(|a| a.address.as_str()).unwrap_or_default();
                     let mine = e.folder == ms::Folder::Sent || (!own.is_empty() && e.from_address.eq_ignore_ascii_case(own));
                     let to = e.to.iter().map(|t| if !own.is_empty() && t.eq_ignore_ascii_case(own) { "me".to_string() } else { t.clone() }).collect();
-                    ThreadItem { summary: summary(e, now), folder: e.folder.clone(), from_address: e.from_address.clone(), to, sent: display::sent(e.date), mine }
+                    ThreadItem { summary: summary(e, now), folder: e.folder.clone(), from_address: e.from_address.clone(), to, sent: display::sent(e.date), mine, draft: e.folder == ms::Folder::Drafts }
                 })
                 .collect()
         })
@@ -1760,7 +1799,10 @@ impl MailStore for RealStore {
                         .collect(),
                     ..Default::default()
                 },
-                Headers::default(),
+                Headers {
+                    all: if msg.agent { vec![(ms::AGENT_HEADER.to_string(), "1".to_string())] } else { Vec::new() },
+                    ..Headers::default()
+                },
                 BodyState::Ready,
             )
         } else {
@@ -2306,6 +2348,8 @@ impl MailStore for RealStore {
             in_reply_to: env.in_reply_to,
             references: env.references,
             message_id: env.message_id,
+            bcc: String::new(),
+            agent: false,
         })
     }
 

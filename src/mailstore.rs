@@ -234,6 +234,7 @@ pub struct ThreadItem {
     pub to: Vec<String>,
     pub sent: String,
     pub mine: bool,
+    pub draft: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -324,6 +325,15 @@ pub struct Outgoing {
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
     pub message_id: Option<String>,
+    pub bcc: String,
+    pub agent: bool,
+}
+
+pub const AGENT_HEADER: &str = "X-Mailbench-Agent";
+pub const AGENT_BANNER: &str = "Created by an agent, press Ctrl+Enter to send";
+
+pub fn is_agent_draft(headers: &Headers) -> bool {
+    headers.all.iter().any(|(k, _)| k.eq_ignore_ascii_case(AGENT_HEADER))
 }
 
 pub const SEND_HOLD_SECS: u64 = 10;
@@ -346,7 +356,7 @@ pub trait MailStore {
     fn get(&self, id: MessageId) -> Result<Message, StoreError>;
     fn prefetch(&self, _ids: &[MessageId]) {}
     fn thread(&self, id: MessageId) -> Vec<ThreadItem> {
-        self.get(id).map(|m| vec![ThreadItem { mine: m.folder == Folder::Sent, from_address: m.from_address, to: m.to, sent: m.sent, summary: m.summary, folder: m.folder }]).unwrap_or_default()
+        self.get(id).map(|m| vec![ThreadItem { mine: m.folder == Folder::Sent, draft: false, from_address: m.from_address, to: m.to, sent: m.sent, summary: m.summary, folder: m.folder }]).unwrap_or_default()
     }
     fn set_flags(&mut self, id: MessageId, change: FlagChange) -> Result<(), StoreError>;
     fn move_to(&mut self, id: MessageId, folder: Folder) -> Result<(), StoreError>;

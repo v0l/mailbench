@@ -11,7 +11,7 @@ pub struct Input<'a> {
     pub date: i64,
 }
 
-fn clean(id: &str) -> String {
+pub fn clean(id: &str) -> String {
     id.trim().trim_start_matches('<').trim_end_matches('>').trim().to_lowercase()
 }
 

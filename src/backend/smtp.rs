@@ -88,6 +88,23 @@ pub fn render_message(m: &OutgoingMessage, keep_bcc: bool) -> Result<Vec<u8>> {
     Ok(build(m, keep_bcc)?.formatted())
 }
 
+#[derive(Clone)]
+struct AgentMarker;
+
+impl lettre::message::header::Header for AgentMarker {
+    fn name() -> lettre::message::header::HeaderName {
+        lettre::message::header::HeaderName::new_from_ascii_str("X-Mailbench-Agent")
+    }
+
+    fn parse(_: &str) -> std::result::Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(AgentMarker)
+    }
+
+    fn display(&self) -> lettre::message::header::HeaderValue {
+        lettre::message::header::HeaderValue::new(Self::name(), "1".to_string())
+    }
+}
+
 fn build(m: &OutgoingMessage, keep_bcc: bool) -> Result<Message> {
     let mut b: MessageBuilder = Message::builder().from(mailbox(&m.from)?);
     for a in &m.to {
@@ -111,6 +128,9 @@ fn build(m: &OutgoingMessage, keep_bcc: bool) -> Result<Message> {
         b = b.header(References::from(m.references.iter().map(|r| bracket(r)).collect::<Vec<_>>().join(" ")));
     }
     let mut b = b.subject(m.subject.clone());
+    if m.agent {
+        b = b.header(AgentMarker);
+    }
     if m.to.is_empty() && m.cc.is_empty() && m.bcc.is_empty() {
         let from: lettre::Address = m
             .from

@@ -108,6 +108,11 @@ impl SettingsForm {
                 Section::General => self.panels.general(ui),
                 Section::Security => self.security(ui, store),
                 Section::MailHandling => self.mail_handling(ui, store),
+                Section::Agents => {
+                    let accounts = self.drafts.clone();
+                    let narrow = self.page.narrow;
+                    self.agents.show(ui, store, &accounts, narrow);
+                }
                 Section::Updates => self.updates(ui),
                 Section::About => self.about(ui),
                 Section::Accounts => {}
@@ -361,6 +366,9 @@ impl SettingsForm {
         let _ = security;
         let options = || [Security::Tls, Security::StartTls, Security::Plain].map(|s| (s.clone(), sec_label(&s)));
         match &mut d.credential {
+            Credential::Chat { backend } => {
+                hint(ui, &format!("Chat backend: {backend}. It has no servers to configure."));
+            }
             Credential::Jmap { url, password } => {
                 row(ui, "jmap url", |ui| {
                     field(ui, url, "https://mail.example.com/jmap/session");

@@ -379,6 +379,38 @@ fn render_sent_recipient_screens() {
     }
 }
 
+#[test]
+fn the_list_row_count_and_the_card_count_follow_the_same_rule() {
+    let store = FakeStore::conversation("Datasheet", &sent_specs()).with_draft(1);
+    let row = store.list(&Query::new(Folder::Inbox), 0, 10).items.remove(0);
+    let cards = store.thread(row.id);
+    assert_eq!(row.thread as usize, cards.iter().filter(|t| !t.draft).count());
+    assert_eq!(row.thread, 2);
+    assert_eq!(cards.iter().filter(|t| t.draft).count(), 1);
+}
+
+#[test]
+#[ignore]
+fn render_draft_card_screens() {
+    for size in [egui::vec2(1280.0, 800.0), egui::vec2(392.0, 844.0)] {
+        let phone = size.x < 800.0;
+        for (with_draft, tag) in [(true, "draft"), (false, "nodraft")] {
+            let mut store = FakeStore::conversation("Datasheet", &sent_specs());
+            if with_draft {
+                store = store.with_draft(1);
+            }
+            let mut h = harness_sized(store, size);
+            h.key_press(egui::Key::Enter);
+            h.run();
+            h.run();
+            h.get_by_label("collapse all").click();
+            h.run();
+            h.run();
+            shot(&mut h, &format!("thread-{tag}{}.png", if phone { "-phone" } else { "" }));
+        }
+    }
+}
+
 fn shot(h: &mut Harness<'static, (bool, App)>, name: &str) {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/screens");
     let img = h.render().expect("render");

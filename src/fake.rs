@@ -183,10 +183,26 @@ impl FakeStore {
         }
     }
 
+    pub fn from_messages(messages: Vec<Message>) -> FakeStore {
+        let next = messages.iter().map(|m| m.summary.id.0).max().unwrap_or(0) + 1;
+        FakeStore { accounts: Self::base_accounts(), messages, next, older: Vec::new(), stash: Default::default(), blobs: Default::default() }
+    }
+
     pub fn set_headers(&mut self, index: usize, headers: Headers) {
         if let Some(m) = self.messages.get_mut(index) {
             m.headers = headers;
         }
+    }
+
+    pub fn with_draft(mut self, index: usize) -> FakeStore {
+        if let Some(m) = self.messages.get_mut(index) {
+            m.folder = Folder::Drafts;
+        }
+        let live = self.messages.iter().filter(|m| m.folder != Folder::Drafts).count() as u32;
+        if let Some(head) = self.messages.last_mut() {
+            head.summary.thread = live.max(1);
+        }
+        self
     }
 
     pub fn set_paragraphs(&mut self, index: usize, paragraphs: Vec<String>) {
@@ -392,6 +408,7 @@ impl MailStore for FakeStore {
                 from_address: m.from_address.clone(),
                 to: m.to.clone(),
                 sent: m.sent.clone(),
+                draft: m.folder == Folder::Drafts,
                 mine: m.summary.from == "me" || m.folder == Folder::Sent || self.accounts.iter().any(|a| a.address.eq_ignore_ascii_case(&m.from_address)),
             })
             .collect()
@@ -448,6 +465,9 @@ impl MailStore for FakeStore {
             .collect();
         m.message_id = message.message_id.clone();
         m.references = message.references.clone();
+        if message.agent {
+            m.headers.all.push((AGENT_HEADER.to_string(), "1".to_string()));
+        }
         self.stash.insert(id.0, message);
         self.messages.insert(0, m);
         Ok(id)

@@ -140,6 +140,7 @@ pub struct OutgoingMessage {
     pub attachments: Vec<Attachment>,
     pub message_id: Option<String>,
     pub html_alternative: bool,
+    pub agent: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

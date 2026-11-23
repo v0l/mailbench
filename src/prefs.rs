@@ -212,6 +212,7 @@ pub const COMMANDS: [Command; 15] = [
 pub const SETTINGS_KEY: egui::Key = egui::Key::Comma;
 pub const EXPAND_ALL_KEY: egui::Key = egui::Key::CloseBracket;
 pub const COLLAPSE_ALL_KEY: egui::Key = egui::Key::OpenBracket;
+pub const CHATS_KEY: egui::Key = egui::Key::T;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
@@ -226,7 +227,8 @@ impl Scope {
     }
 }
 
-pub const FIXED_KEYS: [(Scope, egui::Key, &str); 9] = [
+pub const FIXED_KEYS: [(Scope, egui::Key, &str); 10] = [
+    (Scope::Everywhere, CHATS_KEY, "open chats"),
     (Scope::Everywhere, SETTINGS_KEY, "settings"),
     (Scope::Everywhere, egui::Key::Escape, "back"),
     (Scope::Everywhere, egui::Key::G, "go to"),
@@ -252,7 +254,8 @@ pub fn key_clashes() -> Vec<String> {
     out
 }
 
-pub const FIXED: [(&str, &str, bool); 9] = [
+pub const FIXED: [(&str, &str, bool); 10] = [
+    ("t", "open chats (developer setting)", false),
     ("n p", "next or previous conversation", false),
     ("] [", "expand or collapse all", false),
     ("Enter", "open or fold a message card", false),
@@ -264,7 +267,8 @@ pub const FIXED: [(&str, &str, bool); 9] = [
     ("Esc", "back", true),
 ];
 
-const RESERVED: [egui::Key; 11] = [
+const RESERVED: [egui::Key; 12] = [
+    egui::Key::T,
     egui::Key::G,
     egui::Key::O,
     egui::Key::N,
@@ -419,6 +423,8 @@ pub struct Prefs {
     pub layout: LayoutPrefs,
     #[serde(default)]
     pub plain_text_only: bool,
+    #[serde(default)]
+    pub developer_chat: bool,
 }
 
 pub fn load(store: &Store) -> Prefs {

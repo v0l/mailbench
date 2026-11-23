@@ -6,6 +6,7 @@ A keyboard-first desktop mail client, part of the [bench suite](https://github.c
 
 - Every byte on disk is encrypted: messages, attachments, the search index, credentials and settings. The data key is unlocked by your OS keychain or a password. See [docs/storage.md](docs/storage.md).
 - Messaging backends plug in behind one trait. IMAP (IDLE, CONDSTORE, STARTTLS and TLS) and SMTP (PLAIN, LOGIN and XOAUTH2) come first, and Nostr NIP-17 private DMs sit beside them. See [docs/backends.md](docs/backends.md).
+- An IM style chat scaffold (rooms, groups, outbox, fake backend, a contract test for future backends) sits behind a developer setting. See [docs/chat.md](docs/chat.md).
 - Three panes: accounts and folders, a dense message list, and a reader. Remote images are blocked until you load them.
 
 ## Running it
@@ -33,6 +34,10 @@ mailbench archive|flag|mark-read|unread <id>...
 ```
 
 The CLI opens the same encrypted store as the app (WAL, so both can run at once). It unlocks with the keychain, then `MAILBENCH_PASSWORD`, then a prompt. The agent skill is in `skills/mailbench/SKILL.md`.
+
+## Agents over MCP
+
+mailbench can run a local MCP server (Streamable HTTP, 127.0.0.1 only, bearer token) so an agent can search, read and draft mail. It is off by default, you choose which accounts agents may see, and agents only create drafts unless you allow sending per account. Turn it on in Settings, agents, or run `mailbench mcp serve`. See [docs/mcp.md](docs/mcp.md).
 
 ## Keys
 

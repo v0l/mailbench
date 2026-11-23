@@ -1,5 +1,5 @@
 use super::model::*;
-use super::{Outbound, Shared, lock};
+use super::{Cache, Outbound, Shared, lock};
 use crate::backend::*;
 use crate::mailstore::SyncState;
 use std::sync::Arc;
@@ -249,8 +249,22 @@ async fn push(shared: &Shared, backend: &mut dyn Backend, op: &Op, account: &str
 }
 
 async fn drafts_with(backend: &mut dyn Backend, folder: &str, message_id: &str) -> Vec<u32> {
+    let wanted = super::threads::clean(message_id);
     let query = format!("HEADER Message-ID \"{}\"", message_id.trim_matches(['<', '>']));
-    backend.search(folder, &query).await.unwrap_or_default()
+    let found = backend.search(folder, &query).await.unwrap_or_default();
+    if !found.is_empty() {
+        return found;
+    }
+    let Ok(state) = backend.open_folder(folder).await else { return Vec::new() };
+    if state.uids.is_empty() {
+        return Vec::new();
+    }
+    let Ok(summaries) = backend.fetch_summaries(folder, &state.uids).await else { return Vec::new() };
+    summaries
+        .into_iter()
+        .filter(|m| m.message_id.as_deref().is_some_and(|id| super::threads::clean(id) == wanted))
+        .map(|m| m.uid)
+        .collect()
 }
 
 async fn append_creating(backend: &mut dyn Backend, folder: &str, flags: &Flags, raw: &[u8]) -> Result<()> {
@@ -347,7 +361,42 @@ async fn cycle(shared: &Arc<Shared>, index: usize, account: &str, backend: &mut 
     if sink.fresh {
         shared.refresh();
     }
+    drop_sent_drafts(shared, index, account, backend).await;
     Ok(())
+}
+
+pub(super) fn sent_drafts(cache: &Cache, index: usize) -> Vec<String> {
+    let sent: std::collections::HashSet<String> = cache
+        .entries
+        .iter()
+        .filter(|e| e.account == index && e.folder == crate::mailstore::Folder::Sent)
+        .filter_map(|e| e.message_id.as_deref().map(super::threads::clean))
+        .collect();
+    let mut stale: Vec<String> = cache
+        .entries
+        .iter()
+        .filter(|e| e.account == index && e.folder == crate::mailstore::Folder::Drafts && e.local.is_none())
+        .filter_map(|e| e.message_id.clone())
+        .filter(|id| sent.contains(&super::threads::clean(id)))
+        .collect();
+    stale.sort();
+    stale.dedup();
+    stale
+}
+
+async fn drop_sent_drafts(shared: &Arc<Shared>, index: usize, account: &str, backend: &mut dyn Backend) -> usize {
+    let stale = shared.with_cache(|c| sent_drafts(c, index));
+    let mut cleaned = 0;
+    for id in &stale {
+        let op = Op::DropDraft { account: account.to_string(), message_id: id.clone() };
+        if push(shared, backend, &op, account).await.is_ok() {
+            cleaned += 1;
+        }
+    }
+    if cleaned > 0 {
+        eprintln!("sync {account}: dropped {cleaned} drafts that were already sent");
+    }
+    cleaned
 }
 
 fn inbox_name(shared: &Shared, account: &str) -> String {
