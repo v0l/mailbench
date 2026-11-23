@@ -198,6 +198,25 @@ mod tests {
     }
 
     #[test]
+    fn turning_an_account_off_then_on_only_notifies_for_mail_after_the_switch() {
+        let mut b = Batcher::default();
+        b.arm();
+        let off = NotifyPrefs { enabled: false, quiet: None };
+        b.note([mail(1, "a", "while off")]);
+        assert_eq!(b.take(&off, 600), None);
+        b.note([mail(2, "a", "after on")]);
+        let n = b.take(&NotifyPrefs::default(), 600).unwrap();
+        assert_eq!((n.body.as_str(), n.focus), ("after on", 2));
+    }
+
+    #[test]
+    fn each_account_gets_its_own_notice_slot() {
+        let notice = Notice { account: 2, ..compose(&[mail(9, "p", "s")]) };
+        assert_eq!(notice.account, 2);
+        assert_eq!(compose(&[mail(9, "p", "s")]).account, 0);
+    }
+
+    #[test]
     fn quiet_hours_wrap_past_midnight() {
         let q = QuietHours { start: 22 * 60, end: 7 * 60 };
         assert!(q.contains(23 * 60) && q.contains(0) && q.contains(6 * 60 + 59));
