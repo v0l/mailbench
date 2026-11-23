@@ -225,6 +225,51 @@ fn a_draft_from_the_server_reopens_in_the_composer() {
 }
 
 #[test]
+fn an_inline_image_survives_the_draft_undo_send_and_arrives_inline() {
+    let (me, peer) = users("ri");
+    let dir = tempfile::tempdir().unwrap();
+    let mut real = open(&me, &dir);
+    let img = image::RgbaImage::from_fn(12, 12, |x, y| image::Rgba([(x * 20) as u8, (y * 20) as u8, 77, 255]));
+    let mut png = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    let mut draft = Draft::blank_for(0, "");
+    draft.to = format!("{peer}@localhost");
+    draft.subject = "inline".into();
+    draft.body = "top **bold**".into();
+    draft.insert_inline("shot.png", png.clone(), None).unwrap();
+    let cid = draft.last_inline_cid().unwrap().to_string();
+
+    let mid = real.save_draft(draft.outgoing()).unwrap();
+    until("draft listed", || real.list(&Query::new(ms::Folder::Drafts), 0, 10).total == 1);
+    let item = real.list(&Query::new(ms::Folder::Drafts), 0, 1).items[0].id;
+    let reopened = real.open_draft(item).unwrap();
+    assert_eq!(reopened.attachments.len(), 1);
+    assert_eq!(reopened.attachments[0].cid.as_deref(), Some(cid.as_str()));
+    assert!(reopened.body.contains(&format!("cid:{cid}")));
+
+    real.set_send_hold(Duration::from_secs(60));
+    let id = real.append(ms::Folder::Sent, reopened.clone()).unwrap();
+    real.discard_draft(0, &mid);
+    let back = real.undo_send(id).unwrap().unwrap();
+    assert_eq!(back.attachments[0].cid.as_deref(), Some(cid.as_str()));
+    real.set_send_hold(Duration::ZERO);
+    real.append(ms::Folder::Sent, back).unwrap();
+
+    until("inline mail delivered", || !server_messages(&peer, "INBOX").is_empty());
+    let raw = server_messages(&peer, "INBOX").remove(0);
+    assert!(text(&raw).contains("multipart/related"));
+    let parsed = mail_parser::MessageParser::default().parse(&raw).unwrap();
+    assert!(parsed.body_html(0).unwrap().contains(&format!("cid:{cid}")));
+    assert_eq!(parsed.attachments().next().unwrap().decoded().as_ref(), png.as_slice());
+
+    let other_dir = tempfile::tempdir().unwrap();
+    let other = open(&peer, &other_dir);
+    let got = first_inbox(&other);
+    assert_eq!(got.html.inline.len(), 1, "received message shows the image inline");
+    assert!(got.attachments.is_empty());
+}
+
+#[test]
 fn an_attachment_round_trips_and_is_encrypted_while_queued() {
     let (me, peer) = users("ra");
     let dir = tempfile::tempdir().unwrap();
