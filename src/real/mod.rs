@@ -1068,7 +1068,15 @@ impl Shared {
     }
 
     pub fn drafts_folder(&self, account: &str) -> String {
-        server_folder(&self.folders_of(account), &ms::Folder::Drafts).unwrap_or_else(|| default_name(&ms::Folder::Drafts).to_string())
+        self.server_name(account, &ms::Folder::Drafts)
+    }
+
+    pub fn server_name(&self, account: &str, folder: &ms::Folder) -> String {
+        server_folder(&self.folders_of(account), folder).unwrap_or_else(|| default_name(folder).to_string())
+    }
+
+    pub fn local_folder(&self, local: &str) -> Option<ms::Folder> {
+        self.local_with_attachments_meta(local).and_then(|m| folder_from_name(&m.folder))
     }
 
     pub fn sent_folder(&self, account: &str) -> String {
@@ -1089,7 +1097,7 @@ impl Shared {
                 .iter()
                 .filter_map(|k| store.get(LOCAL, k).ok().flatten())
                 .filter_map(|r| serde_json::from_slice::<LocalMsg>(&r).ok())
-                .filter(|m| m.folder == ms::Folder::Drafts.name() && m.dirty)
+                .filter(|m| (m.folder == ms::Folder::Drafts.name() || m.folder == ms::Folder::Trash.name()) && m.dirty)
                 .filter_map(|m| m.message_id.map(|id| id.to_lowercase()))
                 .collect()
         };
@@ -1104,6 +1112,7 @@ impl Shared {
             cache.shape.extend(tree_shape(index, &folders));
             cache.roles.extend(folders.iter().filter_map(ui_folder).map(|f| (index, f)));
             let mut pending: HashMap<(String, u32), String> = HashMap::new();
+            let mut dropped: std::collections::HashSet<(String, u32)> = std::collections::HashSet::new();
             let mut flag_ops: HashMap<(String, u32), (Option<bool>, Option<bool>)> = HashMap::new();
             for (_, op) in &ops {
                 if let Op::Flags { account: a, folder, uid, seen, flagged, .. } = op {
@@ -1139,6 +1148,11 @@ impl Shared {
                             pending.insert((folder.clone(), *uid), to.clone());
                         }
                     }
+                    Op::DeleteSet { account: a, folder, uids, .. } if *a == account.id => {
+                        for uid in uids {
+                            dropped.insert((folder.clone(), *uid));
+                        }
+                    }
                     Op::Move { account: a, folder, uid, to, .. } if *a == account.id => {
                         pending.insert((folder.clone(), *uid), to.clone());
                     }
@@ -1171,7 +1185,7 @@ impl Shared {
                 let Some((last, _)) = page.last() else { break };
                 after = if quick { None } else { Some(last.clone()) };
                 for m in page.into_iter().map(|(_, m)| m) {
-                    if m.flags.deleted {
+                    if m.flags.deleted || dropped.contains(&(stored_name.clone(), m.uid)) {
                         continue;
                     }
                     if ui == ms::Folder::Drafts && m.message_id.as_ref().is_some_and(|id| local_drafts.contains(&id.to_lowercase())) {
@@ -1242,7 +1256,7 @@ impl Shared {
             let Some(index) = self.index_of(&msg.account) else { continue };
             let Some(folder) = folder_from_name(&msg.folder) else { continue };
             let on_server = msg.message_id.as_ref().is_some_and(|id| server_ids.contains(&id.to_lowercase()));
-            if on_server && (msg.sent_ok || (folder == ms::Folder::Drafts && !msg.dirty)) {
+            if on_server && (msg.sent_ok || (matches!(folder, ms::Folder::Drafts | ms::Folder::Trash) && !msg.dirty)) {
                 if !quick {
                     let _ = store.delete(LOCAL, &key);
                     let _ = store.delete_prefix(ATTACH, &format!("{key}\0"));
@@ -1870,16 +1884,28 @@ impl MailStore for RealStore {
         }
         let account = self.shared.accounts[e.account].id.clone();
         if let Some(local) = &e.local {
+            let draft_move = e.folder == ms::Folder::Drafts || folder == ms::Folder::Drafts;
             {
                 let store = self.shared.lock_store();
                 let raw = store.get(LOCAL, local).map_err(backend_err)?.ok_or(StoreError::NotFound)?;
                 let mut msg: LocalMsg = serde_json::from_slice(&raw).map_err(backend_err)?;
                 msg.folder = folder.name().to_string();
+                if draft_move && msg.message_id.is_some() {
+                    msg.dirty = true;
+                    msg.rev = self.shared.seq.fetch_add(1, Ordering::SeqCst) + 1;
+                    for (k, op) in Shared::outbox_in(&store) {
+                        if matches!(&op, Op::Draft { local: l, .. } if l == local) {
+                            let _ = store.delete(OUTBOX, &k);
+                        }
+                    }
+                    self.shared.enqueue(&store, &Op::Draft { account: account.clone(), local: local.clone() })?;
+                }
                 store.put(LOCAL, local, &serde_json::to_vec(&msg).map_err(backend_err)?).map_err(backend_err)?;
             }
             self.shared.user_gen.fetch_add(1, Ordering::SeqCst);
             self.shared.patch(e.id, |x| x.folder = folder);
             self.shared.refresh();
+            self.shared.kick(e.account);
             return Ok(());
         }
         let folders = self.shared.folders_of(&account);
@@ -2056,13 +2082,65 @@ impl MailStore for RealStore {
         Ok(())
     }
 
-    fn mark_all_read(&mut self, folder: &ms::Folder) -> Result<Vec<Restore>, StoreError> {
+    fn mark_all_read_in(&mut self, folder: &ms::Folder, account: Option<usize>) -> Result<Vec<Restore>, StoreError> {
         let ids: Vec<MessageId> = self.shared.with_cache(|c| {
-            c.entries.iter().filter(|e| e.folder == *folder && e.unread && e.local.is_none()).map(|e| MessageId(e.id)).collect()
+            c.entries
+                .iter()
+                .filter(|e| e.folder == *folder && e.unread && e.local.is_none() && account.is_none_or(|a| a == e.account))
+                .map(|e| MessageId(e.id))
+                .collect()
         });
         let before = self.snapshot(&ids);
         self.bulk_flags(&ids, FlagChange { unread: Some(false), flagged: None })?;
         Ok(before)
+    }
+
+    fn delete_forever(&mut self, ids: &[MessageId]) -> Result<(), StoreError> {
+        let mut groups: HashMap<(usize, String), (u32, Vec<u32>)> = HashMap::new();
+        let mut gone = Vec::new();
+        for id in ids {
+            let Ok(e) = self.entry(*id) else { continue };
+            let account = self.shared.accounts[e.account].id.clone();
+            if let Some(local) = &e.local {
+                let store = self.shared.lock_store();
+                let held = store.get(LOCAL, local).ok().flatten().and_then(|r| serde_json::from_slice::<LocalMsg>(&r).ok());
+                for (k, op) in Shared::outbox_in(&store) {
+                    if matches!(&op, Op::Draft { local: l, .. } | Op::Send { local: l, .. } if l == local) {
+                        let _ = store.delete(OUTBOX, &k);
+                    }
+                }
+                let _ = store.delete(LOCAL, local);
+                let _ = store.delete_prefix(ATTACH, &format!("{local}\0"));
+                if let Some(mid) = held.and_then(|m| m.message_id) {
+                    self.shared.enqueue(&store, &Op::DropDraft { account, message_id: mid })?;
+                }
+            } else {
+                let validity = self.shared.validity(&account, &e.server_folder).unwrap_or(e.validity);
+                groups.entry((e.account, e.server_folder.clone())).or_insert((validity, Vec::new())).1.push(e.uid);
+            }
+            gone.push(e.id);
+        }
+        {
+            let store = self.shared.lock_store();
+            for ((account, folder), (uid_validity, uids)) in &groups {
+                self.shared.enqueue(
+                    &store,
+                    &Op::DeleteSet { account: self.shared.accounts[*account].id.clone(), folder: folder.clone(), uids: uids.clone(), uid_validity: *uid_validity },
+                )?;
+            }
+        }
+        self.shared.user_gen.fetch_add(1, Ordering::SeqCst);
+        for id in gone {
+            self.shared.remove_entry(id);
+        }
+        self.shared.refresh();
+        for (account, _) in groups.keys() {
+            self.shared.kick(*account);
+        }
+        for account in 0..self.shared.accounts.len() {
+            self.shared.kick(account);
+        }
+        Ok(())
     }
 
     fn restore(&mut self, items: &[Restore]) -> Result<(), StoreError> {

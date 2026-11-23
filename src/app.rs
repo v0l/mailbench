@@ -439,6 +439,7 @@ enum FolderDialog {
     Create { account: usize, prefix: String, name: String },
     Rename { folder: Folder, prefix: String, name: String },
     Delete { folder: Folder },
+    Purge { ids: Vec<MessageId> },
 }
 
 fn fuzzy_score(query: &str, text: &str) -> Option<usize> {
@@ -789,6 +790,9 @@ impl App {
         if plain && Self::pressed(ctx, K::Num3) && ctx.input(|i| i.modifiers.shift) {
             out.push(Action::Trash);
         }
+        if Self::pressed(ctx, K::Delete) {
+            out.push(Action::Trash);
+        }
         out
     }
 
@@ -964,7 +968,7 @@ impl App {
                 }
                 Action::SelectNone => self.marked.clear(),
                 Action::Undo => self.undo_last(),
-                Action::MarkAllRead(f) => match self.store.mark_all_read(&f) {
+                Action::MarkAllRead(f) => match self.store.mark_all_read_in(&f, self.account) {
                     Ok(before) => {
                         self.notice = Some(format!("Marked {} as read", before.len()));
                         self.undo = Some(before);
@@ -998,6 +1002,12 @@ impl App {
                     }
                 }
                 Action::Junk => self.move_current(&v, Folder::Junk, "Moved to junk", whole),
+                Action::Trash if self.folder == Folder::Trash => {
+                    let ids = self.act_ids(&v, whole, true);
+                    if !ids.is_empty() {
+                        self.dialog = Some(FolderDialog::Purge { ids });
+                    }
+                }
                 Action::Trash => self.move_current(&v, Folder::Trash, "Moved to trash", whole),
                 Action::ToggleFlag => {
                     let current = if whole { v.head.as_ref() } else { v.current.as_ref().map(|m| &m.summary) };
@@ -1011,8 +1021,8 @@ impl App {
                     self.dwell_done = true;
                     let current = if whole { v.head.as_ref() } else { v.current.as_ref().map(|m| &m.summary) };
                     if let Some(s) = current {
-                        let unread = !s.unread;
                         let ids = self.act_ids(&v, whole, false);
+                        let unread = if self.marked.is_empty() { !s.unread } else { !self.store.snapshot(&ids).iter().any(|r| r.unread) };
                         self.change_flags(&ids, FlagChange { unread: Some(unread), flagged: None }, if unread { "Marked unread" } else { "Marked read" });
                     }
                 }
@@ -1588,11 +1598,14 @@ impl App {
                 p.rect_filled(rect, 2.0, BAND);
             }
             put(p, rect.left() + 12.0, 120.0, rect.center().y, f.folder.name(), body(13.0), if on { VALUE } else { LEGEND });
-            let n = if matches!(f.folder, Folder::Inbox) { f.unread } else if matches!(f.folder, Folder::Drafts) { f.total } else { 0 };
+            let n = f.unread;
             if n > 0 {
                 put_right(p, rect.right() - 6.0, rect.center().y, &n.to_string(), figure(11.0), if on { READOUT } else { LEGEND });
             }
-            ui.ctx().accesskit_node_builder(resp.id, |n| n.set_label(format!("folder {}", f.folder.name())));
+            ui.ctx().accesskit_node_builder(resp.id, |node| {
+                node.set_label(format!("folder {}", f.folder.name()));
+                node.set_value(n.to_string());
+            });
             let target = f.folder.clone();
             resp.context_menu(|ui| {
                 ui.set_min_width(140.0);
@@ -1677,11 +1690,14 @@ impl App {
                     p.rect_filled(rect, 2.0, BAND);
                 }
                 put(p, rect.left() + 12.0, 120.0, rect.center().y, f.folder.name(), body(13.0), if on { VALUE } else { LEGEND });
-                let n = if matches!(f.folder, Folder::Inbox) { f.unread } else { f.total };
+                let n = f.unread;
                 if n > 0 {
                     put_right(p, rect.right() - 6.0, rect.center().y, &n.to_string(), figure(11.0), if on { READOUT } else { LEGEND });
                 }
-                ui.ctx().accesskit_node_builder(resp.id, |n| n.set_label(format!("{} {}", info.name, f.folder.name())));
+                ui.ctx().accesskit_node_builder(resp.id, |node| {
+                    node.set_label(format!("{} {}", info.name, f.folder.name()));
+                    node.set_value(n.to_string());
+                });
                 if resp.clicked() {
                     actions.push(Action::GoToIn(account, f.folder));
                 }
@@ -2026,8 +2042,16 @@ impl App {
                             .size(11.5)
                             .show(ui);
                     }
+                    FolderDialog::Purge { ids } => {
+                        modal_title(ui, "delete for good");
+                        Line::new()
+                            .note(if ids.len() == 1 { "Delete this message for good? It cannot be undone.".to_string() } else { format!("Delete {} messages for good? They cannot be undone.", ids.len()) })
+                            .size(11.5)
+                            .show(ui);
+                    }
                 }
                 let (label, tint) = match dialog {
+                    FolderDialog::Purge { .. } => ("delete", FAULT),
                     FolderDialog::Create { .. } => ("create", READOUT),
                     FolderDialog::Rename { .. } => ("rename", READOUT),
                     FolderDialog::Delete { .. } => ("delete", FAULT),
@@ -2052,6 +2076,10 @@ impl App {
                 }
                 Some(FolderDialog::Rename { folder, prefix, name }) if !name.trim().is_empty() => {
                     self.store.rename_folder(&folder, &format!("{prefix}{}", name.trim())).map(|_| "Folder renamed")
+                }
+                Some(FolderDialog::Purge { ids }) => {
+                    self.marked.clear();
+                    self.store.delete_forever(&ids).map(|_| "Deleted for good")
                 }
                 Some(FolderDialog::Delete { folder }) => {
                     if folder == self.folder {
@@ -2163,7 +2191,28 @@ impl App {
                     let m = ui.input(|inp| inp.modifiers);
                     clicked = Some((i, m.shift, m.command));
                 }
+                if resp.secondary_clicked() && !self.marked.contains(&i) {
+                    self.marked.clear();
+                    self.selected = i;
+                }
                 resp.context_menu(|ui| {
+                    let mark_label = if s.unread { "mark read" } else { "mark unread" };
+                    if ui.button(mark_label).clicked() {
+                        actions.push(Action::ToggleUnread);
+                        ui.close();
+                    }
+                    if ui.button("archive").clicked() {
+                        actions.push(Action::Archive);
+                        ui.close();
+                    }
+                    if ui.button("move to junk").clicked() {
+                        actions.push(Action::Junk);
+                        ui.close();
+                    }
+                    if ui.button("delete").clicked() {
+                        actions.push(Action::Trash);
+                        ui.close();
+                    }
                     if ui.button("Mark all as read").clicked() {
                         actions.push(Action::MarkAllRead(v.query.folder.clone()));
                         ui.close();
