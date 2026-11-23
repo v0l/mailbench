@@ -157,7 +157,7 @@ impl MailTools {
                 return Err("attachments are too large for one call".into());
             }
             let mime = item.get("mime").and_then(Value::as_str).filter(|m| !m.contains(char::is_control)).map(str::to_string).unwrap_or_else(|| crate::app::guess_mime(&name).to_string());
-            out.push(OutAttachment { name, mime, data });
+            out.push(OutAttachment { name, mime, data, cid: None });
         }
         Ok(out)
     }

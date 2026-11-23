@@ -112,6 +112,41 @@ fn parse(id: &str) -> MessageId {
 }
 
 #[test]
+fn an_agent_draft_with_a_normal_attachment_builds_sends_and_reads_back_unchanged() {
+    use base64::Engine;
+    let (t, _d) = setup(true);
+    let bytes = vec![0u8, 1, 2, 250, 251, 252];
+    let v = t.call(
+        "create_draft",
+        &json!({"account": "kestrel", "to": ["pat@example.test"], "subject": "with file", "body": "see attached", "attachments": [{"name": "board.bin", "mime": "application/x-board", "data_base64": base64::engine::general_purpose::STANDARD.encode(&bytes)}]}),
+    );
+    let id = base::ok(&v)["draft_id"].as_str().unwrap().to_string();
+    let out = t.store_for_tests().open_draft(parse(&id)).unwrap();
+    assert_eq!(out.attachments.len(), 1);
+    assert_eq!(out.attachments[0].name, "board.bin");
+    assert_eq!(out.attachments[0].mime, "application/x-board");
+    assert_eq!(out.attachments[0].data, bytes);
+    assert!(out.attachments[0].cid.is_none());
+    let sent = t.call("send_message", &json!({"draft_id": id}));
+    assert_eq!(base::ok(&sent)["status"], "sent");
+    let sent_id = parse(base::ok(&sent)["sent_id"].as_str().unwrap());
+    let data = t.store_for_tests().attachments(sent_id).unwrap();
+    assert_eq!(data.len(), 1);
+    assert_eq!(data[0].name, "board.bin");
+
+    let message = mailbench::backend::OutgoingMessage {
+        from: mailbench::backend::Address { name: None, address: "me@example.test".into() },
+        to: vec![mailbench::backend::Address { name: None, address: "pat@example.test".into() }],
+        body: "see attached".into(),
+        attachments: out.attachments.clone(),
+        html_alternative: true,
+        ..Default::default()
+    };
+    let raw = mailbench::backend::render_message(&message, false).unwrap();
+    assert!(!String::from_utf8_lossy(&raw).to_ascii_lowercase().contains("content-id"));
+}
+
+#[test]
 fn send_message_with_the_setting_on_sends_once_and_audits_without_bodies() {
     let (t, d) = setup(true);
     let id = draft(&t);
