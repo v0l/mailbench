@@ -484,7 +484,7 @@ fn snapshots_are_cleaned_even_when_the_server_search_by_message_id_finds_nothing
 
 #[test]
 fn the_sent_message_is_one_conversation_with_one_card_after_autosaves_and_a_held_send() {
-    let (me, peer) = users("rh");
+    let (me, peer) = users("rz");
     let dir = tempfile::tempdir().unwrap();
     let mut real = open(&me, &dir);
     real.set_send_hold(Duration::from_secs(2));
@@ -511,14 +511,15 @@ fn the_sent_message_is_one_conversation_with_one_card_after_autosaves_and_a_held
     assert_eq!(cards.len(), 1, "{shown:?}");
     assert_eq!(row.thread, 1);
     assert_eq!(row.subject, "OWON SPE6103");
-    assert!(text(&server_messages(&me, "Sent")[0]).contains("Subject: OWON SPE6103"));
+    let sent_copy = text(&server_messages(&me, "Sent")[0]);
+    assert!(sent_copy.contains("Subject: OWON SPE6103"), "{sent_copy}");
     assert!(server_messages(&me, "Drafts").is_empty());
     assert_eq!(real.counts(&Query::new(ms::Folder::Drafts)).all, 0);
 }
 
 #[test]
 fn autosaved_snapshots_leave_no_draft_behind_once_sent() {
-    let (me, peer) = users("rs");
+    let (me, peer) = users("rq");
     let dir = tempfile::tempdir().unwrap();
     let mut real = open(&me, &dir);
     let mut draft = Draft::blank();
