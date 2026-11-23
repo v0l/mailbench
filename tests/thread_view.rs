@@ -240,6 +240,17 @@ fn a_reply_does_not_repeat_the_parents_text() {
 }
 
 #[test]
+fn an_expanded_reply_hides_the_attribution_and_the_parents_quoted_lines() {
+    let mut h = open_thread(egui::vec2(1280.0, 1400.0));
+    h.get_by_label("expand all").click();
+    h.run();
+    h.run();
+    assert_eq!(h.query_all_by_label_contains("Hi, can we meet on Friday").count(), 1);
+    assert_eq!(h.query_all_by_label_contains("wrote:").count(), 0);
+    h.get_by_label_contains("message body: Yes, Friday works for me.");
+}
+
+#[test]
 fn quoted_tail_stays_folded_until_asked() {
     let mut h = open_thread(egui::vec2(1280.0, 1000.0));
     h.get_by_label_contains("quoted lines hidden").click();
