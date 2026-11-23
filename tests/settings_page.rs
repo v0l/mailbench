@@ -127,8 +127,15 @@ fn boot() -> Rig {
 
 impl Rig {
     fn settle(&mut self) {
-        for _ in 0..6 {
-            let _ = self.h.try_run();
+        self.h.run_steps(6);
+    }
+
+    fn until(&mut self, what: &str, cond: impl Fn(&mut Rig) -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !cond(self) {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+            self.h.run_steps(2);
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
 
@@ -199,6 +206,9 @@ fn editing_the_signature_and_pressing_apply_saves_and_rebuilds() {
     rig.form().drafts[0].signature = "Best, me".into();
     rig.settle();
     rig.click("apply");
+    rig.until("the rebuilt app to carry the signature", |r| {
+        r.h.state().1.app().is_some_and(|a| a.store.accounts()[0].signature == "Best, me")
+    });
     let saved = accounts::load_all(&rig.store());
     assert_eq!(saved[0].signature, "Best, me");
     assert!(rig.h.query_by_label("apply").is_none());
