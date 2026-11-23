@@ -774,29 +774,33 @@ impl ChatView {
                     move || egui::WidgetInfo::labeled(egui::WidgetType::Button, true, l.clone())
                 });
                 egui::Popup::menu(&more).show(|ui| {
-                    ui.set_min_width(150.0);
-                    if tap_key(ui, narrow, Key::new("reply").outline(VALUE).id_salt(("reply", m.id.as_str()))).clicked() {
-                        act(Act::Reply(m.id.clone()));
-                        ui.close();
+                    let mut labels = vec!["reply"];
+                    if own && caps.edit {
+                        labels.push("edit");
                     }
-                    if caps.reactions {
-                        ui.horizontal_wrapped(|ui| {
-                            for e in REACTIONS {
-                                if tap_key(ui, narrow, Key::new(e).outline(VALUE).id_salt(("react", m.id.as_str(), e))).clicked() {
-                                    act(Act::React(m.id.clone(), e.to_string()));
-                                    ui.close();
-                                }
+                    if own && caps.delete {
+                        labels.push("delete message");
+                    }
+                    menu_column(ui, narrow, &labels, |ui, menu| {
+                        if menu.key(ui, "reply", VALUE) {
+                            act(Act::Reply(m.id.clone()));
+                            ui.close();
+                        }
+                        if caps.reactions {
+                            if let Some(i) = menu.row(ui, &REACTIONS, VALUE) {
+                                act(Act::React(m.id.clone(), REACTIONS[i].to_string()));
+                                ui.close();
                             }
-                        });
-                    }
-                    if own && caps.edit && tap_key(ui, narrow, Key::new("edit").outline(VALUE).id_salt(("edit", m.id.as_str()))).clicked() {
-                        act(Act::Edit(m.id.clone(), m.body.clone()));
-                        ui.close();
-                    }
-                    if own && caps.delete && tap_key(ui, narrow, Key::new("delete message").outline(FAULT).id_salt(("del", m.id.as_str()))).clicked() {
-                        act(Act::Delete(m.id.clone()));
-                        ui.close();
-                    }
+                        }
+                        if own && caps.edit && menu.key(ui, "edit", VALUE) {
+                            act(Act::Edit(m.id.clone(), m.body.clone()));
+                            ui.close();
+                        }
+                        if own && caps.delete && menu.key(ui, "delete message", FAULT) {
+                            act(Act::Delete(m.id.clone()));
+                            ui.close();
+                        }
+                    });
                 });
             }
         };

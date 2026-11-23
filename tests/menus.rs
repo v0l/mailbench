@@ -94,7 +94,7 @@ fn click_more(h: &mut H) {
     settle(h);
 }
 
-const MENU_LABELS: [&str; 14] = ["reply", "reply all", "forward", "flag", "unflag", "mark read", "mark unread", "snooze", "archive", "move to junk", "move to folder", "delete", "mark all as read", "new subfolder"];
+const MENU_LABELS: [&str; 16] = ["reply", "reply all", "forward", "flag", "unflag", "mark read", "mark unread", "snooze", "archive", "move to junk", "move to folder", "delete", "mark all as read", "new subfolder", "edit", "delete message"];
 
 type Rects = Vec<(String, egui::Rect)>;
 
@@ -360,6 +360,66 @@ fn no_menu_label_starts_with_a_capital() {
         }
     }
     assert!(bad.is_empty(), "capitalised menu labels: {bad:?}");
+}
+
+fn chat_harness(size: egui::Vec2) -> H {
+    use mailbench::chat::fake::FakeChat;
+    use mailbench::chat::*;
+    let (chat, handle) = FakeChat::with_contacts();
+    handle.set_capabilities(Capabilities { edit: true, delete: true, ..Default::default() });
+    let crew = handle.add_room("crew", "Field crew", RoomKind::Group, &["ann", "bo"]);
+    handle.say(&crew, "ann", "Van is loaded");
+    handle.say(&crew, "me", "On my way");
+    let mut view = ChatView::new(controller::ChatController::start(Box::new(chat), None));
+    view.dwell = std::time::Duration::from_millis(150);
+    let mut app = App::with_store(Box::new(FakeStore::concept()));
+    app.prefs.developer_chat = true;
+    app.chats = Some(view);
+    app.open_chats();
+    let mut h = Harness::builder().with_size(size).with_pixels_per_point(1.0).build_ui_state(
+        |ui, (ready, app): &mut (bool, App)| {
+            if !*ready {
+                mailbench::kit::setup(ui.ctx());
+                *ready = true;
+                ui.ctx().request_repaint();
+                return;
+            }
+            app.show(ui);
+        },
+        (false, app),
+    );
+    chat_settle(&mut h);
+    h.get_by_label_contains("room Field crew").click();
+    chat_settle(&mut h);
+    h
+}
+
+fn chat_settle(h: &mut H) {
+    for _ in 0..6 {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        h.run_steps(2);
+    }
+}
+
+fn chat_menu_probe(h: &mut H) -> Vec<f32> {
+    let before = rects(h);
+    h.get_all_by_label_contains("actions for message from").last().unwrap().click();
+    chat_settle(h);
+    key_widths(&new_since(h, &before), &["reply", "delete message"])
+}
+
+#[test]
+fn chat_message_menu_width_is_bounded_and_does_not_grow_with_the_window() {
+    let mut desktop = Vec::new();
+    for size in SIZES {
+        let mut h = chat_harness(egui::vec2(size.0, size.1));
+        let widths = chat_menu_probe(&mut h);
+        assert_bounded("chat menu", size, &widths);
+        if size.0 >= 700.0 {
+            desktop.push(widths);
+        }
+    }
+    assert_eq!(desktop[0], desktop[1], "chat menu grows with the window");
 }
 
 fn out_dir() -> PathBuf {

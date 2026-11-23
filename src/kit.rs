@@ -668,6 +668,21 @@ impl Menu {
         Key::new(label).outline(tint).min_width(self.width).paint(ui, rect).clicked()
     }
 
+    pub fn row(&self, ui: &mut Ui, labels: &[&str], tint: Color32) -> Option<usize> {
+        let mut hit = None;
+        ui.horizontal_wrapped(|ui| {
+            for (i, label) in labels.iter().enumerate() {
+                let w = Key::new(*label).width(ui).max(TAP.min(self.width / labels.len().max(1) as f32 - 6.0));
+                let h = if self.narrow { TAP } else { KEY_H };
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
+                if Key::new(*label).outline(tint).min_width(w).paint(ui, rect).clicked() {
+                    hit = Some(i);
+                }
+            }
+        });
+        hit
+    }
+
     pub fn separator(&self, ui: &mut Ui) {
         ui.add_space(3.0);
         let r = ui.allocate_exact_size(Vec2::new(self.width, 1.0), Sense::hover()).0;
