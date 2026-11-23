@@ -1577,11 +1577,14 @@ impl App {
                 p.rect_filled(rect, 2.0, BAND);
             }
             put(p, rect.left() + 12.0, 120.0, rect.center().y, f.folder.name(), body(13.0), if on { VALUE } else { LEGEND });
-            let n = if matches!(f.folder, Folder::Inbox) { f.unread } else if matches!(f.folder, Folder::Drafts) { f.total } else { 0 };
+            let n = f.unread;
             if n > 0 {
                 put_right(p, rect.right() - 6.0, rect.center().y, &n.to_string(), figure(11.0), if on { READOUT } else { LEGEND });
             }
-            ui.ctx().accesskit_node_builder(resp.id, |n| n.set_label(format!("folder {}", f.folder.name())));
+            ui.ctx().accesskit_node_builder(resp.id, |node| {
+                node.set_label(format!("folder {}", f.folder.name()));
+                node.set_value(n.to_string());
+            });
             let target = f.folder.clone();
             resp.context_menu(|ui| {
                 ui.set_min_width(140.0);
@@ -1666,11 +1669,14 @@ impl App {
                     p.rect_filled(rect, 2.0, BAND);
                 }
                 put(p, rect.left() + 12.0, 120.0, rect.center().y, f.folder.name(), body(13.0), if on { VALUE } else { LEGEND });
-                let n = if matches!(f.folder, Folder::Inbox) { f.unread } else { f.total };
+                let n = f.unread;
                 if n > 0 {
                     put_right(p, rect.right() - 6.0, rect.center().y, &n.to_string(), figure(11.0), if on { READOUT } else { LEGEND });
                 }
-                ui.ctx().accesskit_node_builder(resp.id, |n| n.set_label(format!("{} {}", info.name, f.folder.name())));
+                ui.ctx().accesskit_node_builder(resp.id, |node| {
+                    node.set_label(format!("{} {}", info.name, f.folder.name()));
+                    node.set_value(n.to_string());
+                });
                 if resp.clicked() {
                     actions.push(Action::GoToIn(account, f.folder));
                 }
