@@ -78,7 +78,7 @@ pub fn sent(ts: i64) -> String {
     let day = ts.div_euclid(86_400);
     let secs = ts.rem_euclid(86_400);
     let (_, m, d) = civil(day);
-    format!("{} {d} {} {:02}:{:02}", weekday(day), MONTHS[m as usize - 1], secs / 3600, secs % 3600 / 60)
+    format!("{} {d} {} {:02}:{:02}:{:02}", weekday(day), MONTHS[m as usize - 1], secs / 3600, secs % 3600 / 60, secs % 60)
 }
 
 pub fn size(bytes: usize) -> String {
@@ -257,7 +257,8 @@ mod tests {
 
     #[test]
     fn sent_has_weekday_date_and_time() {
-        assert_eq!(sent(1_700_220_000), "Fri 17 Nov 11:20");
+        assert_eq!(sent(1_700_220_000), "Fri 17 Nov 11:20:00");
+        assert_ne!(sent(1_700_220_007), sent(1_700_220_000));
     }
 
     #[test]

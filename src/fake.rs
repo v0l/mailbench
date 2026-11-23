@@ -121,7 +121,68 @@ fn draft(id: u64, subject: &str, when: &str) -> Message {
     }
 }
 
+#[derive(Clone)]
+pub struct ConvSpec {
+    pub from: &'static str,
+    pub address: &'static str,
+    pub to: &'static [&'static str],
+    pub when: &'static str,
+    pub sent: &'static str,
+    pub unread: bool,
+    pub attach: bool,
+    pub account: usize,
+    pub paragraphs: &'static [&'static str],
+    pub quoted: &'static [&'static str],
+}
+
 impl FakeStore {
+    pub fn conversation(subject: &str, specs: &[ConvSpec]) -> FakeStore {
+        let n = specs.len() as u64;
+        let messages = specs
+            .iter()
+            .enumerate()
+            .map(|(i, s)| Message {
+                summary: Summary {
+                    id: MessageId(i as u64 + 1),
+                    from: s.from.into(),
+                    subject: subject.into(),
+                    when: s.when.into(),
+                    unread: s.unread,
+                    flagged: false,
+                    new: s.unread,
+                    attachments: s.attach,
+                    account: s.account,
+                    thread: if i as u64 + 1 == n { n as u32 } else { 1 },
+                    remote: false,
+                },
+                folder: Folder::Inbox,
+                from_address: s.address.into(),
+                to: s.to.iter().map(|t| t.to_string()).collect(),
+                cc: Vec::new(),
+                sent: s.sent.into(),
+                paragraphs: s.paragraphs.iter().map(|p| p.to_string()).collect(),
+                html: Default::default(),
+                quoted: s.quoted.iter().map(|q| q.to_string()).collect(),
+                attachments: if s.attach { vec![AttachmentInfo { name: "notes.pdf".into(), size: "84 KB".into(), mime: mime_of("notes.pdf") }] } else { Vec::new() },
+                remote_images: None,
+                headers: Default::default(),
+                body_state: Default::default(),
+                message_id: None,
+                references: Vec::new(),
+                to_full: Vec::new(),
+                cc_full: Vec::new(),
+            })
+            .collect();
+        FakeStore {
+            accounts: Self::base_accounts(),
+            messages,
+            next: n + 1,
+            older: vec![(n, (1..n).collect())],
+            stash: Default::default(),
+            blobs: Default::default(),
+        }
+    }
+
     pub fn set_headers(&mut self, index: usize, headers: Headers) {
         if let Some(m) = self.messages.get_mut(index) {
             m.headers = headers;
@@ -325,7 +386,14 @@ impl MailStore for FakeStore {
         ids.push(id.0);
         ids.iter()
             .filter_map(|i| self.messages.iter().find(|m| m.summary.id.0 == *i))
-            .map(|m| ThreadItem { summary: m.summary.clone(), folder: m.folder.clone() })
+            .map(|m| ThreadItem {
+                summary: m.summary.clone(),
+                folder: m.folder.clone(),
+                from_address: m.from_address.clone(),
+                to: m.to.clone(),
+                sent: m.sent.clone(),
+                mine: m.summary.from == "me" || m.folder == Folder::Sent || self.accounts.iter().any(|a| a.address.eq_ignore_ascii_case(&m.from_address)),
+            })
             .collect()
     }
 

@@ -209,7 +209,10 @@ pub const COMMANDS: [Command; 15] = [
     Command { id: "account_only", label: "this account only", default: egui::Key::V, hint: true },
 ];
 
-pub const FIXED: [(&str, &str, bool); 6] = [
+pub const FIXED: [(&str, &str, bool); 9] = [
+    ("n p", "next or previous conversation", false),
+    (". ,", "expand or collapse all", false),
+    ("Enter", "open or fold a message card", false),
     ("g i", "go to inbox", false),
     ("g a", "go to archive", false),
     ("o", "open file", true),
@@ -218,8 +221,18 @@ pub const FIXED: [(&str, &str, bool); 6] = [
     ("Esc", "back", true),
 ];
 
-const RESERVED: [egui::Key; 6] =
-    [egui::Key::G, egui::Key::O, egui::Key::Escape, egui::Key::Num3, egui::Key::ArrowDown, egui::Key::ArrowUp];
+const RESERVED: [egui::Key; 10] = [
+    egui::Key::G,
+    egui::Key::O,
+    egui::Key::N,
+    egui::Key::P,
+    egui::Key::Period,
+    egui::Key::Comma,
+    egui::Key::Escape,
+    egui::Key::Num3,
+    egui::Key::ArrowDown,
+    egui::Key::ArrowUp,
+];
 
 pub fn key_label(key: egui::Key) -> String {
     let name = key.symbol_or_name();

@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 const SNIPPET_CHARS: usize = 140;
+const MIN_REPEAT_CHARS: usize = 24;
 
 fn is_quote_line(line: &str) -> bool {
     line.trim_start().starts_with('>')
@@ -49,7 +50,7 @@ pub fn snippet(paragraphs: &[String]) -> String {
 }
 
 fn normal(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+    s.trim_start_matches(|c: char| c == '>' || c.is_whitespace()).split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 pub fn without_parent_text(paragraphs: &[String], parent: &[String]) -> Vec<String> {
@@ -62,7 +63,7 @@ pub fn without_parent_text(paragraphs: &[String], parent: &[String]) -> Vec<Stri
             if n.is_empty() {
                 return false;
             }
-            if parent_paras.contains(&n) {
+            if n.chars().count() >= MIN_REPEAT_CHARS && parent_paras.contains(&n) {
                 return false;
             }
             let lines: Vec<String> = p.lines().map(|l| normal(l.trim_start_matches(|c: char| c == '>' || c.is_whitespace()))).filter(|l| !l.is_empty()).collect();
@@ -187,6 +188,12 @@ mod tests {
         let parent = p(&["Hi,\nCan we meet on Friday?"]);
         let child = p(&["Hi,  Can we meet\non Friday?", "Yes, Friday works."]);
         assert_eq!(without_parent_text(&child, &parent), p(&["Yes, Friday works."]));
+    }
+
+    #[test]
+    fn a_short_reply_equal_to_a_short_parent_line_is_kept() {
+        let parent = p(&["Thanks"]);
+        assert_eq!(without_parent_text(&p(&["Thanks"]), &parent), p(&["Thanks"]));
     }
 
     #[test]
