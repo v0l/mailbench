@@ -98,6 +98,7 @@ fn android_main(app: android_activity::AndroidApp) {
         set_data_dir(dir);
     }
     let activity_ptr = app.activity_as_ptr() as usize;
+    crate::android_bridge::set_activity(activity_ptr);
     let handle = app.clone();
     let opts = eframe::NativeOptions { android_app: Some(app), renderer: eframe::Renderer::Glow, ..Default::default() };
     let _ = eframe::run_native(

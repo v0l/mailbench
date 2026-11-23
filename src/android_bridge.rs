@@ -1,6 +1,19 @@
-use jni::objects::{JByteArray, JObject, JString, JValue};
+use jni::objects::{GlobalRef, JByteArray, JObject, JString, JValue};
 use jni::{JNIEnv, JavaVM};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+static ACTIVITY: OnceLock<GlobalRef> = OnceLock::new();
+
+pub fn set_activity(ptr: usize) {
+    let ctx = ndk_context::android_context();
+    let Ok(vm) = (unsafe { JavaVM::from_raw(ctx.vm().cast()) }) else { return };
+    let Ok(env) = vm.attach_current_thread() else { return };
+    let activity = unsafe { JObject::from_raw(ptr as jni::sys::jobject) };
+    if let Ok(global) = env.new_global_ref(&activity) {
+        let _ = ACTIVITY.set(global);
+    }
+}
 
 const PICK_TIMEOUT: Duration = Duration::from_secs(600);
 const POLL: Duration = Duration::from_millis(150);
@@ -9,13 +22,24 @@ fn with_activity<T>(f: impl FnOnce(&mut JNIEnv, &JObject) -> jni::errors::Result
     let ctx = ndk_context::android_context();
     let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) }.map_err(|e| e.to_string())?;
     let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
-    let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
-    let out = f(&mut env, &activity);
+    let activity = ACTIVITY.get().ok_or("the activity is not registered")?;
+    let out = f(&mut env, activity.as_obj());
     if env.exception_check().unwrap_or(false) {
-        let _ = env.exception_clear();
-        return Err("the Android call raised an exception".into());
+        let text = describe_exception(&mut env);
+        return Err(text);
     }
     out.map_err(|e| e.to_string())
+}
+
+fn describe_exception(env: &mut JNIEnv) -> String {
+    let Ok(throwable) = env.exception_occurred() else { return "the Android call raised an exception".into() };
+    let _ = env.exception_clear();
+    let text = env
+        .call_method(&throwable, "toString", "()Ljava/lang/String;", &[])
+        .and_then(|v| v.l())
+        .and_then(|o| env.get_string(&JString::from(o)).map(String::from));
+    let _ = env.exception_clear();
+    text.unwrap_or_else(|_| "the Android call raised an exception".into())
 }
 
 fn optional_string(env: &mut JNIEnv, value: JObject) -> jni::errors::Result<Option<String>> {

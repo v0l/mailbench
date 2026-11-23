@@ -9,6 +9,7 @@ All notable changes to mailbench are listed here. The format follows
 ### Added
 - Release builds for Linux (tar.gz and deb), macOS (ad-hoc signed dmg) and Windows (zip and msi), each with the CLI and the agent skill.
 - Update checker in settings, reading GitHub releases.
+- Android: attach files and save attachments through the system document picker, and new-mail notifications from a foreground sync service with a per-account switch.
 
 ## [0.1.0] - 2026-11-19
 
