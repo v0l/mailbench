@@ -97,7 +97,7 @@ impl PageState {
 
     pub fn open_section(&mut self, section: Section) {
         self.section = section;
-        self.level = if self.narrow { Level::Page } else { Level::Sections };
+        self.level = Level::Page;
     }
 
     pub fn select_account(&mut self, index: usize) {
@@ -148,8 +148,9 @@ impl PageState {
 
     fn step(&mut self, delta: i32) {
         let bump = |i: usize, len: usize| (i as i32 + delta).clamp(0, len.max(1) as i32 - 1) as usize;
+        let walking_sections = self.level == Level::Sections || (!self.narrow && self.level == Level::Page && self.section != Section::Accounts);
         match self.level {
-            Level::Sections => {
+            _ if walking_sections => {
                 let at = Section::ALL.iter().position(|s| *s == self.section).unwrap_or(0);
                 self.section = Section::ALL[bump(at, Section::ALL.len())];
             }

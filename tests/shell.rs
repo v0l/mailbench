@@ -596,6 +596,8 @@ fn removing_an_account_in_settings_deletes_its_synced_data() {
         s.app().is_some_and(|a| a.store.accounts().iter().all(|x| x.sync == ms::SyncState::Idle))
     });
     h.state_mut().1.open_settings();
+    h.state_mut().1.settings_form().unwrap().page.open_section(mailbench::settings_page::Section::Accounts);
+    h.state_mut().1.settings_form().unwrap().page.tab = mailbench::settings_page::Tab::Danger;
     h.run();
     h.run();
     h.run();
@@ -606,7 +608,7 @@ fn removing_an_account_in_settings_deletes_its_synced_data() {
     h.run();
     h.run();
     h.get_by_label_contains("deletes the mail synced from this account");
-    h.get_by_label("remove").click();
+    h.get_all_by_label("remove").last().unwrap().click();
     h.run();
     h.run();
     assert_eq!(h.state().1.screen_name(), "add account");
@@ -651,6 +653,9 @@ fn keys_panel_fits_at_phone_width() {
     h.run();
     h.run();
     h.state_mut().1.open_settings();
+    h.state_mut().1.settings_form().unwrap().page.open_section(mailbench::settings_page::Section::Security);
+    h.run();
+    h.run();
     h.run();
     {
         let form = h.state_mut().1.settings_form().unwrap();
@@ -855,6 +860,9 @@ fn two_nostr_accounts_added_in_the_form_get_distinct_names_and_a_profile_fills_d
             assert_eq!(f.drafts[0].name, "carol");
             assert_eq!(f.drafts[0].display_name, "Carol B");
         }
+        h.state_mut().1.settings_form().unwrap().page.open_section(mailbench::settings_page::Section::Accounts);
+        h.run();
+        h.run();
         h.get_by_label("add account").hover();
         h.run();
         h.get_by_label("add account").click();

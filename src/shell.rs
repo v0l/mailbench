@@ -1276,6 +1276,13 @@ impl Shell {
     pub fn show(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         self.ctx = Some(ctx.clone());
+        if self.settings.is_some() && matches!(self.screen, Screen::Main(_) | Screen::Add(..)) {
+            if let Screen::Main(main) = &mut self.screen {
+                main.app.apply_theme(&ctx);
+            }
+            self.settings_ui(ui);
+            return;
+        }
         match &mut self.screen {
             Screen::First(form) => {
                 if form.show(ui) {
@@ -1303,14 +1310,9 @@ impl Shell {
                 }
             },
             Screen::Main(main) => {
-                if self.settings.is_some() {
-                    main.app.apply_theme(&ctx);
-                    self.settings_ui(ui);
-                } else {
-                    main.app.show(ui);
-                    if std::mem::take(&mut main.app.settings_requested) {
-                        self.open_settings();
-                    }
+                main.app.show(ui);
+                if std::mem::take(&mut main.app.settings_requested) {
+                    self.open_settings();
                 }
             }
         }
