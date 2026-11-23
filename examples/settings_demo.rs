@@ -49,12 +49,20 @@ struct Demo {
     account: usize,
     edit: Option<String>,
     frames: u32,
+    comma: bool,
     quit_after: u32,
 }
 
 impl eframe::App for Demo {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        let key = |k: egui::Key| egui::Event::Key { key: k, physical_key: Some(k), pressed: true, repeat: false, modifiers: Default::default() };
+        if self.comma && self.frames == 20 {
+            raw.events.push(key(egui::Key::Comma));
+        }
+        if self.comma && self.frames == 200 {
+            raw.events.push(key(egui::Key::Escape));
+        }
         if self.frames == 20 {
             if let Some(text) = self.edit.clone() {
                 if let Some(f) = self.shell.settings_form() {
@@ -77,7 +85,7 @@ impl eframe::App for Demo {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.frames += 1;
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
-        if self.frames == 5 {
+        if self.frames == 5 && !self.comma {
             self.shell.open_settings();
         }
         if self.frames == 8 {
@@ -127,7 +135,7 @@ fn main() -> eframe::Result {
             mailbench::kit::setup(&cc.egui_ctx);
             let env = Env { net: std::sync::Arc::new(mailbench::autodetect::Live), opener: std::sync::Arc::new(|_| {}) };
             let shell = Shell::new(dir, Rc::new(kc), env, Some(mailbench::store::KdfParams::fast()));
-            Ok(Box::new(Demo { shell, section, tab, account, edit, frames: 0, quit_after }))
+            Ok(Box::new(Demo { shell, section, tab, account, edit, frames: 0, comma: std::env::var("COMMA").is_ok(), quit_after }))
         }),
     )
 }

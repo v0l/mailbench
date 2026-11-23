@@ -1,6 +1,10 @@
 use super::*;
 use crate::kit::{body, dot, put, put_right, selection};
 
+fn shown_name(d: &AccountConfig) -> &str {
+    if d.name.trim().is_empty() { &d.address } else { &d.name }
+}
+
 fn on_off(on: bool) -> &'static str {
     if on { "on" } else { "off" }
 }
@@ -243,7 +247,7 @@ impl SettingsForm {
             let p = ui.painter();
             dot(p, egui::pos2(rect.left() + 14.0, rect.center().y - 7.0), tint);
             let text_w = (rect.width() - 36.0 - 84.0).max(40.0);
-            put(p, rect.left() + 28.0, text_w, rect.center().y - 8.0, &d.name, body(13.5), if on { VALUE } else { LEGEND });
+            put(p, rect.left() + 28.0, text_w, rect.center().y - 8.0, shown_name(d), body(13.5), if on { VALUE } else { LEGEND });
             put(p, rect.left() + 28.0, text_w, rect.center().y + 9.0, &d.address, body(11.0), LEGEND);
             put_right(p, rect.right() - 8.0, rect.center().y - 8.0, kind_of(d), legend_font(10.0), VALUE);
             let second = if unread > 0 { format!("{unread} unread") } else { state.to_string() };
@@ -280,7 +284,7 @@ impl SettingsForm {
         let info = self.info_of(&id).cloned();
         let (state, tint) = state_of(info.as_ref());
         ui.horizontal_wrapped(|ui| {
-            Line::new().value(self.drafts[i].name.clone()).size(16.0).show(ui);
+            Line::new().value(shown_name(&self.drafts[i]).to_string()).size(16.0).show(ui);
             chip(ui, kind_of(&self.drafts[i]), TRACE, true);
             chip(ui, state, tint, true);
         });
