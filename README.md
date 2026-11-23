@@ -34,6 +34,10 @@ mailbench archive|flag|mark-read|unread <id>...
 
 The CLI opens the same encrypted store as the app (WAL, so both can run at once). It unlocks with the keychain, then `MAILBENCH_PASSWORD`, then a prompt. The agent skill is in `skills/mailbench/SKILL.md`.
 
+## Agents over MCP
+
+mailbench can run a local MCP server (Streamable HTTP, 127.0.0.1 only, bearer token) so an agent can search, read and draft mail. It is off by default, you choose which accounts agents may see, and agents only create drafts unless you allow sending per account. Turn it on in Settings, agents, or run `mailbench mcp serve`. See [docs/mcp.md](docs/mcp.md).
+
 ## Keys
 
 | key | does |
