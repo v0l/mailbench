@@ -328,6 +328,23 @@ fn phone_width_cards_and_buttons_are_tappable() {
     }
 }
 
+#[test]
+fn n_and_p_step_through_the_message_list_while_the_reader_has_focus() {
+    let mut h = harness_sized(FakeStore::concept(), egui::vec2(1280.0, 1000.0));
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    assert!(h.state().1.reader_focus);
+    let start = h.state().1.selected;
+    h.key_press(egui::Key::N);
+    h.run();
+    assert_eq!(h.state().1.selected, start + 1);
+    assert!(h.state().1.reader_focus);
+    h.key_press(egui::Key::P);
+    h.run();
+    assert_eq!(h.state().1.selected, start);
+}
+
 fn shot(h: &mut Harness<'static, (bool, App)>, name: &str) {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/screens");
     let img = h.render().expect("render");
