@@ -44,7 +44,13 @@ impl SyncSink for LockedSink {
         self.with(|s| s.sync_token(folder))
     }
     fn put_folders(&mut self, folders: &[Folder]) -> Result<()> {
-        self.with(|s| s.put_folders(folders))
+        let changed = self.with(|s| Ok(s.folders()? != folders))?;
+        self.with(|s| s.put_folders(folders))?;
+        if changed {
+            self.last_refresh = Instant::now();
+            self.shared.refresh();
+        }
+        Ok(())
     }
     fn reset_folder(&mut self, folder: &str) -> Result<()> {
         self.fresh = true;
