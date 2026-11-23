@@ -106,7 +106,7 @@ impl App {
                     if let Some(msg) = msg {
                         let parent = if i > 0 { self.store.get(v.thread[i - 1].summary.id).ok() } else { None };
                         let inner = egui::Frame::NONE.inner_margin(Margin { left: 10, right: 4, top: 4, bottom: 8 }).show(ui, |ui| {
-                            self.card_body(ui, msg, parent.as_ref(), focused, actions);
+                            ui.push_id(("card-body", id.0), |ui| self.card_body(ui, msg, parent.as_ref(), focused, actions));
                         });
                         body_rect = r.rect.union(inner.response.rect);
                         if ui.is_rect_visible(inner.response.rect) {
