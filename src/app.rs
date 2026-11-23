@@ -699,6 +699,10 @@ impl App {
         if ctx.egui_wants_keyboard_input() && !ctx.memory(|m| m.focused()).is_some_and(|f| f == egui::Id::new(PLAIN_BODY)) {
             return Vec::new();
         }
+        if Self::pressed(ctx, K::Comma) {
+            self.settings_requested = true;
+            return Vec::new();
+        }
         let plain = ctx.input(|i| !i.modifiers.shift);
         let keys = &self.prefs.keys;
         let table: [(K, Action); 17] = [
