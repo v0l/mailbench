@@ -1488,6 +1488,15 @@ impl App {
             };
             let count = self.marked.len().to_string();
             let mut items: Vec<(String, String)> = Vec::new();
+            if self.draft.is_some() {
+                let send = if cfg!(target_os = "macos") { "Cmd Enter" } else { "Ctrl Enter" };
+                items.push((send.to_string(), "send".into()));
+                items.push(("Enter".to_string(), "new line".into()));
+                items.push(("Tab".to_string(), "next field".into()));
+                let items: Vec<(&str, &str)> = items.iter().map(|(k, a)| (k.as_str(), a.as_str())).collect();
+                keycap_bar(ui, &items, Some((text, tint)));
+                return;
+            }
             if !self.marked.is_empty() {
                 items.push((count, "selected".into()));
             }
@@ -2484,6 +2493,9 @@ impl App {
         let store: &dyn MailStore = self.store.as_ref();
         let Some(draft) = self.draft.as_mut() else { return };
         let (mut send, mut save, mut discard, mut attach) = (false, false, false, false);
+        if draft.has_recipient() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter)) {
+            send = true;
+        }
         let r = egui::Modal::new(egui::Id::new("compose"))
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .show(ctx, |ui| {
@@ -2539,7 +2551,7 @@ impl App {
                 });
                 form_footer(ui, |ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        send = ui.add(Key::new("send").solid(READOUT).min_width(100.0).enabled(draft.has_recipient())).clicked();
+                        send |= ui.add(Key::new("send").solid(READOUT).min_width(100.0).enabled(draft.has_recipient())).clicked();
                         save = ui.add(Key::new("save draft").outline(VALUE).min_width(100.0)).clicked();
                         discard = ui.add(Key::new("discard").outline(FAULT).min_width(90.0)).clicked();
                     });

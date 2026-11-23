@@ -116,6 +116,74 @@ fn composer_fits_at_phone_width() {
     img.save(out_dir().join("phone-composer.png")).unwrap();
 }
 
+fn open_blank_composer(h: &mut Harness<'static, (bool, App)>) {
+    h.key_press(egui::Key::C);
+    h.run();
+    h.run();
+    assert!(h.state().1.draft.is_some());
+}
+
+fn focus_body(h: &mut Harness<'static, (bool, App)>) {
+    h.get_by_label("message body").click();
+    h.run();
+}
+
+#[test]
+fn enter_in_the_body_inserts_a_newline() {
+    let mut h = harness(FakeStore::concept());
+    open_blank_composer(&mut h);
+    focus_body(&mut h);
+    h.get_by_label("message body").type_text("a");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.get_by_label("message body").type_text("b");
+    h.run();
+    assert_eq!(h.state().1.draft.as_ref().unwrap().body, "a\nb");
+}
+
+#[test]
+fn ctrl_enter_sends_and_does_not_insert_a_newline() {
+    let mut h = harness(FakeStore::concept());
+    open_blank_composer(&mut h);
+    h.state_mut().1.draft.as_mut().unwrap().to = "bob <bob@example.test>".into();
+    focus_body(&mut h);
+    h.get_by_label("message body").type_text("hello");
+    h.run();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Enter);
+    h.run();
+    h.run();
+    let app = &h.state().1;
+    assert!(app.draft.is_none());
+    assert_eq!(app.store.list(&Query::new(Folder::Sent), 0, 10).items.len(), 1);
+}
+
+#[test]
+fn ctrl_enter_without_a_recipient_does_not_insert_a_newline() {
+    let mut h = harness(FakeStore::concept());
+    open_blank_composer(&mut h);
+    focus_body(&mut h);
+    h.get_by_label("message body").type_text("hello");
+    h.run();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Enter);
+    h.run();
+    h.run();
+    assert_eq!(h.state().1.draft.as_ref().unwrap().body, "hello");
+}
+
+#[test]
+fn tab_in_the_body_does_not_insert_a_tab() {
+    let mut h = harness(FakeStore::concept());
+    open_blank_composer(&mut h);
+    focus_body(&mut h);
+    h.get_by_label("message body").type_text("x");
+    h.run();
+    h.key_press(egui::Key::Tab);
+    h.run();
+    h.run();
+    assert_eq!(h.state().1.draft.as_ref().unwrap().body, "x");
+}
+
 fn inbox_ids(app: &App) -> Vec<MessageId> {
     app.store.list(&Query::new(Folder::Inbox), 0, 100_000).items.iter().map(|s| s.id).collect()
 }

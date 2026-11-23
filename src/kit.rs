@@ -674,8 +674,7 @@ pub fn body_editor(ui: &mut Ui, text: &mut String, rows: usize) {
                         .font(body(BODY_SIZE))
                         .text_color(VALUE)
                         .desired_rows(rows)
-                        .desired_width(ui.available_width())
-                        .return_key(None),
+                        .desired_width(ui.available_width()),
                 );
                 ui.ctx().accesskit_node_builder(r.id, |node| node.set_label("message body"));
             });
