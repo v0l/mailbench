@@ -477,6 +477,34 @@ fn jmap_form_fits_at_phone_width() {
     img.save(out_dir().join("phone-jmap-add-account-tested.png")).unwrap();
 }
 
+#[test]
+fn nostr_form_with_a_name_field_fits_both_sizes() {
+    for (w, h_px, file) in [(1280.0, 800.0, "nostr-add-account.png"), (390.0, 844.0, "phone-nostr-add-account.png")] {
+        let d = dir();
+        let mut h = harness_sized(
+            Shell::new(d.path().to_path_buf(), Rc::new(MemKeychain::default()), env(FixtureNet::default()), Some(KdfParams::fast())),
+            egui::vec2(w, h_px),
+        );
+        h.run();
+        h.run();
+        h.get_by_label("continue").click();
+        h.run();
+        h.run();
+        {
+            let f = h.state_mut().1.add_form().unwrap();
+            f.nostr = true;
+            f.password = "05".repeat(32);
+            f.name = "alice".into();
+        }
+        h.run();
+        h.run();
+        let key = h.get_by_label("test connection").rect();
+        assert!(key.left() >= 0.0 && key.right() <= w, "test connection at {key:?}");
+        let img = h.render().expect("render");
+        img.save(out_dir().join(file)).unwrap();
+    }
+}
+
 fn setup_greenmail_account(h: &mut Harness<'static, State>, name: &str) {
     h.get_by_label("continue").click();
     h.run();
