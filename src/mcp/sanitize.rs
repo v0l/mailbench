@@ -22,7 +22,21 @@ pub fn strip_hidden(text: &str) -> String {
 }
 
 pub fn display(text: &str) -> String {
-    strip_hidden(text).chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>().trim().to_string()
+    let flat: String = strip_hidden(text).chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    flat.trim().replace("<<<", "< < <").replace(">>>", "> > >")
+}
+
+pub fn capped(text: &str, max: usize) -> String {
+    let flat = display(text);
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    let cut: String = flat.chars().take(max.saturating_sub(3)).collect();
+    format!("{}...", cut.trim_end())
+}
+
+pub fn cell(text: &str, max: usize) -> String {
+    capped(text, max).replace('|', "/")
 }
 
 pub fn nonce() -> String {

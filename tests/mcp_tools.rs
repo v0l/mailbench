@@ -27,6 +27,7 @@ pub fn message(id: u64, account: usize, folder: Folder, from: &str, subject: &st
             account,
             thread: 1,
             remote: false,
+            date: None,
         },
         folder,
         from_address: format!("{}@sender.test", from.to_lowercase().replace(' ', ".")),

@@ -1410,6 +1410,7 @@ fn summary_from(e: &Entry, now: i64, remote: bool) -> Summary {
         attachments: e.attachments,
         account: e.account,
         thread: e.count,
+        date: Some(e.date).filter(|d| *d > 0),
     }
 }
 

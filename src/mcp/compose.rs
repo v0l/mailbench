@@ -129,9 +129,18 @@ impl MailTools {
         drop(store);
         let all: Vec<String> = addresses_of(&to).into_iter().chain(addresses_of(&cc)).chain(addresses_of(&bcc)).collect();
         self.audit("create_draft", index, &all, &subject, &mid, "drafted");
+        let shown_to = to.iter().map(|r| sanitize::cell(r, 200)).collect::<Vec<_>>().join(", ");
+        let text = format!(
+            "Draft {} created in the user's Drafts folder. Nothing was sent.\n\n{} | {} | {} | {}",
+            id_text(id),
+            id_text(id),
+            self.accounts[index].id,
+            shown_to,
+            sanitize::cell(&subject, 160)
+        );
         Ok(text_result(
-            &format!("Draft {} created in the user's Drafts folder. Nothing was sent.", id_text(id)),
-            json!({"draft_id": id_text(id), "account": self.accounts[index].id, "status": "drafted", "recipients": count}),
+            &text,
+            json!({"draft_id": id_text(id), "account": self.accounts[index].id, "status": "drafted", "recipients": count, "to": to, "subject": subject}),
         ))
     }
 
@@ -200,7 +209,7 @@ impl MailTools {
             drop(store);
             self.audit("send_message", index, &all, &out.subject, &mid, "queued");
             return Ok(text_result(
-                "queued for the user's approval. The draft is in the user's Drafts folder; the user presses Ctrl+Enter to send it.",
+                &format!("queued for the user's approval\n\nstatus queued | draft {} | account {}. The draft is in the user's Drafts folder; the user presses Ctrl+Enter to send it.", id_text(id), account.id),
                 json!({"status": "queued", "draft_id": id_text(id), "account": account.id}),
             ));
         }
@@ -220,7 +229,7 @@ impl MailTools {
         self.sends.lock().unwrap_or_else(|e| e.into_inner()).push((index, (self.clock)()));
         self.audit("send_message", index, &all, &subject, &mid, "sent");
         Ok(text_result(
-            &format!("Sent from {}. A copy is in Sent.", account.address),
+            &format!("Sent from {}\n\nstatus sent | message id {} | sent copy {}. A copy is in Sent.", account.address, sanitize::cell(&mid, 200), id_text(sent_id)),
             json!({"status": "sent", "message_id": mid, "sent_id": id_text(sent_id), "account": account.id}),
         ))
     }

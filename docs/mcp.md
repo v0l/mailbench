@@ -66,6 +66,8 @@ Marker lookalikes inside a body are broken up, and zero width and bidi control c
 
 `list_accounts`, `list_folders`, `search_messages` (the app's search syntax, `cursor` pagination, `limit` up to 50), `get_message`, `get_thread`, `get_attachment` (text and images up to 1 MB), `mark_read`, `flag`, `move_messages` (inbox, archive, trash, junk or your own folders), `create_draft`, `send_message`. Resources: `mailbench://message/{id}` and `mailbench://thread/{id}`. Message ids are stable hex strings.
 
+Every result carries the full data in `content[0].text` and the same data in `structuredContent`. The text starts with a one line summary, a blank line, then one line per item with the id as the first token, fields separated by ` | `. `search_messages` lines are `id | date (UTC, ISO 8601, or "no date") | from | subject | folder | flags | snippet`. Text over 20 KB is cut with a last line saying how many items were omitted and which `cursor` to pass next.
+
 ## Client configuration
 
 Claude Code and other clients that accept an HTTP server:

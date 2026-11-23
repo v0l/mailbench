@@ -1,6 +1,6 @@
 use super::prefs::AgentPrefs;
 use super::sanitize;
-use super::tools::{Tools, definition, error_result, text_result};
+use super::tools::{Tools, definition, error_result, iso_date, text_result, with_items};
 use crate::mailstore::{Filter, FlagChange, Folder, MailStore, Message, MessageId, Query, StoreError, Summary};
 use base64::Engine;
 use serde_json::{Value, json};
@@ -15,6 +15,35 @@ pub const MAX_IDS: usize = 100;
 const BODY_WAIT: Duration = Duration::from_secs(15);
 const SEARCH_WAIT: Duration = Duration::from_secs(20);
 const THREAD_MAX: usize = 50;
+const SNIPPET_CHARS: usize = 120;
+const SNIPPET_WAIT: Duration = Duration::from_secs(4);
+
+fn flag_words(unread: &Value, flagged: &Value, attachments: &Value) -> String {
+    let mut words = Vec::new();
+    words.push(if unread == &json!(true) { "unread" } else { "read" });
+    if flagged == &json!(true) {
+        words.push("flagged");
+    }
+    if attachments == &json!(true) {
+        words.push("attachments");
+    }
+    words.join(" ")
+}
+
+fn listing_line(m: &Value) -> String {
+    let field = |k: &str, max: usize| sanitize::cell(m[k].as_str().unwrap_or_default(), max);
+    let line = format!(
+        "{} | {} | {} | {} | {} | {} | {}",
+        field("id", 40),
+        m["date"].as_str().unwrap_or("no date"),
+        field("from", 80),
+        field("subject", 300),
+        field("folder", 60),
+        flag_words(&m["unread"], &m["flagged"], &m["has_attachments"]),
+        field("snippet", SNIPPET_CHARS),
+    );
+    line.trim_end_matches([' ', '|']).to_string()
+}
 
 pub struct AccountRef {
     pub id: String,
@@ -143,29 +172,57 @@ impl MailTools {
         self.accounts.get(index).map(|a| a.id.clone()).unwrap_or_default()
     }
 
-    fn summary_json(&self, s: &Summary, folder: &str) -> Value {
+    fn summary_json(&self, s: &Summary, folder: &str, snippet: &str) -> Value {
         json!({
             "id": id_text(s.id),
             "from": sanitize::display(&s.from),
             "subject": sanitize::display(&s.subject),
             "when": s.when,
+            "date": iso_date(s.date),
             "unread": s.unread,
             "flagged": s.flagged,
             "has_attachments": s.attachments,
             "account": self.account_id(s.account),
             "folder": folder,
             "thread_size": s.thread,
+            "snippet": snippet,
         })
     }
 
+    fn snippet_of(&self, store: &dyn MailStore, id: MessageId) -> String {
+        match store.get(id) {
+            Ok(m) if m.body_state == crate::mailstore::BodyState::Ready && m.folder != Folder::Junk => sanitize::capped(&crate::thread::snippet(&m.paragraphs), SNIPPET_CHARS),
+            _ => String::new(),
+        }
+    }
+
     fn list_accounts(&self, prefs: &AgentPrefs) -> Value {
-        let items: Vec<Value> = self
-            .accounts
+        let store = self.store();
+        let allowed: Vec<(usize, &AccountRef)> = self.accounts.iter().enumerate().filter(|(_, a)| prefs.allows(&a.id)).collect();
+        let items: Vec<Value> = allowed
             .iter()
-            .filter(|a| prefs.allows(&a.id))
-            .map(|a| json!({"id": a.id, "name": a.name, "address": a.address, "kind": if a.nostr { "nostr" } else { "mail" }, "can_send": prefs.may_send(&a.id, a.nostr)}))
+            .map(|(i, a)| {
+                let tree = store.tree().into_iter().filter(|t| t.account == *i && t.selectable).count();
+                let folders = if tree > 0 { tree } else { store.account_folders(*i).len() };
+                json!({"id": a.id, "name": a.name, "address": a.address, "kind": if a.nostr { "nostr" } else { "mail" }, "can_send": prefs.may_send(&a.id, a.nostr), "folders": folders})
+            })
             .collect();
-        let text = format!("{} accounts agents may use", items.len());
+        drop(store);
+        let lines: Vec<String> = items
+            .iter()
+            .map(|a| {
+                format!(
+                    "{} | {} | {} | {} folders | {}",
+                    sanitize::cell(a["id"].as_str().unwrap_or_default(), 80),
+                    sanitize::cell(a["name"].as_str().unwrap_or_default(), 80),
+                    sanitize::cell(a["address"].as_str().unwrap_or_default(), 120),
+                    a["folders"],
+                    if a["can_send"] == json!(true) { "send allowed" } else { "send not allowed" }
+                )
+            })
+            .collect();
+        let summary = format!("{} accounts agents may use", items.len());
+        let text = with_items(&summary, &lines, "\n", |shown, left| format!("... {left} more accounts omitted after {shown}"));
         text_result(&text, json!({"accounts": items}))
     }
 
@@ -178,7 +235,19 @@ impl MailTools {
         } else {
             tree.iter().map(|t| json!({"name": t.folder.name(), "path": t.path, "unread": t.unread, "total": t.total})).collect()
         };
-        let text = serde_json::to_string(&folders).unwrap_or_default();
+        let roles: Vec<bool> = if tree.is_empty() { store.account_folders(index).iter().map(|f| !matches!(f.folder, Folder::Other(..))).collect() } else { tree.iter().map(|t| !matches!(t.folder, Folder::Other(..))).collect() };
+        drop(store);
+        let lines: Vec<String> = folders
+            .iter()
+            .zip(roles)
+            .map(|(f, has_role)| {
+                let name = f["name"].as_str().unwrap_or_default();
+                let path = f["path"].as_str().filter(|p| *p != name).map(|p| format!(" | path {}", sanitize::cell(p, 200))).unwrap_or_default();
+                format!("{} | {} | {} unread | {} total{path}", sanitize::cell(name, 200), if has_role { sanitize::cell(name, 40) } else { "-".into() }, f["unread"], f["total"])
+            })
+            .collect();
+        let summary = format!("{} folders in {}", folders.len(), self.accounts[index].name);
+        let text = with_items(&summary, &lines, "\n", |shown, left| format!("... {left} more folders omitted after {shown}"));
         Ok(text_result(&text, json!({"account": self.account_id(index), "folders": folders})))
     }
 
@@ -215,22 +284,34 @@ impl MailTools {
         };
         let store = self.store();
         let mut seen = std::collections::HashSet::new();
-        let mut all: Vec<Value> = Vec::new();
+        let mut all: Vec<Summary> = Vec::new();
+        let mut labels: Vec<String> = Vec::new();
         for (folder, label, extra) in self.search_folders(str_arg(args, "folder")) {
             let q = Query { folder, filter, text: format!("{text}{extra}").trim().to_string(), account };
             store.list(&q, 0, 1000);
             until(SEARCH_WAIT, || !store.searching(&q));
             for s in store.list(&q, 0, 1000).items {
                 if self.allowed(prefs, s.account) && seen.insert(s.id) {
-                    all.push(self.summary_json(&s, &label));
+                    all.push(s);
+                    labels.push(label.clone());
                 }
             }
         }
+        let wanted: Vec<MessageId> = all.iter().skip(offset).take(limit).map(|s| s.id).collect();
+        until(SNIPPET_WAIT, || wanted.iter().all(|id| store.get(*id).map(|m| m.body_state != crate::mailstore::BodyState::Loading).unwrap_or(true)));
         let total = all.len();
-        let page: Vec<Value> = all.into_iter().skip(offset).take(limit).collect();
+        let page: Vec<Value> = all
+            .iter()
+            .zip(&labels)
+            .skip(offset)
+            .take(limit)
+            .map(|(s, label)| self.summary_json(s, label, &self.snippet_of(&**store, s.id)))
+            .collect();
         let next = (offset + page.len() < total).then(|| format!("o{}", offset + page.len()));
         let summary = format!("{} of {total} messages", page.len());
-        Ok(text_result(&summary, json!({"messages": page, "total": total, "nextCursor": next})))
+        let lines: Vec<String> = page.iter().map(listing_line).collect();
+        let text = with_items(&summary, &lines, "\n", |shown, left| format!("... {left} more items omitted, pass cursor o{} to continue", offset + shown));
+        Ok(text_result(&text, json!({"messages": page, "total": total, "nextCursor": next})))
     }
 
     fn attachments_json(&self, m: &Message) -> Vec<Value> {
@@ -272,20 +353,28 @@ impl MailTools {
     }
 
     fn message_text(v: &Value) -> String {
+        let attachments = v["attachments"].as_array().filter(|a| !a.is_empty()).map(|list| {
+            let lines: Vec<String> = list.iter().map(|a| format!("{} | {} | {} | {}", a["id"].as_str().unwrap_or_default(), a["name"].as_str().unwrap_or_default(), a["size"].as_str().unwrap_or_default(), a["mime"].as_str().unwrap_or_default())).collect();
+            format!("\n\nAttachments (id | name | size | type):\n{}", lines.join("\n"))
+        });
         let head = format!(
-            "From: {} <{}>\nTo: {}\nSubject: {}\nDate: {}\nFolder: {}\n",
+            "Id: {}\nFrom: {} <{}>\nTo: {}\nCc: {}\nSubject: {}\nDate: {}\nFolder: {}\nStatus: {}\n",
+            v["id"].as_str().unwrap_or_default(),
             v["from"].as_str().unwrap_or_default(),
             v["from_address"].as_str().unwrap_or_default(),
             v["to"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default(),
+            v["cc"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default(),
             v["subject"].as_str().unwrap_or_default(),
             v["sent"].as_str().unwrap_or_default(),
             v["folder"].as_str().unwrap_or_default(),
+            flag_words(&v["unread"], &v["flagged"], &json!(!v["attachments"].as_array().map(Vec::is_empty).unwrap_or(true))),
         );
-        match (v["text"].as_str(), v["withheld"].as_str()) {
+        let body = match (v["text"].as_str(), v["withheld"].as_str()) {
             (Some(t), _) => format!("{head}\n{t}"),
             (None, Some(w)) => format!("{head}\n{w}"),
             _ => head,
-        }
+        };
+        format!("{body}{}", attachments.unwrap_or_default())
     }
 
     pub(super) fn read_message(&self, prefs: &AgentPrefs, args: &Value) -> Res<Value> {
@@ -294,7 +383,8 @@ impl MailTools {
         let include_junk = bool_arg(args, "include_junk");
         let m = if m.folder == Folder::Junk && !include_junk { m } else { self.ready(id, m)? };
         let v = self.render(&m, id, bool_arg(args, "include_html"), include_junk, &sanitize::nonce());
-        Ok(text_result(&Self::message_text(&v), v))
+        let text = format!("Message {} in {}\n\n{}", id_text(id), m.folder.name(), Self::message_text(&v));
+        Ok(text_result(&text, v))
     }
 
     pub(super) fn read_thread(&self, prefs: &AgentPrefs, args: &Value) -> Res<Value> {
@@ -303,7 +393,7 @@ impl MailTools {
         let items = self.store().thread(first.summary.id);
         let nonce = sanitize::nonce();
         let mut messages = Vec::new();
-        let mut text = String::new();
+        let mut parts: Vec<String> = Vec::new();
         for item in items.iter().take(THREAD_MAX) {
             if !self.allowed(prefs, item.summary.account) {
                 continue;
@@ -312,11 +402,13 @@ impl MailTools {
             let Ok(m) = self.store().get(id) else { continue };
             let m = if m.folder == Folder::Junk && !include_junk { m } else { self.ready(id, m.clone()).unwrap_or(m) };
             let v = self.render(&m, id, false, include_junk, &nonce);
-            text.push_str(&Self::message_text(&v));
-            text.push_str("\n\n");
+            parts.push(Self::message_text(&v));
             messages.push(v);
         }
-        Ok(text_result(text.trim_end(), json!({"messages": messages, "truncated": items.len() > THREAD_MAX})))
+        let truncated = items.len() > THREAD_MAX;
+        let summary = format!("{} messages in the thread of {}", messages.len(), id_text(first.summary.id));
+        let text = with_items(&summary, &parts, "\n\n", |shown, left| format!("... {left} more messages omitted after {shown}, fetch them with get_message"));
+        Ok(text_result(&text, json!({"messages": messages, "truncated": truncated})))
     }
 
     fn attachment(&self, prefs: &AgentPrefs, args: &Value) -> Res<Value> {
@@ -334,7 +426,7 @@ impl MailTools {
         let name = sanitize::display(&a.name);
         if mime.starts_with("image/") && mime != "image/svg+xml" {
             let data = base64::engine::general_purpose::STANDARD.encode(a.data.as_slice());
-            let mut r = text_result(&format!("image attachment {name} ({} bytes)", a.data.len()), json!({"name": name, "mime": mime, "size": a.data.len(), "encoding": "base64", "data": data}));
+            let mut r = text_result(&format!("image attachment {name} (attachment {which} of message {}, {} bytes, {mime})", id_text(m.summary.id), a.data.len()), json!({"id": id_text(m.summary.id), "attachment_id": which.to_string(), "name": name, "mime": mime, "size": a.data.len(), "encoding": "base64", "data": data}));
             r["content"].as_array_mut().map(|c| c.push(json!({"type": "image", "data": data, "mimeType": mime})));
             return Ok(r);
         }
@@ -345,7 +437,8 @@ impl MailTools {
         let content = String::from_utf8(a.data.to_vec()).map_err(|_| "the attachment is not valid UTF-8 text".to_string())?;
         let from = format!("{} <{}>", m.summary.from, m.from_address);
         let wrapped = sanitize::block(&from, &content, &sanitize::nonce());
-        Ok(text_result(&wrapped, json!({"name": name, "mime": mime, "size": a.data.len(), "encoding": "text", "text": wrapped})))
+        let text = format!("Attachment {which} of message {}: {name} ({mime}, {} bytes)\n\n{wrapped}", id_text(m.summary.id), a.data.len());
+        Ok(text_result(&text, json!({"id": id_text(m.summary.id), "attachment_id": which.to_string(), "name": name, "mime": mime, "size": a.data.len(), "encoding": "text", "text": wrapped})))
     }
 
     fn check_all(&self, prefs: &AgentPrefs, ids: &[MessageId]) -> Res<Vec<Message>> {
@@ -362,7 +455,15 @@ impl MailTools {
         self.check_all(prefs, &ids)?;
         let change = if key == "read" { FlagChange { unread: Some(!value), flagged: None } } else { FlagChange { unread: None, flagged: Some(value) } };
         self.store().bulk_flags(&ids, change).map_err(store_error)?;
-        Ok(text_result(&format!("updated {} messages", ids.len()), json!({"updated": ids.iter().map(|i| id_text(*i)).collect::<Vec<_>>(), key: value})))
+        let list = ids.iter().map(|i| id_text(*i)).collect::<Vec<_>>();
+        let what = match (key, value) {
+            ("read", true) => "marked read",
+            ("read", false) => "marked unread",
+            (_, true) => "flagged",
+            (_, false) => "unflagged",
+        };
+        let text = format!("{what} {} messages\n\n{}", ids.len(), list.join("\n"));
+        Ok(text_result(&text, json!({"updated": list, key: value})))
     }
 
     fn move_messages(&self, prefs: &AgentPrefs, args: &Value) -> Res<Value> {
@@ -377,7 +478,9 @@ impl MailTools {
         for (m, target) in messages.iter().zip(targets) {
             store.move_to(m.summary.id, target).map_err(store_error)?;
         }
-        Ok(text_result(&format!("moved {} messages to {name}", ids.len()), json!({"moved": ids.iter().map(|i| id_text(*i)).collect::<Vec<_>>(), "folder": name})))
+        let list = ids.iter().map(|i| id_text(*i)).collect::<Vec<_>>();
+        let text = format!("moved {} messages to {name}\n\n{}", ids.len(), list.join("\n"));
+        Ok(text_result(&text, json!({"moved": list, "folder": name})))
     }
 
     fn move_target(&self, account: usize, name: &str) -> Res<Folder> {
