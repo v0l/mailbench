@@ -8,6 +8,8 @@ use std::collections::HashSet;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
+mod cards;
+
 const AUTOSAVE: Duration = Duration::from_secs(4);
 
 pub const ROW_H: f32 = 25.0;
@@ -50,6 +52,12 @@ pub enum Action {
     ClearAccount,
     Label(String),
     Expand(MessageId),
+    ToggleCard(MessageId),
+    ToggleCardQuotes(MessageId),
+    ExpandAll,
+    CollapseAll,
+    ListNext,
+    ListPrevious,
     FocusThread(MessageId),
     One(Box<Action>),
     OpenAttachment(usize),
@@ -509,7 +517,6 @@ pub struct App {
     pub draft: Option<Draft>,
     pub notice: Option<String>,
     pub images_loaded: HashSet<MessageId>,
-    pub quotes_open: bool,
     pub headers_open: bool,
     pub rendered_rows: usize,
     pub reader_focus: bool,
@@ -523,13 +530,17 @@ pub struct App {
     search_id: Option<egui::Id>,
     scroll_to_selected: bool,
     go_pending: bool,
-    last_shown: Option<MessageId>,
+    pub cards: crate::thread::OpenCards,
+    pending_focus: Option<MessageId>,
+    scroll_card: Option<MessageId>,
+    base_focus: Option<MessageId>,
+    snippets: std::collections::HashMap<MessageId, String>,
+    on_screen: HashSet<MessageId>,
     last_prefetched: Option<MessageId>,
-    dwell: Option<(MessageId, Instant)>,
-    dwell_done: bool,
+    dwell: std::collections::HashMap<MessageId, Instant>,
+    dwell_skip: HashSet<MessageId>,
     mark_now: bool,
     last_head: Option<MessageId>,
-    pub expanded: Option<MessageId>,
     pub thread_focus: Option<MessageId>,
     pub settings_requested: bool,
     pub allow_open: bool,
@@ -584,7 +595,6 @@ impl App {
             draft: None,
             notice: None,
             images_loaded: HashSet::new(),
-            quotes_open: false,
             headers_open: false,
             rendered_rows: 0,
             reader_focus: false,
@@ -598,13 +608,17 @@ impl App {
             search_id: None,
             scroll_to_selected: false,
             go_pending: false,
-            last_shown: None,
+            cards: Default::default(),
+            pending_focus: None,
+            scroll_card: None,
+            base_focus: None,
+            snippets: Default::default(),
+            on_screen: HashSet::new(),
             last_prefetched: None,
-            dwell: None,
-            dwell_done: false,
+            dwell: Default::default(),
+            dwell_skip: HashSet::new(),
             mark_now: false,
             last_head: None,
-            expanded: None,
             thread_focus: None,
             settings_requested: false,
             allow_open: true,
@@ -650,16 +664,29 @@ impl App {
         let head = self.store.list(&query, self.selected, 1).items.into_iter().next();
         let head_id = head.as_ref().map(|s| s.id);
         if head_id != self.last_head {
-            self.expanded = None;
             self.thread_focus = None;
+            self.dwell.clear();
+            self.dwell_skip.clear();
+            self.base_focus = None;
             self.last_head = head_id;
         }
         let thread = head_id.map(|id| self.store.thread(id)).unwrap_or_default();
+        let ids: Vec<u64> = thread.iter().map(|t| t.summary.id.0).collect();
+        if self.base_focus.is_none_or(|b| !thread.iter().any(|t| t.summary.id == b)) {
+            self.base_focus = thread.iter().rev().find(|t| t.summary.unread).or(thread.last()).map(|t| t.summary.id).or(head_id);
+        }
+        self.cards.reset(head_id.map(|h| h.0), &ids, self.base_focus.map(|b| b.0));
+        if let Some(p) = self.pending_focus.take() {
+            if thread.iter().any(|t| t.summary.id == p) {
+                self.thread_focus = Some(p);
+                self.cards.open_one(p.0);
+                self.scroll_card = Some(p);
+            }
+        }
         let shown = self
-            .expanded
+            .thread_focus
             .filter(|e| thread.iter().any(|t| t.summary.id == *e))
-            .or_else(|| thread.last().map(|t| t.summary.id))
-            .or(head_id);
+            .or(self.base_focus);
         let current = shown.and_then(|id| self.store.get(id).ok());
         if head_id != self.last_prefetched {
             self.last_prefetched = head_id;
@@ -669,11 +696,6 @@ impl App {
                 .filter_map(|n| self.store.list(&query, n, 1).items.first().map(|s| s.id))
                 .collect();
             self.store.prefetch(&around);
-        }
-        let id = current.as_ref().map(|m| m.summary.id);
-        if id != self.last_shown {
-            self.quotes_open = false;
-            self.last_shown = id;
         }
         View { query, counts, total, current, head, thread }
     }
@@ -788,6 +810,20 @@ impl App {
         if plain && Self::pressed(ctx, K::O) {
             out.push(Action::OpenAttachment(0));
         }
+        if self.reader_focus {
+            if Self::pressed(ctx, K::N) {
+                out.push(Action::ListNext);
+            }
+            if Self::pressed(ctx, K::P) {
+                out.push(Action::ListPrevious);
+            }
+            if Self::pressed(ctx, K::Period) {
+                out.push(Action::ExpandAll);
+            }
+            if Self::pressed(ctx, K::Comma) {
+                out.push(Action::CollapseAll);
+            }
+        }
         if !plain && Self::pressed(ctx, K::S) {
             out.push(Action::SaveAllAttachments);
         }
@@ -885,23 +921,30 @@ impl App {
         };
         let Some(m) = &v.current else { return };
         let id = m.summary.id;
-        if self.dwell.map(|(d, _)| d) != Some(id) {
-            self.dwell = Some((id, Instant::now()));
-            self.dwell_done = false;
-        }
-        if self.dwell_done {
+        if self.mark_now {
             self.mark_now = false;
-            return;
-        }
-        let since = self.dwell.map(|(_, t)| t.elapsed()).unwrap_or_default();
-        if self.mark_now || since >= after {
-            self.mark_now = false;
-            self.dwell_done = true;
-            if m.summary.unread {
+            if m.summary.unread && !self.dwell_skip.contains(&id) {
                 let _ = self.store.set_flags(id, FlagChange { unread: Some(false), flagged: None });
             }
-        } else {
-            ctx.request_repaint_after(after - since);
+        }
+        let mut wait: Option<Duration> = None;
+        let visible: Vec<MessageId> = self.on_screen.iter().copied().collect();
+        self.dwell.retain(|k, _| visible.contains(k));
+        for id in visible {
+            let unread = v.thread.iter().find(|t| t.summary.id == id).is_some_and(|t| t.summary.unread);
+            if !unread || self.dwell_skip.contains(&id) {
+                continue;
+            }
+            let since = self.dwell.entry(id).or_insert_with(Instant::now).elapsed();
+            if since >= after {
+                self.dwell.remove(&id);
+                let _ = self.store.set_flags(id, FlagChange { unread: Some(false), flagged: None });
+            } else {
+                wait = Some(wait.map_or(after - since, |w| w.min(after - since)));
+            }
+        }
+        if let Some(w) = wait {
+            ctx.request_repaint_after(w);
         }
     }
 
@@ -924,8 +967,35 @@ impl App {
             };
             match a {
                 Action::One(_) => {}
-                Action::Expand(id) => self.expanded = Some(id),
+                Action::Expand(id) => {
+                    self.cards.open_one(id.0);
+                    self.thread_focus = Some(id);
+                    self.scroll_card = Some(id);
+                }
+                Action::ToggleCard(id) => {
+                    self.cards.toggle(id.0);
+                    self.thread_focus = Some(id);
+                    if self.cards.is_open(id.0) {
+                        self.scroll_card = Some(id);
+                    }
+                }
+                Action::ExpandAll => {
+                    let ids: Vec<u64> = v.thread.iter().map(|t| t.summary.id.0).collect();
+                    self.cards.expand_all(&ids);
+                }
+                Action::CollapseAll => self.cards.collapse_all(),
+                Action::ToggleCardQuotes(id) => self.cards.toggle_quotes(id.0),
                 Action::FocusThread(id) => self.thread_focus = Some(id),
+                Action::ListNext => {
+                    if self.selected + 1 < v.total {
+                        self.selected += 1;
+                    }
+                    self.scroll_to_selected = true;
+                }
+                Action::ListPrevious => {
+                    self.selected = self.selected.saturating_sub(1);
+                    self.scroll_to_selected = true;
+                }
                 Action::Next | Action::Previous if self.reader_focus && v.thread.len() > 1 => {
                     let shown = v.current.as_ref().map(|m| m.summary.id);
                     let at = self
@@ -935,6 +1005,7 @@ impl App {
                         .unwrap_or(v.thread.len() - 1);
                     let to = if a == Action::Next { (at + 1).min(v.thread.len() - 1) } else { at.saturating_sub(1) };
                     self.thread_focus = Some(v.thread[to].summary.id);
+                    self.scroll_card = self.thread_focus;
                 }
                 Action::Next => {
                     if self.selected + 1 < v.total {
@@ -951,13 +1022,14 @@ impl App {
                         self.open_draft(m.summary.id);
                     }
                 }
+                Action::Open if self.reader_focus && v.thread.len() > 1 => {
+                    if let Some(id) = self.thread_focus.or(v.current.as_ref().map(|m| m.summary.id)) {
+                        self.cards.toggle(id.0);
+                        self.thread_focus = Some(id);
+                    }
+                }
                 Action::Open => {
-                    if let Some(f) = self.thread_focus.take().filter(|_| self.reader_focus) {
-                        self.expanded = Some(f);
-                    }
-                    for (id, _) in Self::targets(&v, true, false) {
-                        let _ = self.store.set_flags(id, FlagChange { unread: Some(false), flagged: None });
-                    }
+                    self.mark_now = true;
                     self.reader_focus = true;
                 }
                 Action::ExtendNext => {
@@ -1022,7 +1094,9 @@ impl App {
                     }
                 }
                 Action::ToggleUnread => {
-                    self.dwell_done = true;
+                    if let Some(m) = &v.current {
+                        self.dwell_skip.insert(m.summary.id);
+                    }
                     let current = if whole { v.head.as_ref() } else { v.current.as_ref().map(|m| &m.summary) };
                     if let Some(s) = current {
                         let ids = self.act_ids(&v, whole, false);
@@ -1091,7 +1165,7 @@ impl App {
                     self.prefs.reading.reader_width = self.prefs.reading.reader_width.toggled();
                     (self.prefs_saver)(&self.prefs);
                 }
-                Action::ToggleQuotes => self.quotes_open = !self.quotes_open,
+                Action::ToggleQuotes => {}
                 Action::ToggleHeaders => self.headers_open = !self.headers_open,
                 Action::OpenLink(link) => {
                     let _ = open::that(link);
@@ -1843,7 +1917,7 @@ impl App {
         let page = self.store.list(&query, 0, total.max(1));
         let at = page.items.iter().position(|s| s.id == id || self.store.thread(s.id).iter().any(|t| t.summary.id == id));
         self.selected = at.unwrap_or(0);
-        self.expanded = Some(id);
+        self.pending_focus = Some(id);
         self.reader_focus = true;
         self.scroll_to_selected = true;
     }
@@ -2262,193 +2336,6 @@ impl App {
             self.mark_now = true;
             actions.push(Action::Open);
         }
-    }
-
-    fn reader(&mut self, ui: &mut Ui, v: &View, accounts: &[AccountInfo], actions: &mut Vec<Action>) {
-        let Some(m) = &v.current else {
-            empty_state(ui, "Nothing selected", "Pick a message from the list, or press j to start at the top.", &[("j", "next"), ("/", "search")]);
-            return;
-        };
-        let account = accounts.get(m.summary.account).map(|a| a.name.as_str()).unwrap_or("");
-        self.sync_previews(&ui.ctx().clone(), m);
-        self.reader_pane_w = ui.available_width();
-        let full = self.prefs.reading.reader_width == prefs::ReaderWidth::Full;
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            if !full {
-                ui.set_max_width(ui.available_width().min(if m.html.is_empty() { MEASURE + 44.0 } else { 820.0 }));
-            }
-            self.reader_content_w = ui.available_width();
-            ui.spacing_mut().item_spacing.y = self.prefs.density.reader_gap();
-            subject_line(ui, &m.summary.subject);
-            let shown_at = v.thread.iter().position(|t| t.summary.id == m.summary.id).unwrap_or(v.thread.len());
-            for t in v.thread.iter().take(shown_at) {
-                if collapsed_message(ui, &t.summary.from, &t.summary.when, t.summary.unread, self.thread_focus == Some(t.summary.id)) {
-                    actions.push(Action::Expand(t.summary.id));
-                }
-            }
-            let mut to = m.to.join(", ");
-            if to.is_empty() {
-                to = "nobody".into();
-            }
-            sender_line(ui, &m.summary.from, &to, &m.sent);
-            let picture = crate::real::display::header_value(&m.headers.all, "X-Nostr-Picture");
-            if let Some(url) = picture.filter(|_| self.images_loaded.contains(&m.summary.id)) {
-                let avatar = crate::htmlview::HtmlBody {
-                    html: format!("<img src=\"{}\" width=\"48\" height=\"48\">", url.replace('"', "")),
-                    inline: Vec::new(),
-                };
-                let _ = html_body(ui, &self.html, m.summary.id.0 ^ 0xA7A7, &avatar, true, &mut HtmlState::default());
-            }
-            ui.horizontal(|ui| {
-                chip(ui, account, LEGEND, false);
-                if m.summary.new {
-                    chip(ui, "new", TRACE, true);
-                }
-                if let Some(id) = crate::real::display::header_value(&m.headers.all, "X-Nostr-Nip05") {
-                    chip(ui, &format!("nip-05 verified {id}"), READOUT, true);
-                }
-                if m.summary.flagged {
-                    chip(ui, "flagged", READOUT, true);
-                }
-                ui.add_space(6.0);
-                if v.thread.len() > 1 {
-                    Line::new().note(format!("{} messages in this conversation", v.thread.len())).size(11.5).show(ui);
-                }
-            });
-            ui.add_space(4.0);
-            match header_notes(ui, &m.headers, self.headers_open) {
-                HeaderClick::None => {}
-                HeaderClick::Unsubscribe => actions.push(Action::Unsubscribe),
-                HeaderClick::Toggle => actions.push(Action::ToggleHeaders),
-            }
-            if self.headers_open {
-                all_headers(ui, &m.headers);
-            }
-            match m.body_state {
-                BodyState::Loading => {
-                    Line::new().note("Loading message...").size(11.5).show(ui);
-                }
-                BodyState::Failed => {
-                    Line::new().note("Could not load this message. It will load when the server is reachable.").size(11.5).show(ui);
-                }
-                BodyState::Ready => {}
-            }
-            let policy = self.prefs.reading.remote_images;
-            let trust = trust_keys(&m.from_address);
-            let trusted = policy != RemoteImages::Never && trust.iter().any(|k| self.trusted.contains(k));
-            let may_load = policy == RemoteImages::Ask;
-            if let Some(host) = &m.remote_images {
-                if !(may_load && self.images_loaded.contains(&m.summary.id)) && !trusted {
-                    let domain = trust[1].trim_start_matches("domain:");
-                    match blocked_images(ui, host, &m.from_address, domain, policy) {
-                        Some(ImageChoice::Once) => actions.push(Action::LoadImagesOnce),
-                        Some(ImageChoice::Sender) => actions.push(Action::TrustImages(trust[0].clone())),
-                        Some(ImageChoice::Domain) => actions.push(Action::TrustImages(trust[1].clone())),
-                        None => {}
-                    }
-                    ui.add_space(4.0);
-                } else {
-                    Line::new().note(format!("Images from {host} loaded for this message")).size(11.5).show(ui);
-                }
-            }
-            if m.html.is_empty() {
-                let text = m.paragraphs.join("\n\n");
-                let picked = plain_body(ui, &text, self.prefs.reading.zoom());
-                if picked.is_some() || ui.ctx().memory(|mem| mem.focused().is_none()) {
-                    self.html_state.selected_text = picked.map(|t| (m.summary.id.0, t));
-                }
-                if quoted_fold(ui, m.quoted.len(), self.quotes_open) {
-                    actions.push(Action::ToggleQuotes);
-                }
-                if self.quotes_open {
-                    for line in &m.quoted {
-                        ui.add(egui::Label::new(egui::RichText::new(line).font(body_italic(13.0)).color(LEGEND)));
-                    }
-                }
-            } else {
-                let remote = trusted || (may_load && self.images_loaded.contains(&m.summary.id));
-                if let Some(find) = &mut self.html_state.find {
-                    let count = self.html_state.match_count;
-                    if find_bar(ui, find, count) {
-                        actions.push(Action::Back);
-                    }
-                }
-                if let Some(link) = html_body(ui, &self.html, m.summary.id.0, &m.html, remote, &mut self.html_state) {
-                    match link.mismatch {
-                        Some((shown, real)) => actions.push(Action::WarnLink(link.href, shown, real)),
-                        None => actions.push(Action::OpenLink(link.href)),
-                    }
-                }
-            }
-            ui.add_space(6.0);
-            self.previews_ui(ui, actions);
-            ui.horizontal_wrapped(|ui| {
-                for (i, a) in m.attachments.iter().enumerate() {
-                    let chip = attachment(ui, &a.name, &a.size);
-                    egui::Popup::menu(&chip).show(|ui| {
-                        ui.set_min_width(120.0);
-                        if self.allow_open && ui.add(Key::new("open").outline(VALUE).id_salt(("open", i)).min_width(ui.available_width())).clicked() {
-                            actions.push(Action::FocusThread(m.summary.id));
-                            actions.push(Action::OpenAttachment(i));
-                            ui.close();
-                        }
-                        if ui.add(Key::new("save as").outline(VALUE).id_salt(("save", i)).min_width(ui.available_width())).clicked() {
-                            actions.push(Action::FocusThread(m.summary.id));
-                            actions.push(Action::SaveAttachment(i));
-                            ui.close();
-                        }
-                    });
-                }
-                if m.attachments.len() > 1 && ui.add(Key::new("save all").outline(VALUE)).clicked() {
-                    actions.push(Action::FocusThread(m.summary.id));
-                    actions.push(Action::SaveAllAttachments);
-                }
-            });
-            for t in v.thread.iter().skip(shown_at + 1) {
-                if collapsed_message(ui, &t.summary.from, &t.summary.when, t.summary.unread, self.thread_focus == Some(t.summary.id)) {
-                    actions.push(Action::Expand(t.summary.id));
-                }
-            }
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if ui.add(Key::new("reply").solid(READOUT).min_width(90.0)).clicked() {
-                    actions.push(Action::Reply(Reply::One));
-                }
-                if ui.add(Key::new("reply all").outline(VALUE).min_width(90.0)).clicked() {
-                    actions.push(Action::Reply(Reply::All));
-                }
-                if ui.add(Key::new("forward").outline(VALUE).min_width(90.0)).clicked() {
-                    actions.push(Action::Reply(Reply::Forward));
-                }
-                if ui
-                    .add(Key::new("archive").outline(VALUE).min_width(90.0).enabled(m.folder != Folder::Archive))
-                    .clicked()
-                {
-                    actions.push(Action::One(Box::new(Action::Archive)));
-                }
-                let more = ui.add(Key::more());
-                egui::Popup::menu(&more).show(|ui| {
-                    ui.set_min_width(140.0);
-                    let server_flags = accounts.get(m.summary.account).is_none_or(|a| a.server_flags);
-                    let entries = [
-                        ("mark unread", Action::ToggleUnread, VALUE),
-                        ("flag", Action::ToggleFlag, VALUE),
-                        ("snooze", Action::Snooze, VALUE),
-                        ("move to junk", Action::Junk, VALUE),
-                        ("delete", Action::Trash, FAULT),
-                    ];
-                    for (label, action, tint) in entries {
-                        if label == "flag" && !server_flags {
-                            continue;
-                        }
-                        if ui.add(Key::new(label).outline(tint).min_width(ui.available_width())).clicked() {
-                            actions.push(Action::One(Box::new(action)));
-                            ui.close();
-                        }
-                    }
-                });
-            });
-        });
     }
 
     fn open_draft(&mut self, id: MessageId) {

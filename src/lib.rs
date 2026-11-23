@@ -36,3 +36,4 @@ pub mod snooze;
 pub mod openpgp;
 pub mod spoof;
 pub mod store;
+pub mod thread;

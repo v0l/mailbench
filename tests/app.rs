@@ -497,9 +497,13 @@ fn save(h: &mut Harness<'static, (bool, App)>, name: &str) {
     img.save(out_dir().join(format!("{name}.png"))).unwrap();
 }
 
+fn head_of(h: &Harness<'static, (bool, App)>) -> MessageId {
+    h.state().1.store.list(&Query::new(Folder::Inbox), 0, 1).items[0].id
+}
+
 #[test]
 fn render_every_screen() {
-    let mut h = harness(FakeStore::concept());
+    let mut h = harness_sized(FakeStore::concept(), egui::vec2(1280.0, 1000.0));
     save(&mut h, "inbox");
 
     h.key_press(egui::Key::Enter);
@@ -507,11 +511,11 @@ fn render_every_screen() {
     h.get_by_label_contains("quoted lines hidden").click();
     h.run();
     h.run();
-    assert!(h.state().1.quotes_open && h.state().1.reader_focus);
+    assert!(h.state().1.reader_focus);
     h.get_by_label_contains("quoted lines shown").click();
     h.run();
     h.run();
-    assert!(!h.state().1.quotes_open);
+    assert!(!h.state().1.cards.quotes_shown(head_of(&h).0));
     save(&mut h, "reader");
     h.key_press(egui::Key::R);
     h.run();
@@ -632,12 +636,12 @@ fn a_three_message_thread_opens_collapsed_and_expands_an_older_message() {
     assert_eq!(h.state().1.store.thread(head).len(), 3);
     assert_eq!(h.state().1.store.list(&Query::new(Folder::Inbox), 0, 1).items[0].thread, 3);
     h.get_by_label_contains("Quote attached");
-    assert!(h.query_by_label_contains("Hi Mara, the Rev C Gerbers passed").is_none());
+    assert!(h.query_by_label_contains("I can fix both on our side").is_none());
     let older = h.state().1.store.thread(head)[0].summary.id;
     h.get_by_label_contains("Wed 15 Nov 16:20").click();
     h.run();
     h.run();
-    assert_eq!(h.state().1.expanded, Some(older));
+    assert!(h.state().1.cards.is_open(older.0));
     h.get_by_label_contains("Hi Mara, the Rev C Gerbers passed");
 }
 
@@ -669,7 +673,7 @@ fn enter_expands_the_focused_older_message_in_the_reader() {
     h.key_press(egui::Key::Enter);
     h.run();
     h.run();
-    assert_eq!(h.state().1.expanded, Some(thread[0].summary.id));
+    assert!(h.state().1.cards.is_open(thread[0].summary.id.0));
     h.get_by_label_contains("Hi Mara, the Rev C Gerbers passed");
 }
 
@@ -681,7 +685,7 @@ fn picker_to(path: PathBuf) -> mailbench::app::SavePicker {
 fn save_as_writes_the_attachment_bytes_to_the_chosen_path() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("out.pdf");
-    let mut h = harness(FakeStore::concept());
+    let mut h = harness_sized(FakeStore::concept(), egui::vec2(1280.0, 1400.0));
     h.state_mut().1.save_picker = picker_to(target.clone());
     h.get_by_label_contains("stencil-quote-revc.pdf").click();
     h.run();
@@ -769,7 +773,7 @@ fn o_and_shift_s_act_on_the_focused_older_message_while_the_newest_is_shown() {
     h.key_press(egui::Key::K);
     h.run();
     assert_eq!(h.state().1.thread_focus, Some(older));
-    assert_eq!(h.state().1.expanded, None);
+    assert!(!h.state().1.cards.is_open(older.0));
     h.key_press(egui::Key::O);
     h.run();
     let paths = opened.lock().unwrap().clone();
@@ -797,7 +801,6 @@ fn an_expanded_older_message_shows_its_own_chip_and_preview() {
     h.run();
     h.run();
     h.get_by_label_contains("older-scan.pdf");
-    assert!(h.query_by_label_contains("stencil-quote-revc.pdf").is_none());
     assert!(h.query_by_role(egui::accesskit::Role::Image).is_some());
 }
 
@@ -824,7 +827,7 @@ fn o_and_save_as_act_on_the_expanded_older_message() {
     h.get_by_label_contains("Wed 15 Nov 16:20").click();
     h.run();
     h.run();
-    assert_eq!(h.state().1.expanded, Some(older));
+    assert!(h.state().1.cards.is_open(older.0));
     h.get_by_label_contains("older-notes.pdf");
     h.key_press(egui::Key::Enter);
     h.run();

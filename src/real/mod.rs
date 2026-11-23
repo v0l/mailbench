@@ -1707,7 +1707,13 @@ impl MailStore for RealStore {
             members
                 .iter()
                 .rev()
-                .map(|m| ThreadItem { summary: summary(&c.entries[*m], now), folder: c.entries[*m].folder.clone() })
+                .map(|m| {
+                    let e = &c.entries[*m];
+                    let own = self.shared.accounts.get(e.account).map(|a| a.address.as_str()).unwrap_or_default();
+                    let mine = e.folder == ms::Folder::Sent || (!own.is_empty() && e.from_address.eq_ignore_ascii_case(own));
+                    let to = e.to.iter().map(|t| if !own.is_empty() && t.eq_ignore_ascii_case(own) { "me".to_string() } else { t.clone() }).collect();
+                    ThreadItem { summary: summary(e, now), folder: e.folder.clone(), from_address: e.from_address.clone(), to, sent: display::sent(e.date), mine }
+                })
                 .collect()
         })
     }
