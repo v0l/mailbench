@@ -9,6 +9,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 mod cards;
+pub mod menu;
 
 const AUTOSAVE: Duration = Duration::from_secs(4);
 
@@ -1690,11 +1691,13 @@ impl App {
             });
             let target = f.folder.clone();
             resp.context_menu(|ui| {
-                ui.set_min_width(140.0);
-                if ui.add(Key::new("mark all as read").outline(VALUE).min_width(ui.available_width())).clicked() {
-                    actions.push(Action::MarkAllRead(target.clone()));
-                    ui.close();
-                }
+                let narrow = self.narrow;
+                menu_column(ui, narrow, &["mark all as read"], |ui, menu| {
+                    if menu.key(ui, "mark all as read", VALUE) {
+                        actions.push(Action::MarkAllRead(target.clone()));
+                        ui.close();
+                    }
+                });
             });
             if resp.clicked() {
                 actions.push(Action::GoTo(f.folder));
@@ -1857,7 +1860,6 @@ impl App {
             return;
         }
         resp.context_menu(|ui| {
-            ui.set_min_width(140.0);
             let child_prefix = format!("{}{}", node.path, node.delimiter);
             let items = [
                 ("new subfolder", Action::NewFolder(node.account, child_prefix)),
@@ -1865,13 +1867,16 @@ impl App {
                 ("rename", Action::RenameFolder(node.folder.clone(), parent)),
                 ("delete", Action::DeleteFolder(node.folder.clone())),
             ];
-            for (label, action) in items {
-                let tint = if label == "delete" { FAULT } else { VALUE };
-                if ui.add(Key::new(label).outline(tint).min_width(ui.available_width())).clicked() {
-                    actions.push(action);
-                    ui.close();
+            let labels: Vec<&str> = items.iter().map(|(l, _)| *l).collect();
+            menu_column(ui, self.narrow, &labels, |ui, menu| {
+                for (label, action) in items {
+                    let tint = if label == "delete" { FAULT } else { VALUE };
+                    if menu.key(ui, label, tint) {
+                        actions.push(action);
+                        ui.close();
+                    }
                 }
-            }
+            });
         });
     }
 
@@ -2247,6 +2252,7 @@ impl App {
         let mut clicked = None;
         let mut opened = None;
         let row_h = self.prefs.density.row_height();
+        let narrow = self.narrow;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show_viewport(ui, |ui, viewport| {
             let total = v.total;
             ui.set_height(total as f32 * row_h);
@@ -2278,27 +2284,14 @@ impl App {
                     self.selected = i;
                 }
                 resp.context_menu(|ui| {
-                    let mark_label = if s.unread { "mark read" } else { "mark unread" };
-                    if ui.button(mark_label).clicked() {
-                        actions.push(Action::ToggleUnread);
-                        ui.close();
-                    }
-                    if ui.button("archive").clicked() {
-                        actions.push(Action::Archive);
-                        ui.close();
-                    }
-                    if ui.button("move to junk").clicked() {
-                        actions.push(Action::Junk);
-                        ui.close();
-                    }
-                    if ui.button("delete").clicked() {
-                        actions.push(Action::Trash);
-                        ui.close();
-                    }
-                    if ui.button("Mark all as read").clicked() {
-                        actions.push(Action::MarkAllRead(v.query.folder.clone()));
-                        ui.close();
-                    }
+                    let state = menu::MessageMenu {
+                        unread: s.unread,
+                        flagged: s.flagged,
+                        server_flags: accounts.get(s.account).is_none_or(|a| a.server_flags),
+                        folder: v.query.folder.clone(),
+                        multi: self.marked.len() > 1,
+                    };
+                    menu::show_message_menu(ui, narrow, &state, None, actions);
                 });
                 if resp.double_clicked() || (resp.clicked() && self.narrow && !ui.input(|inp| inp.modifiers.shift || inp.modifiers.command)) {
                     opened = Some(i);
