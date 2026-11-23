@@ -407,7 +407,7 @@ fn send_cmd(cli: &Cli, a: &SendArgs) -> Res<()> {
     for path in &a.attach {
         let data = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "attachment".into());
-        attachments.push(crate::backend::Attachment { name, mime: "application/octet-stream".into(), data });
+        attachments.push(crate::backend::Attachment { name, mime: "application/octet-stream".into(), data, cid: None });
     }
     let store = open_store()?;
     let configs = chosen(&store, &cli.account)?;

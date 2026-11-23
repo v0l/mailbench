@@ -162,6 +162,8 @@ pub struct AttMeta {
     pub name: String,
     pub mime: String,
     pub size: usize,
+    #[serde(default)]
+    pub cid: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

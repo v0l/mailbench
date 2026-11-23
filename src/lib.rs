@@ -16,6 +16,7 @@ pub mod fake;
 pub mod flowed;
 pub mod htmlview;
 pub mod insets;
+pub mod inline;
 pub mod kit;
 pub mod mailstore;
 pub mod notify;

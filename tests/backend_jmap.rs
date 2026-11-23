@@ -105,7 +105,7 @@ async fn bodies_download_as_rfc822() {
     let name = user();
     let mut b = jmap(&name);
     let mut m = mail(&name, &name, "with attachment");
-    m.attachments.push(Attachment { name: "a.txt".into(), mime: "text/plain".into(), data: b"attached bytes".to_vec() });
+    m.attachments.push(Attachment { name: "a.txt".into(), mime: "text/plain".into(), data: b"attached bytes".to_vec(), ..Default::default() });
     b.send(&m).await.unwrap();
     let uids = wait_for(&mut b, "Inbox", 1).await;
     let raw = b.fetch("Inbox", uids[0]).await.unwrap();

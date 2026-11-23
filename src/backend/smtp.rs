@@ -119,8 +119,9 @@ fn build(m: &OutgoingMessage, keep_bcc: bool) -> Result<Message> {
             .map_err(|e| BackendError::Protocol(format!("bad address {}: {e}", m.from.address)))?;
         b = b.envelope(lettre::address::Envelope::new(Some(from.clone()), vec![from]).map_err(|e| BackendError::Protocol(e.to_string()))?);
     }
-    let body_part = body_part(m);
-    let built = if m.attachments.is_empty() {
+    let (inline, regular) = split_attachments(m);
+    let body_part = body_part(m, &inline);
+    let built = if regular.is_empty() {
         match body_part {
             BodyPart::Single(s) => b.singlepart(s),
             BodyPart::Alternative(a) => b.multipart(a),
@@ -130,13 +131,19 @@ fn build(m: &OutgoingMessage, keep_bcc: bool) -> Result<Message> {
             BodyPart::Single(s) => MultiPart::mixed().singlepart(s),
             BodyPart::Alternative(a) => MultiPart::mixed().multipart(a),
         };
-        for a in &m.attachments {
+        for a in regular {
             let mime = ContentType::parse(&a.mime).unwrap_or_else(|_| ContentType::parse("application/octet-stream").expect("valid"));
-            mixed = mixed.singlepart(MimeAttachment::new(a.name.clone()).body(a.data.clone(), mime));
+            let data = if a.cid.is_some() { crate::inline::strip_metadata(&a.mime, &a.data) } else { a.data.clone() };
+            mixed = mixed.singlepart(MimeAttachment::new(a.name.clone()).body(data, mime));
         }
         b.multipart(mixed)
     };
     built.map_err(|e| BackendError::Protocol(e.to_string()))
+}
+
+fn split_attachments(m: &OutgoingMessage) -> (Vec<&Attachment>, Vec<&Attachment>) {
+    let wanted = if m.html_alternative { crate::inline::cids_in(&m.body) } else { Vec::new() };
+    m.attachments.iter().partition(|a| a.cid.as_ref().is_some_and(|c| wanted.contains(c)))
 }
 
 enum BodyPart {
@@ -144,8 +151,8 @@ enum BodyPart {
     Alternative(MultiPart),
 }
 
-fn body_part(m: &OutgoingMessage) -> BodyPart {
-    let plain = plain_part(&m.body);
+fn body_part(m: &OutgoingMessage, inline: &[&Attachment]) -> BodyPart {
+    let plain = plain_part(&crate::inline::plain_body(&m.body));
     if !m.html_alternative {
         return BodyPart::Single(plain);
     }
@@ -153,7 +160,17 @@ fn body_part(m: &OutgoingMessage) -> BodyPart {
     if !marked {
         return BodyPart::Single(plain);
     }
-    BodyPart::Alternative(MultiPart::alternative().singlepart(plain).singlepart(SinglePart::html(html)))
+    if inline.is_empty() {
+        return BodyPart::Alternative(MultiPart::alternative().singlepart(plain).singlepart(SinglePart::html(html)));
+    }
+    let mut related = MultiPart::related().singlepart(SinglePart::html(html));
+    for a in inline {
+        let mime = ContentType::parse(&a.mime).unwrap_or_else(|_| ContentType::parse("application/octet-stream").expect("valid"));
+        let data = crate::inline::strip_metadata(&a.mime, &a.data);
+        let cid = a.cid.clone().unwrap_or_default();
+        related = related.singlepart(MimeAttachment::new_inline_with_name(cid, a.name.clone()).body(data, mime));
+    }
+    BodyPart::Alternative(MultiPart::alternative().singlepart(plain).multipart(related))
 }
 
 fn plain_part(body: &str) -> SinglePart {

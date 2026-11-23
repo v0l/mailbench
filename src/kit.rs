@@ -827,6 +827,7 @@ fn format_job(text: &str, wrap: f32) -> egui::text::LayoutJob {
             Style::Italic => base(body_italic(BODY_SIZE), VALUE),
             Style::Code => egui::TextFormat { background: BAND, ..base(egui::FontId::monospace(BODY_SIZE - 1.0), VALUE) },
             Style::Link => egui::TextFormat { underline: Stroke::new(1.0, READOUT), ..base(body(BODY_SIZE), READOUT) },
+            Style::Image => egui::TextFormat { background: BAND, ..base(body(BODY_SIZE - 1.0), READOUT) },
             Style::Quote => base(body_italic(BODY_SIZE), LEGEND),
         };
         job.append(&text[range], 0.0, fmt);

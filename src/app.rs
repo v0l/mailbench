@@ -154,12 +154,21 @@ pub struct Draft {
     pub body: String,
     pub saved: bool,
     pub attachments: Vec<OutAttachment>,
+    pruned: Vec<OutAttachment>,
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
     pub message_id: Option<String>,
     pub signature: String,
     fingerprint: u64,
     changed_at: Option<std::time::Instant>,
+}
+
+pub fn png_of(img: &egui::ColorImage) -> Result<Vec<u8>, String> {
+    let rgba: Vec<u8> = img.pixels.iter().flat_map(|p| p.to_srgba_unmultiplied()).collect();
+    let buf = image::RgbaImage::from_raw(img.width() as u32, img.height() as u32, rgba).ok_or("Could not read the pasted image")?;
+    let mut out = Vec::new();
+    buf.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).map_err(|e| format!("Could not read the pasted image: {e}"))?;
+    Ok(out)
 }
 
 pub fn signature_block(signature: &str) -> String {
@@ -221,6 +230,7 @@ impl Draft {
             body: String::new(),
             saved: false,
             attachments: Vec::new(),
+            pruned: Vec::new(),
             in_reply_to: None,
             references: Vec::new(),
             message_id: None,
@@ -309,6 +319,11 @@ impl Draft {
             signature: signature.to_string(),
             ..Draft::blank()
         };
+        if mode == Reply::Forward {
+            for (n, (_, data)) in m.html.inline.iter().enumerate() {
+                let _ = d.insert_inline(&format!("image-{}", n + 1), data.to_vec(), None);
+            }
+        }
         d.fingerprint = d.content_hash();
         d
     }
@@ -366,7 +381,53 @@ impl Draft {
 
     pub fn attach_bytes(&mut self, name: &str, data: Vec<u8>) {
         let name = if name.is_empty() { "attachment" } else { name };
-        self.attachments.push(OutAttachment { name: name.to_string(), mime: guess_mime(name).to_string(), data });
+        self.attachments.push(OutAttachment { name: name.to_string(), mime: guess_mime(name).to_string(), data, cid: None });
+    }
+
+    pub fn insert_inline(&mut self, name: &str, data: Vec<u8>, at: Option<usize>) -> Result<Option<String>, String> {
+        let prepared = crate::inline::prepare(data)?;
+        let name = crate::inline::clean_name(name);
+        let cid = crate::inline::new_cid();
+        let reference = crate::inline::reference(&name, &cid);
+        let chars = self.body.chars().count();
+        let at = at.unwrap_or(chars).min(chars);
+        let byte = self.body.char_indices().nth(at).map(|(i, _)| i).unwrap_or(self.body.len());
+        self.body.insert_str(byte, &reference);
+        self.attachments.push(OutAttachment { name, mime: prepared.mime.to_string(), data: prepared.data, cid: Some(cid) });
+        Ok(prepared.note)
+    }
+
+    pub fn last_inline_cid(&self) -> Option<&str> {
+        self.attachments.iter().rev().find_map(|a| a.cid.as_deref())
+    }
+
+    pub fn sync_inline(&mut self) {
+        if self.attachments.iter().all(|a| a.cid.is_none()) && self.pruned.is_empty() {
+            return;
+        }
+        let wanted = crate::inline::cids_in(&self.body);
+        let (keep, gone): (Vec<_>, Vec<_>) = std::mem::take(&mut self.attachments).into_iter().partition(|a| a.cid.as_ref().is_none_or(|c| wanted.contains(c)));
+        self.attachments = keep;
+        self.pruned.extend(gone);
+        let (back, still): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pruned).into_iter().partition(|a| a.cid.as_ref().is_some_and(|c| wanted.contains(c)));
+        self.pruned = still;
+        self.attachments.extend(back);
+    }
+
+    pub fn remove_inline(&mut self, cid: &str) {
+        if let Some(r) = crate::richtext::images(&self.body).into_iter().find(|r| r.cid == cid) {
+            self.body.replace_range(r.start..r.end, "");
+        }
+        self.sync_inline();
+    }
+
+    pub fn inline_refs(&self) -> Vec<String> {
+        crate::inline::cids_in(&self.body)
+    }
+
+    pub fn encoded_size(&self) -> usize {
+        let raw: usize = self.body.len() + self.attachments.iter().map(|a| a.data.len()).sum::<usize>();
+        raw / 3 * 4
     }
 
     pub fn attach_path(&mut self, path: &std::path::Path) -> Result<(), String> {
@@ -407,7 +468,7 @@ impl Draft {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         (&self.to, &self.cc, &self.to_input, &self.cc_input, &self.subject, &self.body, self.account).hash(&mut h);
         for a in &self.attachments {
-            (&a.name, a.data.len()).hash(&mut h);
+            (&a.name, a.data.len(), &a.cid).hash(&mut h);
         }
         h.finish()
     }
@@ -551,6 +612,8 @@ pub struct App {
     pub save_picker: SavePicker,
     pub opener: Box<dyn FnMut(&std::path::Path) -> bool>,
     previews: Option<(MessageId, Vec<Option<egui::TextureHandle>>)>,
+    thumbs: std::collections::HashMap<String, egui::TextureHandle>,
+    plain_inline_told: bool,
     pub viewing: Option<usize>,
     pub autosave: Duration,
     pub pending_send: Option<PendingSend>,
@@ -629,6 +692,8 @@ impl App {
             save_picker: rfd_picker(),
             opener: Box::new(|p| open::that(p).is_ok()),
             previews: None,
+            thumbs: std::collections::HashMap::new(),
+            plain_inline_told: false,
             viewing: None,
             autosave: AUTOSAVE,
             pending_send: None,
@@ -1112,7 +1177,7 @@ impl App {
                         let accounts = self.store.accounts();
                         let own: Vec<String> = accounts.iter().map(|a| a.address.clone()).collect();
                         let signature = accounts.get(m.summary.account).map(|a| a.signature.clone()).unwrap_or_default();
-                        let attachments = if mode == Reply::Forward { self.store.attachments(m.summary.id).unwrap_or_default().into_iter().map(|a| OutAttachment { name: a.name, mime: a.mime, data: a.data.to_vec() }).collect() } else { Vec::new() };
+                        let attachments = if mode == Reply::Forward { self.store.attachments(m.summary.id).unwrap_or_default().into_iter().map(|a| OutAttachment { name: a.name, mime: a.mime, data: a.data.to_vec(), cid: None }).collect() } else { Vec::new() };
                         let picked = self.html_state.selected_text.as_ref().filter(|(id, _)| *id == m.summary.id.0).map(|(_, t)| t.clone());
                         self.draft = Some(Draft::reply(m, mode, &signature, &own, attachments, picked.as_deref()));
                     }
@@ -2368,6 +2433,11 @@ impl App {
     fn send_draft(&mut self) {
         let Some(mut d) = self.draft.take() else { return };
         d.commit_inputs();
+        if d.encoded_size() > crate::inline::MAX_MESSAGE_BYTES {
+            self.notice = Some(format!("The message is about {} MB, over the {} MB limit. Remove an image or attachment", d.encoded_size() / 1_048_576, crate::inline::MAX_MESSAGE_BYTES / 1_048_576));
+            self.draft = Some(d);
+            return;
+        }
         self.store.set_send_html(!self.prefs.plain_text_only);
         let to = d.to.clone();
         match self.store.append(Folder::Sent, d.outgoing()) {
@@ -2425,6 +2495,7 @@ impl App {
     fn collect_attachments(&mut self, ctx: &egui::Context) {
         let Some(draft) = self.draft.as_mut() else { return };
         let mut errors = Vec::new();
+        let mut images: Vec<(String, Vec<u8>)> = Vec::new();
         let mut picked = Vec::new();
         if let Some(rx) = &self.picker {
             match rx.try_recv() {
@@ -2450,12 +2521,77 @@ impl App {
         for f in ctx.input(|i| i.raw.dropped_files.clone()) {
             let name = f.path().file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
             match f.bytes() {
+                Ok(bytes) if crate::inline::sniff(&bytes).is_some() => images.push((name, bytes)),
                 Ok(bytes) => draft.attach_bytes(&name, bytes),
                 Err(e) => errors.push(format!("Could not read {name}: {e}")),
             }
         }
+        let pasted: Vec<std::sync::Arc<egui::ColorImage>> = ctx.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::PasteImage(img) => Some(img.clone()),
+                    _ => None,
+                })
+                .collect()
+        });
+        for img in pasted {
+            match png_of(&img) {
+                Ok(bytes) => images.push(("pasted-image.png".into(), bytes)),
+                Err(e) => errors.push(e),
+            }
+        }
+        let mut notes = Vec::new();
+        for (name, bytes) in images {
+            match self.insert_image(ctx, &name, bytes) {
+                Ok(Some(note)) => notes.push(note),
+                Ok(None) => {}
+                Err(e) => errors.push(e),
+            }
+        }
         if let Some(e) = errors.into_iter().next() {
             self.notice = Some(e);
+        } else if let Some(n) = notes.into_iter().next() {
+            self.notice = Some(n);
+        }
+    }
+
+    fn insert_image(&mut self, ctx: &egui::Context, name: &str, bytes: Vec<u8>) -> Result<Option<String>, String> {
+        let Some(draft) = self.draft.as_mut() else { return Ok(None) };
+        let id = egui::Id::new("compose-body");
+        let mut state = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+        let at: Option<usize> = state.cursor.char_range().map(|r| r.primary.index.into());
+        let before = draft.body.chars().count();
+        let note = draft.insert_inline(name, bytes, at)?;
+        let cid = draft.last_inline_cid().map(str::to_string);
+        if let Some(cid) = cid {
+            if let Some(thumb) = draft.attachments.iter().find(|a| a.cid.as_deref() == Some(cid.as_str())).and_then(|a| crate::inline::thumbnail(&a.data)) {
+                let tex = ctx.load_texture(format!("inline-{cid}"), thumb, egui::TextureOptions::LINEAR);
+                self.thumbs.insert(cid, tex);
+            }
+        }
+        let inserted = draft.body.chars().count() - before;
+        let start = at.unwrap_or(before).min(before);
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(start + inserted))));
+        state.store(ctx, id);
+        if self.prefs.plain_text_only && !self.plain_inline_told {
+            self.plain_inline_told = true;
+            return Ok(Some("Plain text only is on, so inline images are sent as attachments".into()));
+        }
+        Ok(note)
+    }
+
+    fn ensure_thumbs(&mut self, ctx: &egui::Context) {
+        let Some(draft) = self.draft.as_ref() else { return };
+        for cid in draft.inline_refs() {
+            if self.thumbs.contains_key(&cid) {
+                continue;
+            }
+            let found = draft.attachments.iter().find(|a| a.cid.as_deref() == Some(cid.as_str()));
+            if let Some(thumb) = found.and_then(|a| crate::inline::thumbnail(&a.data)) {
+                let tex = ctx.load_texture(format!("inline-{cid}"), thumb, egui::TextureOptions::LINEAR);
+                self.thumbs.insert(cid, tex);
+            }
         }
     }
 
@@ -2464,6 +2600,11 @@ impl App {
             return;
         }
         self.collect_attachments(ctx);
+        if let Some(d) = self.draft.as_mut() {
+            d.sync_inline();
+        }
+        self.ensure_thumbs(ctx);
+        let thumbs = &self.thumbs;
         let hovering = egui_bench::drop::hovering(ctx).is_some();
         let store: &dyn MailStore = self.store.as_ref();
         let Some(draft) = self.draft.as_mut() else { return };
@@ -2500,10 +2641,38 @@ impl App {
                 ui.add_space(6.0);
                 body_editor(ui, &mut draft.body, 9);
                 ui.add_space(4.0);
-                if !draft.attachments.is_empty() {
+                let refs = draft.inline_refs();
+                if !refs.is_empty() {
+                    let mut remove = None;
+                    ui.horizontal_wrapped(|ui| {
+                        let mut seen = Vec::new();
+                        for cid in &refs {
+                            if seen.contains(cid) {
+                                continue;
+                            }
+                            seen.push(cid.clone());
+                            let name = draft.attachments.iter().find(|a| a.cid.as_deref() == Some(cid.as_str())).map(|a| a.name.clone()).unwrap_or_default();
+                            if let Some(tex) = thumbs.get(cid) {
+                                let size = tex.size_vec2();
+                                let scale = (72.0 / size.x.max(size.y)).min(1.0);
+                                let r = ui.add(egui::Button::image(egui::Image::new(tex).fit_to_exact_size(size * scale)).frame(true));
+                                let label = format!("remove image {name}");
+                                r.widget_info(move || egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label.clone()));
+                                if r.on_hover_text(format!("{name}, click to remove")).clicked() {
+                                    remove = Some(cid.clone());
+                                }
+                            }
+                        }
+                    });
+                    if let Some(cid) = remove {
+                        draft.remove_inline(&cid);
+                    }
+                    ui.add_space(4.0);
+                }
+                if draft.attachments.iter().any(|a| a.cid.is_none()) {
                     ui.horizontal_wrapped(|ui| {
                         let mut remove = None;
-                        for (i, a) in draft.attachments.iter().enumerate() {
+                        for (i, a) in draft.attachments.iter().enumerate().filter(|(_, a)| a.cid.is_none()) {
                             let r = attachment(ui, &a.name, &human_size(a.data.len()));
                             let label = format!("remove {}", a.name);
                             r.widget_info(move || egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label.clone()));

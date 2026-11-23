@@ -239,7 +239,7 @@ fn an_attachment_round_trips_and_is_encrypted_while_queued() {
         to: format!("{peer}@localhost"),
         subject: "with file".into(),
         body: "see attached".into(),
-        attachments: vec![OutAttachment { name: "board.bin".into(), mime: "application/octet-stream".into(), data: payload.clone() }],
+        attachments: vec![OutAttachment { name: "board.bin".into(), mime: "application/octet-stream".into(), data: payload.clone(), cid: None }],
         ..Default::default()
     };
     let id = real.append(ms::Folder::Sent, out).unwrap();

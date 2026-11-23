@@ -901,7 +901,7 @@ impl Shared {
         let attachments = message
             .attachments
             .iter()
-            .map(|a| AttMeta { name: a.name.clone(), mime: a.mime.clone(), size: a.data.len() })
+            .map(|a| AttMeta { name: a.name.clone(), mime: a.mime.clone(), size: a.data.len(), cid: a.cid.clone() })
             .collect();
         let msg = LocalMsg {
             account: account.to_string(),
@@ -991,7 +991,7 @@ impl Shared {
         let mut attachments = Vec::new();
         for (n, meta) in msg.attachments.iter().enumerate() {
             let data = store.get(ATTACH, &attachment_key(local, n)).ok().flatten()?;
-            attachments.push(Attachment { name: meta.name.clone(), mime: meta.mime.clone(), data: data.to_vec() });
+            attachments.push(Attachment { name: meta.name.clone(), mime: meta.mime.clone(), data: data.to_vec(), cid: meta.cid.clone() });
         }
         Some((msg, attachments))
     }
@@ -2335,7 +2335,7 @@ impl MailStore for RealStore {
             cc: join(&env.cc),
             subject,
             body: display::plain_text(&raw).trim_end().to_string(),
-            attachments: display::extract_attachments(&raw).into_iter().map(|a| OutAttachment { name: a.name, mime: a.mime, data: a.data.to_vec() }).collect(),
+            attachments: display::extract_attachments(&raw).into_iter().map(|a| OutAttachment { name: a.name, mime: a.mime, data: a.data.to_vec(), cid: None }).collect(),
             in_reply_to: env.in_reply_to,
             references: env.references,
             message_id: env.message_id,

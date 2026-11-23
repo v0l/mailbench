@@ -125,6 +125,7 @@ pub struct Attachment {
     pub name: String,
     pub mime: String,
     pub data: Vec<u8>,
+    pub cid: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

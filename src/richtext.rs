@@ -6,6 +6,7 @@ pub enum Kind {
     Italic,
     Code,
     Link,
+    Image,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +59,7 @@ pub fn tokens(s: &str) -> Vec<Tok> {
                 url: 0..0,
             }),
             b'[' => link_at(s, i),
+            b'!' if b.get(i + 1) == Some(&b'[') => image_at(s, i),
             _ => None,
         };
         match found {
@@ -80,6 +82,31 @@ fn link_at(s: &str, i: usize) -> Option<Tok> {
     let url_len = s[url_start..].find(')')?;
     let url = url_start..url_start + url_len;
     Some(Tok { kind: Kind::Link, start: i, end: url.end + 1, inner: i + 1..close, url })
+}
+
+fn image_at(s: &str, i: usize) -> Option<Tok> {
+    let link = link_at(s, i + 1)?;
+    let cid = s[link.url.clone()].strip_prefix("cid:")?;
+    if cid.is_empty() || !cid.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.' | b'@')) {
+        return None;
+    }
+    Some(Tok { kind: Kind::Image, start: i, ..link })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageRef {
+    pub start: usize,
+    pub end: usize,
+    pub alt: String,
+    pub cid: String,
+}
+
+pub fn images(text: &str) -> Vec<ImageRef> {
+    tokens(text)
+        .into_iter()
+        .filter(|t| t.kind == Kind::Image)
+        .map(|t| ImageRef { start: t.start, end: t.end, alt: text[t.inner.clone()].to_string(), cid: text[t.url.clone()][4..].to_string() })
+        .collect()
 }
 
 pub fn escape(s: &str) -> String {
@@ -112,6 +139,7 @@ fn inline(s: &str, marked: &mut bool) -> String {
             Kind::Bold => out.push_str(&format!("<strong>{}</strong>", inline(inner, marked))),
             Kind::Italic => out.push_str(&format!("<em>{}</em>", inline(inner, marked))),
             Kind::Code => out.push_str(&format!("<code>{}</code>", escape(inner))),
+            Kind::Image => out.push_str(&format!("<img src=\"cid:{}\" alt=\"{}\">", escape(&s[t.url.clone()][4..]), escape(inner))),
             Kind::Link => out.push_str(&format!("<a href=\"{}\">{}</a>", escape(s[t.url.clone()].trim()), inline(inner, marked))),
         }
     }
@@ -232,6 +260,7 @@ pub enum Style {
     Italic,
     Code,
     Link,
+    Image,
     Quote,
 }
 
@@ -254,6 +283,10 @@ fn inline_spans(s: &str, base: usize, out: &mut Vec<(Range<usize>, Style)>) {
             Kind::Italic => (1, 1, Style::Italic),
             Kind::Code => (1, 1, Style::Code),
             Kind::Link => (1, t.end - t.inner.end, Style::Link),
+            Kind::Image => {
+                push(out, base + t.start..base + t.end, Style::Image);
+                continue;
+            }
         };
         push(out, base + t.start..base + t.start + open, Style::Mark);
         push(out, base + t.inner.start..base + t.inner.end, style);
