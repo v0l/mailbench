@@ -6,6 +6,18 @@ use mailbench::mailstore::*;
 use mailbench::search::Parsed;
 use std::path::PathBuf;
 
+fn quiet_renderer() -> egui_kittest::LazyRenderer {
+    static CREATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    egui_kittest::LazyRenderer::new(|| {
+        let _guard = CREATE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut setup = egui_kittest::wgpu::default_wgpu_setup();
+        if let eframe::egui_wgpu::WgpuSetup::CreateNew(create) = &mut setup {
+            create.instance_descriptor.flags = eframe::egui_wgpu::wgpu::InstanceFlags::empty();
+        }
+        egui_kittest::wgpu::WgpuTestRenderer::from_setup(setup)
+    })
+}
+
 fn harness(store: FakeStore) -> Harness<'static, (bool, App)> {
     harness_sized(store, egui::vec2(1280.0, 800.0))
 }
@@ -13,7 +25,7 @@ fn harness(store: FakeStore) -> Harness<'static, (bool, App)> {
 fn harness_sized(store: FakeStore, size: egui::Vec2) -> Harness<'static, (bool, App)> {
     let mut app = App::with_store(Box::new(store));
     app.selected = 0;
-    let mut h = Harness::builder()
+    let mut h = Harness::builder().renderer(quiet_renderer())
         .with_size(size)
         .with_pixels_per_point(1.0)
         .build_ui_state(
@@ -1260,7 +1272,7 @@ fn wide_harness(store: FakeStore, app_setup: impl FnOnce(&mut App)) -> Harness<'
     let mut app = App::with_store(Box::new(store));
     app.selected = 0;
     app_setup(&mut app);
-    let mut h = Harness::builder()
+    let mut h = Harness::builder().renderer(quiet_renderer())
         .with_size(egui::vec2(1920.0, 1080.0))
         .with_step_dt(0.02)
         .with_pixels_per_point(1.0)
