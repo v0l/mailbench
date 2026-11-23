@@ -191,7 +191,7 @@ pub struct Command {
     pub hint: bool,
 }
 
-pub const COMMANDS: [Command; 14] = [
+pub const COMMANDS: [Command; 15] = [
     Command { id: "next", label: "next message", default: egui::Key::J, hint: true },
     Command { id: "previous", label: "previous message", default: egui::Key::K, hint: true },
     Command { id: "open", label: "open", default: egui::Key::Enter, hint: true },
@@ -206,6 +206,7 @@ pub const COMMANDS: [Command; 14] = [
     Command { id: "move", label: "move to folder", default: egui::Key::M, hint: true },
     Command { id: "compose", label: "compose", default: egui::Key::C, hint: true },
     Command { id: "reader_width", label: "reader width", default: egui::Key::W, hint: true },
+    Command { id: "account_only", label: "this account only", default: egui::Key::V, hint: true },
 ];
 
 pub const FIXED: [(&str, &str, bool); 6] = [

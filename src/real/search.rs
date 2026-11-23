@@ -56,6 +56,9 @@ pub(super) fn matches_row(c: &super::Cache, e: &Entry, q: &Query, v: &View) -> b
     if !e.head {
         return false;
     }
+    if q.account.is_some_and(|a| a != e.account) {
+        return false;
+    }
     if v.plain {
         return e.folder == q.folder
             && match q.filter {
@@ -75,6 +78,9 @@ pub(super) fn matches_row(c: &super::Cache, e: &Entry, q: &Query, v: &View) -> b
 
 pub(super) fn matches(e: &Entry, q: &Query, v: &View) -> bool {
     let p = &v.parsed;
+    if q.account.is_some_and(|a| a != e.account) {
+        return false;
+    }
     match &p.folder {
         Some(f) => {
             if e.folder.name().to_lowercase() != *f && e.server_folder.to_lowercase() != *f {
@@ -334,7 +340,7 @@ mod tests {
 
     #[test]
     fn a_label_query_matches_messages_in_any_folder_by_label_case_insensitively() {
-        let q = Query { folder: Folder::Inbox, filter: Filter::All, text: "label:\"bench night\"".into() };
+        let q = Query { folder: Folder::Inbox, filter: Filter::All, text: "label:\"bench night\"".into(), account: None };
         let v = view(&q.text);
         assert!(matches(&entry(Folder::Inbox, &["Bench Night"]), &q, &v));
         assert!(matches(&entry(Folder::Archive, &["Receipts", "Bench Night"]), &q, &v));

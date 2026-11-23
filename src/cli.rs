@@ -224,8 +224,8 @@ fn folder_query(name: &str, unread: bool) -> Query {
     let known = Folder::UNIFIED.iter().chain(std::iter::once(&Folder::Snoozed)).find(|f| f.name() == name.to_lowercase());
     let filter = if unread { Filter::Unread } else { Filter::All };
     match known {
-        Some(f) => Query { folder: f.clone(), filter, text: String::new() },
-        None => Query { folder: Folder::Inbox, filter, text: format!("in:{name}") },
+        Some(f) => Query { folder: f.clone(), filter, text: String::new(), account: None },
+        None => Query { folder: Folder::Inbox, filter, text: format!("in:{name}"), account: None },
     }
 }
 
@@ -312,7 +312,7 @@ fn search_cmd(cli: &Cli, a: &SearchArgs) -> Res<()> {
     let folders: Vec<Folder> = if a.query.contains("in:") { vec![Folder::Inbox] } else { Folder::UNIFIED.to_vec() };
     let queries: Vec<Query> = folders
         .into_iter()
-        .map(|folder| Query { folder, filter: Filter::All, text: a.query.clone() })
+        .map(|folder| Query { folder, filter: Filter::All, text: a.query.clone(), account: None })
         .collect();
     s.real.list(&queries[0], 0, a.limit);
     until(Duration::from_secs(20), || !s.real.searching(&queries[0]));

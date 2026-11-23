@@ -93,7 +93,7 @@ fn picking_a_folder_at_phone_width_closes_the_folder_view() {
     h.run();
     h.run();
     assert!(h.state().1.folders_open);
-    h.get_by_label_contains("sent").click();
+    h.get_by_label("folder sent").click();
     h.run();
     h.run();
     assert!(!h.state().1.folders_open);

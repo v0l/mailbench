@@ -91,11 +91,16 @@ pub struct Query {
     pub folder: Folder,
     pub filter: Filter,
     pub text: String,
+    pub account: Option<usize>,
 }
 
 impl Query {
     pub fn new(folder: Folder) -> Query {
-        Query { folder, filter: Filter::All, text: String::new() }
+        Query { folder, filter: Filter::All, text: String::new(), account: None }
+    }
+
+    pub fn in_account(folder: Folder, account: usize) -> Query {
+        Query { account: Some(account), ..Query::new(folder) }
     }
 }
 
@@ -404,6 +409,16 @@ pub trait MailStore {
 
     fn tree(&self) -> Vec<TreeFolder> {
         Vec::new()
+    }
+
+    fn account_folders(&self, account: usize) -> Vec<FolderInfo> {
+        Folder::UNIFIED
+            .iter()
+            .map(|f| {
+                let counts = self.counts(&Query::in_account(f.clone(), account));
+                FolderInfo { folder: f.clone(), unread: counts.unread, total: counts.all }
+            })
+            .collect()
     }
 
     fn create_folder(&mut self, _account: usize, _name: &str) -> Result<(), StoreError> {
