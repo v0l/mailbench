@@ -15,7 +15,7 @@ case "$ABI" in arm64-v8a|x86_64) ;; *) echo "ABI must be arm64-v8a or x86_64" >&
 
 JNI=$ROOT/target/android-jni
 rm -rf "$JNI"
-cargo ndk --platform 26 -t "$ABI" -o "$JNI" build --lib $FLAG
+CARGO_PROFILE_DEV_DEBUG=0 cargo ndk --platform 26 -t "$ABI" -o "$JNI" build --lib $FLAG
 LIB=$JNI/$ABI/libmailbench.so
 [ -f "$LIB" ] || { echo "cargo ndk did not produce $LIB" >&2; exit 1; }
 

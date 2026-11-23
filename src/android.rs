@@ -1,4 +1,4 @@
-use crate::insets::{InsetsPx, inset_rect};
+use crate::insets::{InsetsPx, inset_rect, merge_insets};
 use crate::shell::{Env, Shell, default_data_dir, surface_screen_rect};
 use crate::store::OsKeychain;
 use crate::store::android::set_data_dir;
@@ -41,12 +41,35 @@ fn window_insets_px(env: &mut JNIEnv, activity_ptr: usize) -> jni::errors::Resul
     let mut side = |name: &str| -> jni::errors::Result<f32> {
         Ok(env.call_method(&insets, name, "()I", &[])?.i()? as f32)
     };
-    Ok(Some(InsetsPx {
+    let bars = InsetsPx {
         left: side("getSystemWindowInsetLeft")?,
         top: side("getSystemWindowInsetTop")?,
         right: side("getSystemWindowInsetRight")?,
         bottom: side("getSystemWindowInsetBottom")?,
-    }))
+    };
+    let cutout = env
+        .call_method(&insets, "getDisplayCutout", "()Landroid/view/DisplayCutout;", &[])
+        .and_then(|v| v.l());
+    let cutout_px = match cutout {
+        Ok(c) if !c.is_null() => {
+            let mut cut = |name: &str| -> f32 {
+                env.call_method(&c, name, "()I", &[]).and_then(|v| v.i()).unwrap_or(0) as f32
+            };
+            InsetsPx {
+                left: cut("getSafeInsetLeft"),
+                top: cut("getSafeInsetTop"),
+                right: cut("getSafeInsetRight"),
+                bottom: cut("getSafeInsetBottom"),
+            }
+        }
+        _ => {
+            if env.exception_check().unwrap_or(false) {
+                let _ = env.exception_clear();
+            }
+            InsetsPx::default()
+        }
+    };
+    Ok(Some(merge_insets(bars, cutout_px)))
 }
 
 fn system_bar_px(activity_ptr: usize) -> InsetsPx {
@@ -59,7 +82,7 @@ fn system_bar_px(activity_ptr: usize) -> InsetsPx {
     if env.exception_check().unwrap_or(false) {
         let _ = env.exception_clear();
     }
-    log::info!("insets real={real:?} dimens top={top} bottom={bottom}");
+    log::debug!("insets real={real:?} dimens top={top} bottom={bottom}");
     real.unwrap_or(InsetsPx { top, bottom, ..Default::default() })
 }
 
@@ -67,6 +90,7 @@ struct Insetted {
     shell: Shell,
     insets: InsetsPx,
     seen_size: egui::Vec2,
+    read_at: std::time::Instant,
     activity_ptr: usize,
     app: android_activity::AndroidApp,
 }
@@ -81,11 +105,18 @@ impl eframe::App for Insetted {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let size = ui.max_rect().size();
-        if size != self.seen_size {
+        if size != self.seen_size || self.read_at.elapsed() > std::time::Duration::from_millis(250) {
             self.seen_size = size;
-            self.insets = system_bar_px(self.activity_ptr);
+            self.read_at = std::time::Instant::now();
+            let fresh = system_bar_px(self.activity_ptr);
+            if fresh != self.insets {
+                self.insets = fresh;
+                ui.ctx().request_repaint();
+            }
         }
         let rect = inset_rect(ui.max_rect(), self.insets, ui.ctx().pixels_per_point());
+        ui.painter().rect_filled(ui.max_rect(), 0.0, ui.visuals().panel_fill);
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
         self.shell.ui(&mut child, frame);
     }
@@ -107,7 +138,7 @@ fn android_main(app: android_activity::AndroidApp) {
         Box::new(|cc| {
             crate::kit::setup(&cc.egui_ctx);
             let shell = Shell::new(default_data_dir(), Rc::new(OsKeychain), Env::live(), None);
-            Ok(Box::new(Insetted { shell, insets: InsetsPx::default(), seen_size: egui::Vec2::ZERO, activity_ptr, app: handle }))
+            Ok(Box::new(Insetted { shell, insets: InsetsPx::default(), seen_size: egui::Vec2::ZERO, read_at: std::time::Instant::now(), activity_ptr, app: handle }))
         }),
     );
 }
