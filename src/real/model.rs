@@ -71,6 +71,7 @@ pub enum Op {
     DropDraft { account: String, message_id: String },
     MoveSet { account: String, folder: String, uids: Vec<u32>, uid_validity: u32, to: String },
     FlagsSet { account: String, folder: String, uids: Vec<u32>, uid_validity: u32, seen: Option<bool>, flagged: Option<bool> },
+    DeleteSet { account: String, folder: String, uids: Vec<u32>, uid_validity: u32 },
 }
 
 impl Op {
@@ -86,6 +87,7 @@ impl Op {
             | Op::Draft { account, .. }
             | Op::DropDraft { account, .. }
             | Op::MoveSet { account, .. }
+            | Op::DeleteSet { account, .. }
             | Op::FlagsSet { account, .. } => account,
         }
     }

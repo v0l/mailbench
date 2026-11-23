@@ -184,6 +184,12 @@ async fn push(shared: &Shared, backend: &mut dyn Backend, op: &Op, account: &str
                 other => other,
             }
         }
+        Op::DeleteSet { folder, uids, uid_validity, .. } => {
+            if shared.validity(account, folder) != Some(*uid_validity) {
+                return Ok(());
+            }
+            backend.delete_messages(folder, uids).await
+        }
         Op::CreateFolder { name, .. } => backend.create_folder(name).await,
         Op::RenameFolder { from, to, .. } => backend.rename_folder(from, to).await,
         Op::DeleteFolder { name, .. } => backend.delete_folder(name).await,
@@ -211,7 +217,7 @@ async fn push(shared: &Shared, backend: &mut dyn Backend, op: &Op, account: &str
             let Some(rev) = shared.local_rev(local) else { return Ok(()) };
             let Outbound::Ready(message) = shared.outgoing(local, true, true) else { return Ok(()) };
             let Some(mid) = message.message_id.clone() else { return Ok(()) };
-            let folder = shared.drafts_folder(account);
+            let folder = shared.local_folder(local).map(|f| shared.server_name(account, &f)).unwrap_or_else(|| shared.drafts_folder(account));
             let old = drafts_with(backend, &folder, &mid).await;
             let raw = render_message(&message, true)?;
             let flags = Flags { draft: true, seen: true, ..Default::default() };
@@ -219,14 +225,23 @@ async fn push(shared: &Shared, backend: &mut dyn Backend, op: &Op, account: &str
             if !old.is_empty() {
                 backend.delete_messages(&folder, &old).await?;
             }
+            for other in [shared.drafts_folder(account), shared.server_name(account, &crate::mailstore::Folder::Trash)] {
+                if other != folder {
+                    let stale = drafts_with(backend, &other, &mid).await;
+                    if !stale.is_empty() {
+                        backend.delete_messages(&other, &stale).await?;
+                    }
+                }
+            }
             shared.mark_pushed(local, rev);
             Ok(())
         }
         Op::DropDraft { message_id, .. } => {
-            let folder = shared.drafts_folder(account);
-            let old = drafts_with(backend, &folder, message_id).await;
-            if !old.is_empty() {
-                backend.delete_messages(&folder, &old).await?;
+            for folder in [shared.drafts_folder(account), shared.server_name(account, &crate::mailstore::Folder::Trash)] {
+                let old = drafts_with(backend, &folder, message_id).await;
+                if !old.is_empty() {
+                    backend.delete_messages(&folder, &old).await?;
+                }
             }
             Ok(())
         }

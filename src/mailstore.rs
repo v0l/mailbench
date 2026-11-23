@@ -378,7 +378,10 @@ pub trait MailStore {
             .collect()
     }
     fn mark_all_read(&mut self, folder: &Folder) -> Result<Vec<Restore>, StoreError> {
-        let query = Query { filter: Filter::Unread, ..Query::new(folder.clone()) };
+        self.mark_all_read_in(folder, None)
+    }
+    fn mark_all_read_in(&mut self, folder: &Folder, account: Option<usize>) -> Result<Vec<Restore>, StoreError> {
+        let query = Query { filter: Filter::Unread, account, ..Query::new(folder.clone()) };
         let ids: Vec<MessageId> = self.list(&query, 0, usize::MAX).items.iter().map(|s| s.id).collect();
         let before = self.snapshot(&ids);
         self.bulk_flags(&ids, FlagChange { unread: Some(false), flagged: None })?;
@@ -392,6 +395,9 @@ pub trait MailStore {
             self.set_flags(r.id, FlagChange { unread: Some(r.unread), flagged: Some(r.flagged) })?;
         }
         Ok(())
+    }
+    fn delete_forever(&mut self, _ids: &[MessageId]) -> Result<(), StoreError> {
+        Err(StoreError::Backend("messages cannot be deleted here".into()))
     }
     fn pending_ops(&self) -> usize {
         0

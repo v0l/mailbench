@@ -242,7 +242,7 @@ fn deleting_in_trash_asks_first_and_then_removes_for_good() {
     let (trash, ops) = (count(&h, ms::Folder::Trash), h.state().1.store.pending_ops());
     h.key_press(egui::Key::Delete);
     settle(&mut h);
-    h.get_by_label_contains("for good");
+    h.get_by_label("cancel");
     assert_eq!(count(&h, ms::Folder::Trash), trash);
     h.get_by_label("cancel").click();
     settle(&mut h);
@@ -314,7 +314,7 @@ fn mark_read_on_a_selection_works_in_every_role_folder() {
     for f in [ms::Folder::Junk, ms::Folder::Trash, ms::Folder::Drafts, ms::Folder::Sent, ms::Folder::Archive] {
         let (mut h, _d) = open(1);
         go(&mut h, f.clone());
-        h.state_mut().1.marked = [0usize, 1].into_iter().collect();
+        h.state_mut().1.marked = [1usize, 2].into_iter().collect();
         h.key_press(egui::Key::U);
         settle(&mut h);
         assert_eq!(unread(&h, f.clone()), 0, "{f:?}");
