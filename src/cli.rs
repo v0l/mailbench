@@ -42,6 +42,28 @@ pub enum Command {
     Decrypt(DecryptArgs),
     #[command(name = "verify-smime")]
     VerifySmime(VerifyArgs),
+    #[command(subcommand)]
+    Mcp(McpCmd),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum McpCmd {
+    Serve(ServeArgs),
+    Token(TokenArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ServeArgs {
+    #[arg(long, default_value_t = crate::mcp::DEFAULT_PORT)]
+    pub port: u16,
+    #[arg(long, default_value = "127.0.0.1", help = "Only 127.0.0.1 and ::1 are accepted")]
+    pub bind: String,
+}
+
+#[derive(Args, Debug)]
+pub struct TokenArgs {
+    #[arg(long, help = "Replace the token; clients using the old one stop working")]
+    pub rotate: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -537,12 +559,38 @@ fn verify_cmd(a: &VerifyArgs) -> Res<()> {
     }
 }
 
+fn mcp_token_cmd(a: &TokenArgs) -> Res<()> {
+    let store = open_store()?;
+    let token = if a.rotate { crate::mcp::token::rotate(&store)? } else { crate::mcp::token::load_or_create(&store)?.0 };
+    println!("{token}");
+    Ok(())
+}
+
+fn mcp_serve_cmd(a: &ServeArgs) -> Res<()> {
+    crate::mcp::ensure_loopback(&a.bind)?;
+    let store = open_store()?;
+    let (token, fresh) = crate::mcp::token::load_or_create(&store)?;
+    if fresh {
+        eprintln!("new access token: {token}");
+    }
+    let tools: std::sync::Arc<dyn crate::mcp::tools::Tools> = std::sync::Arc::new(crate::mcp::tools::Unimplemented);
+    let server = crate::mcp::Server::start(crate::mcp::ServerConfig { token, port: a.port, tools })?;
+    for addr in &server.addrs {
+        eprintln!("listening on http://{addr}/mcp");
+    }
+    loop {
+        std::thread::sleep(Duration::from_secs(3600));
+    }
+}
+
 pub fn run(cli: &Cli) -> Res<()> {
     let Some(command) = &cli.command else { return Ok(()) };
     match command {
         Command::Keys(k) => keys_cmd(k),
         Command::Decrypt(a) => decrypt_cmd(a),
         Command::VerifySmime(a) => verify_cmd(a),
+        Command::Mcp(McpCmd::Serve(a)) => mcp_serve_cmd(a),
+        Command::Mcp(McpCmd::Token(a)) => mcp_token_cmd(a),
         Command::Accounts(f) => accounts_cmd(cli, f.json),
         Command::Folders(f) => folders_cmd(cli, f.json),
         Command::List(a) => list_cmd(cli, a),

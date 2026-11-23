@@ -17,6 +17,7 @@ pub mod flowed;
 pub mod htmlview;
 pub mod insets;
 pub mod kit;
+pub mod mcp;
 pub mod mailstore;
 pub mod notify;
 pub mod oauth;
