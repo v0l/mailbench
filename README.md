@@ -7,6 +7,7 @@ A keyboard-first desktop mail client, part of the [bench suite](https://github.c
 - Every byte on disk is encrypted: messages, attachments, the search index, credentials and settings. The data key is unlocked by your OS keychain or a password. See [docs/storage.md](docs/storage.md).
 - Messaging backends plug in behind one trait. IMAP (IDLE, CONDSTORE, STARTTLS and TLS) and SMTP (PLAIN, LOGIN and XOAUTH2) come first, and Nostr NIP-17 private DMs sit beside them. See [docs/backends.md](docs/backends.md).
 - Three panes: accounts and folders, a dense message list, and a reader. Remote images are blocked until you load them.
+- Paste or drop an image into the composer to send it inline. See [docs/inline-images.md](docs/inline-images.md).
 
 ## Running it
 
