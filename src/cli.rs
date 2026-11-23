@@ -625,6 +625,19 @@ fn mcp_status_cmd() -> Res<()> {
     Ok(())
 }
 
+fn is_agent(real: &RealStore, id: MessageId) -> bool {
+    let mut agent = false;
+    until(Duration::from_secs(15), || match real.get(id) {
+        Ok(m) if m.body_state == crate::mailstore::BodyState::Loading => false,
+        Ok(m) => {
+            agent = crate::mailstore::is_agent_draft(&m.headers);
+            true
+        }
+        Err(_) => true,
+    });
+    agent
+}
+
 fn drafts_cmd(cli: &Cli, json: bool) -> Res<()> {
     let s = session(cli)?;
     let q = Query::new(Folder::Drafts);
@@ -634,7 +647,7 @@ fn drafts_cmd(cli: &Cli, json: bool) -> Res<()> {
             .items
             .iter()
             .map(|i| {
-                let agent = s.real.get(i.id).map(|m| crate::mailstore::is_agent_draft(&m.headers)).unwrap_or(false);
+                let agent = is_agent(&s.real, i.id);
                 let mut v = summary_json(i);
                 v["agent"] = json!(agent);
                 v
@@ -644,7 +657,7 @@ fn drafts_cmd(cli: &Cli, json: bool) -> Res<()> {
         return Ok(());
     }
     for i in &page.items {
-        let agent = s.real.get(i.id).map(|m| crate::mailstore::is_agent_draft(&m.headers)).unwrap_or(false);
+        let agent = is_agent(&s.real, i.id);
         let note = if agent { crate::mailstore::AGENT_BANNER } else { "" };
         println!("{}\t{}\t{}\t{}", id_text(i.id), i.when, i.subject, note);
     }
