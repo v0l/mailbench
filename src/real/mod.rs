@@ -1399,6 +1399,7 @@ fn quiet_left(shared: &Shared, user_seen: u64) -> Option<Duration> {
 fn builder(shared: Arc<Shared>) {
     let mut seen = 0;
     let mut first = true;
+    let mut owe_full = false;
     let mut user_seen = 0;
     let log = std::env::var_os("MAILBENCH_BUILD_LOG").is_some_and(|v| v == "1");
     let mut window = (std::time::Instant::now(), 0u32);
@@ -1409,7 +1410,7 @@ fn builder(shared: Arc<Shared>) {
             let _ = shared.wake.wait_timeout(guard, Duration::from_millis(250));
             continue;
         }
-        if !first && lock(&shared.pending).is_none() {
+        if !first && !owe_full && lock(&shared.pending).is_none() {
             seen = generation;
             shared.built.store(generation, Ordering::SeqCst);
             continue;
@@ -1422,6 +1423,7 @@ fn builder(shared: Arc<Shared>) {
             }
         }
         let user = shared.user_gen.load(Ordering::SeqCst);
+        let was_first = first;
         let reason = lock(&shared.pending).take().map(|p| p.reason);
         let started = std::time::Instant::now();
         let fresh = Arc::new(shared.build(first));
@@ -1456,6 +1458,7 @@ fn builder(shared: Arc<Shared>) {
             shared.built.store(generation, Ordering::SeqCst);
         }
         first = false;
+        owe_full = was_first;
         if let Some(ctx) = lock(&shared.ctx).as_ref() {
             ctx.request_repaint();
         }
