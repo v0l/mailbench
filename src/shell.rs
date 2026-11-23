@@ -1057,12 +1057,7 @@ impl SettingsForm {
                                 });
                                 self.panels.account_sync(ui, draft, i);
                                 ui.horizontal(|ui| {
-                                    if cfg!(target_os = "android") {
-                                        draft.notify.enabled = false;
-                                        ui.add_enabled(false, egui::Checkbox::new(&mut false, "notifications (not available on Android yet)"));
-                                    } else {
                                     ui.checkbox(&mut draft.notify.enabled, "notifications");
-                                    }
                                     if draft.notify.enabled {
                                         let mut quiet = draft.notify.quiet.is_some();
                                         ui.checkbox(&mut quiet, "quiet hours");
@@ -1395,6 +1390,14 @@ impl Shell {
             real.set_notify(&c.id, c.notify);
         }
         real.set_notifier(std::sync::Arc::new(crate::notify::DesktopNotifier));
+        #[cfg(target_os = "android")]
+        {
+            let wanted = configs.iter().any(|c| c.notify.enabled);
+            if wanted {
+                crate::android_bridge::request_notification_permission();
+            }
+            crate::android_bridge::sync_service(wanted);
+        }
         let mut app = App::with_store(Box::new(real));
         app.html_state.dark = prefs.reading.dark_html;
         app.html_state.default_zoom = prefs.reading.zoom_milli();

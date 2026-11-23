@@ -58,6 +58,7 @@ pub struct Notice {
     pub title: String,
     pub body: String,
     pub focus: u64,
+    pub account: usize,
 }
 
 pub trait Notifier: Send + Sync {
@@ -101,13 +102,13 @@ impl Batcher {
 pub fn compose(batch: &[Incoming]) -> Notice {
     let newest = batch.last().expect("a batch has a message");
     if batch.len() == 1 {
-        return Notice { title: newest.from.clone(), body: newest.subject.clone(), focus: newest.id };
+        return Notice { title: newest.from.clone(), body: newest.subject.clone(), focus: newest.id, account: 0 };
     }
     let mut lines: Vec<String> = batch.iter().rev().take(LISTED).map(|m| format!("{}: {}", m.from, m.subject)).collect();
     if batch.len() > LISTED {
         lines.push(format!("and {} more", batch.len() - LISTED));
     }
-    Notice { title: format!("{} new messages", batch.len()), body: lines.join("\n"), focus: newest.id }
+    Notice { title: format!("{} new messages", batch.len()), body: lines.join("\n"), focus: newest.id, account: 0 }
 }
 
 pub struct DesktopNotifier;
@@ -116,7 +117,10 @@ impl Notifier for DesktopNotifier {
     fn show(&self, notice: Notice, on_click: Box<dyn FnOnce() + Send>) {
         #[cfg(target_os = "android")]
         {
-            let _ = (notice, on_click);
+            let _ = on_click;
+            if let Err(e) = crate::android_bridge::post_notification(notice.account, &notice.title, &notice.body, notice.focus) {
+                log::warn!("notification failed: {e}");
+            }
         }
         #[cfg(not(target_os = "android"))]
         std::thread::spawn(move || {

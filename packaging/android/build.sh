@@ -28,11 +28,19 @@ sed "s/@DEBUGGABLE@/$DEBUGGABLE/" packaging/android/AndroidManifest.xml > "$OUT/
 "$BT/aapt2" link -o "$OUT/base.apk" -I "$JAR" --manifest "$OUT/AndroidManifest.xml" \
     --min-sdk-version 26 --target-sdk-version 34 \
     --version-code "$CODE" --version-name "$VERSION" "$OUT/res.zip"
+KOTLINC=${KOTLINC:-$(command -v kotlinc || echo "$HOME/opt/kotlinc/bin/kotlinc")}
+KOTLIN_HOME=$(cd "$(dirname "$(readlink -f "$KOTLINC")")/.." && pwd)
+STDLIB=${KOTLIN_STDLIB:-$KOTLIN_HOME/lib/kotlin-stdlib.jar}
+rm -rf "$OUT/kotlin"; mkdir -p "$OUT/kotlin"
+"$KOTLINC" -no-stdlib -jvm-target 17 -cp "$JAR:$STDLIB" -d "$OUT/kotlin/classes.jar" $(find packaging/android/kotlin -name '*.kt')
+"$BT/d8" --release --min-api 26 --lib "$JAR" --output "$OUT/kotlin" "$OUT/kotlin/classes.jar" "$STDLIB"
+[ -f "$OUT/kotlin/classes.dex" ] || { echo "d8 produced no classes.dex" >&2; exit 1; }
 python3 - "$OUT" "$LIB" "$ABI" <<'PY'
 import sys, zipfile
 out, lib, abi = sys.argv[1:4]
 with zipfile.ZipFile(f"{out}/base.apk", "a") as z:
     z.write(lib, f"lib/{abi}/libmailbench.so", zipfile.ZIP_STORED)
+    z.write(f"{out}/kotlin/classes.dex", "classes.dex", zipfile.ZIP_DEFLATED)
 PY
 "$BT/zipalign" -f -p 4 "$OUT/base.apk" "$OUT/aligned.apk"
 if [ -n "${KEYSTORE:-}" ]; then

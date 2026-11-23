@@ -756,7 +756,8 @@ impl Shared {
         let prefs = lock(&self.prefs)[index];
         let now = chrono::Local::now();
         let minute = (now.hour() * 60 + now.minute()) as u16;
-        let Some(notice) = lock(&self.batchers)[index].take(&prefs, minute) else { return };
+        let Some(mut notice) = lock(&self.batchers)[index].take(&prefs, minute) else { return };
+        notice.account = index;
         let Some(notifier) = lock(&self.notifier).clone() else { return };
         let shared = self.clone();
         let focus = notice.focus;
@@ -1860,6 +1861,10 @@ impl MailStore for RealStore {
     }
 
     fn take_focus(&mut self) -> Option<MessageId> {
+        #[cfg(target_os = "android")]
+        if let Some(id) = crate::android_bridge::take_focus() {
+            return Some(MessageId(id));
+        }
         lock(&self.shared.focus).take().map(MessageId)
     }
 

@@ -1,6 +1,8 @@
 pub mod accounts;
 #[cfg(target_os = "android")]
 mod android;
+#[cfg(target_os = "android")]
+pub(crate) mod android_bridge;
 pub mod app;
 pub mod attach;
 pub mod autodetect;
@@ -9,6 +11,7 @@ pub mod cli;
 pub mod crypt;
 pub mod data;
 pub mod dns;
+pub mod documents;
 pub mod fake;
 pub mod htmlview;
 pub mod insets;

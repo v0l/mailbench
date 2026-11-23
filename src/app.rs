@@ -91,13 +91,43 @@ fn rfd_picker() -> SavePicker {
 }
 
 #[cfg(not(target_os = "android"))]
-fn pick_attachment_files() -> Vec<std::path::PathBuf> {
-    rfd::FileDialog::new().set_title("Attach files").pick_files().unwrap_or_default()
+fn pick_attachment_files() -> Vec<PickedFile> {
+    rfd::FileDialog::new().set_title("Attach files").pick_files().unwrap_or_default().into_iter().map(PickedFile::Path).collect()
 }
 
 #[cfg(target_os = "android")]
-fn pick_attachment_files() -> Vec<std::path::PathBuf> {
-    Vec::new()
+fn pick_attachment_files() -> Vec<PickedFile> {
+    match crate::android_bridge::open_documents() {
+        Ok(items) => items
+            .into_iter()
+            .map(|p| match p.data {
+                Ok(data) => PickedFile::Bytes(p.name, data),
+                Err(e) => PickedFile::Failed(e),
+            })
+            .collect(),
+        Err(e) => vec![PickedFile::Failed(e)],
+    }
+}
+
+#[cfg(target_os = "android")]
+fn save_document_async(name: String, data: Vec<u8>, done: &'static str) -> Receiver<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mime = guess_mime(&name);
+        let msg = match crate::android_bridge::save_document(&name, mime, &data) {
+            Ok(Some(_)) => done.to_string(),
+            Ok(None) => String::new(),
+            Err(e) => format!("Could not save: {e}"),
+        };
+        let _ = tx.send(msg);
+    });
+    rx
+}
+
+pub enum PickedFile {
+    Path(std::path::PathBuf),
+    Bytes(String, Vec<u8>),
+    Failed(String),
 }
 
 #[derive(Clone, Debug)]
@@ -506,7 +536,8 @@ pub struct App {
     pub viewing: Option<usize>,
     pub autosave: Duration,
     pub pending_send: Option<PendingSend>,
-    picker: Option<Receiver<Vec<std::path::PathBuf>>>,
+    picker: Option<Receiver<Vec<PickedFile>>>,
+    save_result: Option<Receiver<String>>,
     html: crate::htmlview::Renderer,
     pub html_state: crate::kit::HtmlState,
     pub trusted: HashSet<String>,
@@ -579,6 +610,7 @@ impl App {
             autosave: AUTOSAVE,
             pending_send: None,
             picker: None,
+            save_result: None,
             html: crate::htmlview::Renderer::default(),
             html_state: Default::default(),
             trusted: HashSet::new(),
@@ -1102,21 +1134,39 @@ impl App {
         let Some(items) = self.attachment_data(v) else { return };
         let Some(item) = items.get(index) else { return };
         let name = crate::attach::safe_name(&item.name, "attachment");
+        #[cfg(target_os = "android")]
+        {
+            self.save_result = Some(save_document_async(name.clone(), item.data.as_ref().clone(), "Saved the attachment"));
+            return;
+        }
+        #[cfg(not(target_os = "android"))]
+        {
         let ext = name.rsplit_once('.').map(|(_, e)| e.to_string()).unwrap_or_default();
         let Some(path) = (self.save_picker)(&name, &ext) else { return };
         self.notice = Some(match std::fs::write(&path, item.data.as_slice()) {
             Ok(()) => format!("Saved {}", path.display()),
             Err(e) => format!("Could not save: {e}"),
         });
+        }
     }
 
     fn save_all(&mut self, v: &View) {
         let Some(items) = self.attachment_data(v) else { return };
-        let Some(path) = (self.save_picker)("attachments.zip", "zip") else { return };
-        self.notice = Some(match crate::attach::zip_all(&items).and_then(|bytes| std::fs::write(&path, bytes)) {
-            Ok(()) => format!("Saved {} attachments to {}", items.len(), path.display()),
-            Err(e) => format!("Could not save: {e}"),
-        });
+        #[cfg(target_os = "android")]
+        {
+            match crate::attach::zip_all(&items) {
+                Ok(bytes) => self.save_result = Some(save_document_async("attachments.zip".into(), bytes, "Saved the attachments")),
+                Err(e) => self.notice = Some(format!("Could not save: {e}")),
+            }
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let Some(path) = (self.save_picker)("attachments.zip", "zip") else { return };
+            self.notice = Some(match crate::attach::zip_all(&items).and_then(|bytes| std::fs::write(&path, bytes)) {
+                Ok(()) => format!("Saved {} attachments to {}", items.len(), path.display()),
+                Err(e) => format!("Could not save: {e}"),
+            });
+        }
     }
 
     fn open_attachment(&mut self, v: &View, index: usize) {
@@ -1211,6 +1261,7 @@ impl App {
             self.applied_theme = Some(self.prefs.theme);
         }
         self.follow_notification();
+        self.poll_save_result(&ctx);
         let keys = self.key_actions(&ctx);
         self.apply(&ctx, keys);
         let v = self.view();
@@ -1605,6 +1656,20 @@ impl App {
                 .map(|n| Target { label: n.path, folder: n.folder }),
         );
         out
+    }
+
+    fn poll_save_result(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.save_result else { return };
+        match rx.try_recv() {
+            Ok(msg) => {
+                self.save_result = None;
+                if !msg.is_empty() {
+                    self.notice = Some(msg);
+                }
+            }
+            Err(TryRecvError::Disconnected) => self.save_result = None,
+            Err(TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(200)),
+        }
     }
 
     fn follow_notification(&mut self) {
@@ -2287,9 +2352,15 @@ impl App {
                 Err(TryRecvError::Empty) => {}
             }
         }
-        for path in picked {
-            if let Err(e) = draft.attach_path(&path) {
-                errors.push(e);
+        for file in picked {
+            match file {
+                PickedFile::Path(path) => {
+                    if let Err(e) = draft.attach_path(&path) {
+                        errors.push(e);
+                    }
+                }
+                PickedFile::Bytes(name, data) => draft.attach_bytes(&name, data),
+                PickedFile::Failed(e) => errors.push(e),
             }
         }
         for f in ctx.input(|i| i.raw.dropped_files.clone()) {
@@ -2360,10 +2431,7 @@ impl App {
                     ui.add_space(4.0);
                 }
                 ui.horizontal(|ui| {
-                    attach = ui.add(Key::new("attach").outline(VALUE).min_width(90.0).enabled(!cfg!(target_os = "android"))).clicked();
-                    if cfg!(target_os = "android") {
-                        Line::new().note("Attachments are not available on Android yet").size(11.0).show(ui);
-                    }
+                    attach = ui.add(Key::new("attach").outline(VALUE).min_width(90.0)).clicked();
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let note = if draft.saved && !draft.is_dirty() { "Saved to drafts, encrypted" } else { "Not saved yet" };
                         Line::new().note(note).size(11.0).show(ui);
