@@ -45,6 +45,9 @@ pub enum Action {
     OpenLink(String),
     Unsubscribe,
     GoTo(Folder),
+    GoToIn(usize, Folder),
+    AccountOnly(Option<usize>),
+    ClearAccount,
     Label(String),
     Expand(MessageId),
     FocusThread(MessageId),
@@ -494,6 +497,7 @@ pub struct PendingSend {
 pub struct App {
     pub store: Box<dyn MailStore>,
     pub folder: Folder,
+    pub account: Option<usize>,
     pub filter: Filter,
     pub search: String,
     pub selected: usize,
@@ -567,6 +571,7 @@ impl App {
         App {
             store,
             folder: Folder::Inbox,
+            account: None,
             filter: Filter::All,
             search: String::new(),
             selected: 0,
@@ -625,7 +630,7 @@ impl App {
     }
 
     pub fn query(&self) -> Query {
-        Query { folder: self.folder.clone(), filter: self.filter, text: self.search.clone() }
+        Query { folder: self.folder.clone(), filter: self.filter, text: self.search.clone(), account: self.account }
     }
 
     fn view(&mut self) -> View {
@@ -684,7 +689,7 @@ impl App {
         }
         let plain = ctx.input(|i| !i.modifiers.shift);
         let keys = &self.prefs.keys;
-        let table: [(K, Action); 16] = [
+        let table: [(K, Action); 17] = [
             (keys.key_for("next"), Action::Next),
             (K::ArrowDown, Action::Next),
             (keys.key_for("previous"), Action::Previous),
@@ -701,6 +706,7 @@ impl App {
             (keys.key_for("move"), Action::OpenMove),
             (keys.key_for("search"), Action::Search),
             (keys.key_for("reader_width"), Action::ToggleReaderWidth),
+            (keys.key_for("account_only"), Action::AccountOnly(None)),
         ];
         let snooze_key = keys.key_for("snooze");
         let mut out = Vec::new();
@@ -1034,6 +1040,9 @@ impl App {
                     } else if !self.search.is_empty() {
                         self.search.clear();
                         self.selected = 0;
+                    } else if self.account.is_some() {
+                        self.account = None;
+                        self.selected = 0;
                     }
                 }
                 Action::LoadImagesOnce => {
@@ -1067,7 +1076,27 @@ impl App {
                         self.notice = Some(unsubscribe(u));
                     }
                 }
-                Action::GoTo(f) => self.go_folder(f),
+                Action::GoTo(f) => {
+                    if self.account.take().is_some() {
+                        self.selected = 0;
+                    }
+                    self.go_folder(f);
+                }
+                Action::GoToIn(account, f) => {
+                    self.account = Some(account);
+                    self.folder = f;
+                    self.selected = 0;
+                    self.filter = Filter::All;
+                }
+                Action::AccountOnly(target) => {
+                    let target = target.or_else(|| v.head.as_ref().map(|h| h.account));
+                    self.account = if self.account.is_some() && (target.is_none() || self.account == target) { None } else { target };
+                    self.selected = 0;
+                }
+                Action::ClearAccount => {
+                    self.account = None;
+                    self.selected = 0;
+                }
                 Action::Label(name) => {
                     self.search = if name.contains(' ') { format!("label:\"{name}\"") } else { format!("label:{name}") };
                     self.selected = 0;
@@ -1270,6 +1299,7 @@ impl App {
         let failed = self.force_failed || accounts.iter().any(|a| a.sync == SyncState::Failed);
         let mut actions = Vec::new();
         self.narrow = ui.available_width() < NARROW_BELOW;
+        let account_before = self.account;
         let folder_before = self.folder.clone();
         self.header(ui, &accounts, failed, &mut actions);
         if !self.narrow {
@@ -1288,7 +1318,7 @@ impl App {
         self.folder_dialog(&ctx);
         self.undo_toast(&ctx);
         self.apply(&ctx, actions);
-        if self.narrow && self.folder != folder_before {
+        if self.narrow && (self.folder != folder_before || self.account != account_before) {
             self.folders_open = false;
         }
     }
@@ -1370,7 +1400,7 @@ impl App {
 
     fn header(&mut self, ui: &mut Ui, accounts: &[AccountInfo], failed: bool, actions: &mut Vec<Action>) {
         if self.narrow {
-            self.narrow_header(ui, actions);
+            self.narrow_header(ui, accounts, actions);
             return;
         }
         egui::Panel::top("head").frame(header_frame()).show(ui, |ui| {
@@ -1384,6 +1414,8 @@ impl App {
                         self.selected = 0;
                     }
                 });
+                ui.add_space(8.0);
+                self.account_chip(ui, accounts, actions);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.add(Key::new("compose").solid(READOUT).min_width(100.0)).clicked() {
                         actions.push(Action::Compose);
@@ -1412,7 +1444,19 @@ impl App {
         });
     }
 
-    fn narrow_header(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
+    fn account_chip(&self, ui: &mut Ui, accounts: &[AccountInfo], actions: &mut Vec<Action>) {
+        let Some(info) = self.account.and_then(|a| accounts.get(a)) else { return };
+        let text = format!("showing {} only, click to clear", info.name);
+        let h = if self.narrow { 44.0 } else { KEY_H };
+        ui.scope(|ui| {
+            ui.set_min_height(h);
+            if chip_button(ui, &text, READOUT).clicked() {
+                actions.push(Action::ClearAccount);
+            }
+        });
+    }
+
+    fn narrow_header(&mut self, ui: &mut Ui, accounts: &[AccountInfo], actions: &mut Vec<Action>) {
         egui::Panel::top("head").frame(header_frame()).show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.add(Key::new("folders").outline(VALUE)).clicked() {
@@ -1426,6 +1470,7 @@ impl App {
                 }
             });
             ui.add_space(4.0);
+            self.account_chip(ui, accounts, actions);
             let r = field(ui, &mut self.search, "search, press /");
             self.search_id = Some(r.id);
             if r.changed() {
@@ -1460,8 +1505,12 @@ impl App {
         ui.spacing_mut().item_spacing.y = 2.0;
         heading(ui, "accounts");
         ui.add_space(4.0);
-        for a in accounts {
-            let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 38.0), egui::Sense::click());
+        for (i, a) in accounts.iter().enumerate() {
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), if self.narrow { 44.0 } else { 38.0 }), egui::Sense::click());
+            ui.ctx().accesskit_node_builder(resp.id, |n| n.set_label(format!("account {}", a.name)));
+            if resp.clicked() {
+                actions.push(Action::AccountOnly(Some(i)));
+            }
             let p = ui.painter();
             if resp.hovered() {
                 p.rect_filled(rect, 2.0, BAND);
@@ -1493,8 +1542,8 @@ impl App {
         heading(ui, "inbox");
         ui.add_space(4.0);
         for f in self.store.folders() {
-            let on = f.folder == self.folder;
-            let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), egui::Sense::click());
+            let on = f.folder == self.folder && self.account.is_none();
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), self.row_h()), egui::Sense::click());
             let p = ui.painter();
             if on {
                 selection(p, rect);
@@ -1553,6 +1602,36 @@ impl App {
             heading(ui, &info.name.to_lowercase());
             ui.add_space(4.0);
             let mut hidden_under: Option<usize> = None;
+            let scoped = self.account == Some(account);
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), self.row_h()), egui::Sense::click());
+            let p = ui.painter();
+            if resp.hovered() {
+                p.rect_filled(rect, 2.0, BAND);
+            }
+            put(p, rect.left() + 12.0, 160.0, rect.center().y, if scoped { "this account only: on" } else { "this account only" }, body(12.0), if scoped { READOUT } else { LEGEND });
+            ui.ctx().accesskit_node_builder(resp.id, |n| n.set_label(format!("only {}", info.name)));
+            if resp.clicked() {
+                actions.push(Action::AccountOnly(Some(account)));
+            }
+            for f in self.store.account_folders(account) {
+                let on = scoped && f.folder == self.folder;
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), self.row_h()), egui::Sense::click());
+                let p = ui.painter();
+                if on {
+                    selection(p, rect);
+                } else if resp.hovered() {
+                    p.rect_filled(rect, 2.0, BAND);
+                }
+                put(p, rect.left() + 12.0, 120.0, rect.center().y, f.folder.name(), body(13.0), if on { VALUE } else { LEGEND });
+                let n = if matches!(f.folder, Folder::Inbox) { f.unread } else { f.total };
+                if n > 0 {
+                    put_right(p, rect.right() - 6.0, rect.center().y, &n.to_string(), figure(11.0), if on { READOUT } else { LEGEND });
+                }
+                ui.ctx().accesskit_node_builder(resp.id, |n| n.set_label(format!("{} {}", info.name, f.folder.name())));
+                if resp.clicked() {
+                    actions.push(Action::GoToIn(account, f.folder));
+                }
+            }
             for node in tree.iter().filter(|n| n.account == account) {
                 if let Some(depth) = hidden_under {
                     if node.depth > depth {
@@ -1582,9 +1661,13 @@ impl App {
         }
     }
 
+    fn row_h(&self) -> f32 {
+        if self.narrow { 44.0 } else { 22.0 }
+    }
+
     fn tree_row(&self, ui: &mut Ui, node: &TreeFolder, folded: bool, editable: bool, actions: &mut Vec<Action>) {
-        let on = node.folder == self.folder;
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), egui::Sense::click());
+        let on = node.folder == self.folder && self.account.is_none();
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), self.row_h()), egui::Sense::click());
         let p = ui.painter();
         if on {
             selection(p, rect);

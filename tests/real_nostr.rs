@@ -125,6 +125,25 @@ fn archiving_moves_a_dm_to_the_local_archive_folder() {
 }
 
 #[test]
+fn archiving_and_unarchiving_keeps_the_account_folder_counts_equal_to_the_rows() {
+    mailbench::runtime::block_on(async {
+        let (mut h, _d, _r) = open().await;
+        let inbox = Query::in_account(ms::Folder::Inbox, 0);
+        let archive = Query::in_account(ms::Folder::Archive, 0);
+        let id = h.state().1.store.list(&inbox, 0, 10).items[0].id;
+        h.state_mut().1.store.move_to(id, ms::Folder::Archive).unwrap();
+        until(&mut h, "archived", |a| a.store.counts(&archive).all == 1 && a.store.counts(&inbox).all == 0);
+        let folders = h.state().1.store.account_folders(0);
+        let shown = |f: ms::Folder| folders.iter().find(|x| x.folder == f).map(|x| x.total);
+        assert_eq!(shown(ms::Folder::Archive), Some(1));
+        assert_eq!(shown(ms::Folder::Inbox), Some(0));
+        assert_eq!(h.state().1.store.list(&archive, 0, 10).items.len(), 1);
+        h.state_mut().1.store.move_to(id, ms::Folder::Inbox).unwrap();
+        until(&mut h, "unarchived", |a| a.store.counts(&inbox).all == 1 && a.store.counts(&archive).all == 0);
+    });
+}
+
+#[test]
 fn a_sender_picture_is_blocked_until_images_are_allowed_and_nip05_needs_proof() {
     mailbench::runtime::block_on(async {
         let relay = MockRelay::run().await.unwrap();

@@ -153,6 +153,8 @@ struct Cache {
     by_thread: HashMap<u64, Vec<usize>>,
     by_folder: HashMap<ms::Folder, Vec<usize>>,
     folder_counts: HashMap<ms::Folder, Counts>,
+    account_counts: HashMap<(usize, ms::Folder), Counts>,
+    roles: Vec<(usize, ms::Folder)>,
     inbox_unread: Vec<usize>,
     shape: Vec<TreeFolder>,
     validity: HashMap<(usize, String), u32>,
@@ -178,6 +180,7 @@ impl Cache {
         self.by_id = HashMap::with_capacity(self.entries.len());
         self.by_folder.clear();
         self.folder_counts.clear();
+        self.account_counts.clear();
         self.inbox_unread.clear();
         for (i, e) in self.entries.iter().enumerate() {
             self.by_id.insert(e.id, i);
@@ -192,6 +195,10 @@ impl Cache {
             }
             self.by_folder.entry(e.folder.clone()).or_default().push(i);
             let counts = self.folder_counts.entry(e.folder.clone()).or_default();
+            counts.all += 1;
+            counts.unread += e.thread_unread as usize;
+            counts.flagged += e.thread_flagged as usize;
+            let counts = self.account_counts.entry((e.account, e.folder.clone())).or_default();
             counts.all += 1;
             counts.unread += e.thread_unread as usize;
             counts.flagged += e.thread_flagged as usize;
@@ -1056,6 +1063,7 @@ impl Shared {
             let shown_folders = with_pending(stored, &account_ops);
             let folders: Vec<Remote> = shown_folders.iter().map(|(_, f)| f.clone()).collect();
             cache.shape.extend(tree_shape(index, &folders));
+            cache.roles.extend(folders.iter().filter_map(ui_folder).map(|f| (index, f)));
             let mut pending: HashMap<(String, u32), String> = HashMap::new();
             let mut flag_ops: HashMap<(String, u32), (Option<bool>, Option<bool>)> = HashMap::new();
             for (_, op) in &ops {
@@ -1579,10 +1587,23 @@ impl MailStore for RealStore {
         self.shared.with_cache(|c| c.tree())
     }
 
+    fn account_folders(&self, account: usize) -> Vec<FolderInfo> {
+        self.shared.with_cache(|c| {
+            ms::Folder::UNIFIED
+                .iter()
+                .filter_map(|f| {
+                    let counts = c.account_counts.get(&(account, f.clone())).copied().unwrap_or_default();
+                    let present = counts.all > 0 || c.roles.iter().any(|(a, r)| *a == account && r == f);
+                    present.then(|| FolderInfo { folder: f.clone(), unread: counts.unread, total: counts.all })
+                })
+                .collect()
+        })
+    }
+
     fn counts(&self, query: &Query) -> Counts {
         let view = self.shared.search_view(query);
         self.shared.with_cache(|c| {
-            if view.is_plain() {
+            if view.is_plain() && query.account.is_none() {
                 return c.folder_counts.get(&query.folder).copied().unwrap_or_default();
             }
             let base = Query { filter: Filter::All, ..query.clone() };
@@ -1600,7 +1621,7 @@ impl MailStore for RealStore {
         let now = now();
         let view = self.shared.search_view(query);
         self.shared.with_cache(|c| {
-            if view.is_plain() && query.filter == Filter::All {
+            if view.is_plain() && query.filter == Filter::All && query.account.is_none() {
                 let Some(index) = c.by_folder.get(&query.folder) else {
                     return Page { offset, total: 0, items: Vec::new() };
                 };

@@ -245,7 +245,7 @@ impl FakeStore {
     }
 
     fn matches(&self, m: &Message, q: &Query) -> bool {
-        if m.folder != q.folder || self.is_older(m.summary.id) {
+        if m.folder != q.folder || self.is_older(m.summary.id) || q.account.is_some_and(|a| a != m.summary.account) {
             return false;
         }
         match q.filter {
