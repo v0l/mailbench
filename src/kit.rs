@@ -540,7 +540,15 @@ pub fn message_card_head(ui: &mut Ui, h: &CardHead, narrow: bool) -> CardResp {
     let btn = if narrow { TAP } else { 30.0 };
     let menu_rect = Rect::from_min_size(Pos2::new(rect.right() - btn - 4.0, rect.top() + if narrow { 2.0 } else { 4.0 }), Vec2::splat(btn));
     let menu = ui.interact(menu_rect, resp.id.with("card-menu"), Sense::click());
-    let label = format!("{}, {}, {}", h.name, h.when, if h.open { "" } else { h.snippet.unwrap_or_default() });
+    let label = format!(
+        "{}{}{}, {}, {}",
+        h.name,
+        if h.mine { " (you)" } else { "" },
+        if h.unread { ", unread" } else { "" },
+        h.when,
+        if h.open { "" } else { h.snippet.unwrap_or_default() }
+    );
+    let label = if h.attach { format!("{label}, has attachment") } else { label };
     resp.widget_info(move || egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label.clone()));
     let menu_label = format!("actions for {}", h.name);
     menu.widget_info(move || egui::WidgetInfo::labeled(egui::WidgetType::Button, true, menu_label.clone()));
