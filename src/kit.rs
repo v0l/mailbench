@@ -526,6 +526,29 @@ fn lay_text(ui: &mut Ui, text: &str, font: FontId, color: Color32) -> std::sync:
     ui.fonts_mut(|f| f.layout_no_wrap(text.to_string(), font, color))
 }
 
+pub fn ellipsize(text: &str, max_w: f32, measure: impl Fn(&str) -> f32) -> String {
+    if measure(text) <= max_w {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.trim_end_matches("...").chars().collect();
+    let (mut lo, mut hi) = (0usize, chars.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        let candidate: String = chars[..mid].iter().collect::<String>().trim_end().to_string() + "\u{2026}";
+        if measure(&candidate) <= max_w {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    chars[..lo].iter().collect::<String>().trim_end().to_string() + "\u{2026}"
+}
+
+pub fn fit_text(ui: &mut Ui, text: &str, font: FontId, color: Color32, max_w: f32) -> std::sync::Arc<egui::Galley> {
+    let fitted = ellipsize(text, max_w, |s| ui.fonts_mut(|f| f.layout_no_wrap(s.to_string(), font.clone(), color)).size().x);
+    lay_text(ui, &fitted, font, color)
+}
+
 fn badge(ui: &mut Ui, p: &egui::Painter, at: Pos2, text: &str, tint: Color32) -> f32 {
     let g = lay_text(ui, &text.to_uppercase(), body_strong(9.5), tint);
     let r = Rect::from_min_size(at, g.size() + Vec2::new(10.0, 4.0));
@@ -607,7 +630,7 @@ pub fn message_card_head(ui: &mut Ui, h: &CardHead, narrow: bool) -> CardResp {
             (true, false) => vec![(to_line.as_str(), LEGEND), (snippet, VALUE)],
         };
         for (i, (text, color)) in lines.into_iter().enumerate() {
-            let g = lay_text(ui, text, body(12.5), color);
+            let g = fit_text(ui, text, body(12.5), color, (right - left).max(20.0));
             p.galley(Pos2::new(left, rect.top() + 29.0 + i as f32 * 22.0), g, color);
         }
     }

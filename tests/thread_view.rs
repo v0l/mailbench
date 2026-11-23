@@ -286,6 +286,28 @@ fn collapsed_unread_cards_stay_unread() {
 }
 
 #[test]
+fn long_snippets_end_with_an_ellipsis_inside_the_card_at_phone_width() {
+    let h = open_thread(egui::vec2(390.0, 844.0));
+    let _ = &h;
+    let long = "Also one more thing about the room, it holds twelve people and the projector needs a very long cable";
+    let mut width = 0.0;
+    let mut text = String::new();
+    let mut harness = Harness::new_ui(|ui| {
+        mailbench::kit::setup(ui.ctx());
+        let avail = 390.0 - 24.0 - 24.0 - 50.0;
+        let g = mailbench::kit::fit_text(ui, long, mailbench::kit::body(12.5), egui::Color32::WHITE, avail);
+        width = g.size().x;
+        text = g.text().to_string();
+        assert!(width <= avail, "{width} > {avail}");
+    });
+    harness.run();
+    harness.run();
+    drop(harness);
+    assert!(text.ends_with('\u{2026}'), "{text}");
+    assert!(width > 100.0);
+}
+
+#[test]
 fn phone_width_cards_and_buttons_are_tappable() {
     let h = open_thread(egui::vec2(390.0, 844.0));
     for label in ["Hi, can we meet", "Yes, Friday works", "Great, my notes"] {
