@@ -148,7 +148,27 @@ pub fn load_all(store: &Store) -> Vec<AccountConfig> {
         .filter_map(|raw| serde_json::from_slice(&raw).ok())
         .collect();
     out.sort_by(|a, b| a.id.cmp(&b.id));
+    let order = saved_order(store);
+    out.sort_by_key(|c| order.iter().position(|id| *id == c.id).unwrap_or(usize::MAX));
     out
+}
+
+pub const ORDER_KIND: &str = "account-order";
+const ORDER_ID: &str = "order";
+
+pub fn saved_order(store: &Store) -> Vec<String> {
+    store
+        .get(ORDER_KIND, ORDER_ID)
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_slice(&raw).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_order(store: &Store, ids: &[String]) -> Result<()> {
+    let raw = serde_json::to_vec(ids).map_err(|e| BackendError::Store(e.to_string()))?;
+    store.put(ORDER_KIND, ORDER_ID, &raw)?;
+    Ok(())
 }
 
 pub fn save(store: &Store, cfg: &AccountConfig) -> Result<()> {
@@ -577,6 +597,23 @@ mod tests {
         let twin = AccountConfig { id: "other".into(), ..a.clone() };
         assert_eq!(unique_name(&twin.name, &twin.id, &[a.clone()]), format!("{} 2", a.name));
         assert_eq!(unique_name(&a.name, &a.id, &[a.clone()]), a.name);
+    }
+
+    #[test]
+    fn saved_account_order_is_applied_and_new_accounts_go_last() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::create(&dir.path().join("mail.db"), None, Some(("pw", crate::store::KdfParams::fast()))).unwrap();
+        let mut ids = Vec::new();
+        for (i, key) in ["0a", "0b", "0c"].iter().enumerate() {
+            let mut cfg = nostr_config(&key.repeat(32), vec![]).unwrap();
+            cfg.id = format!("id{i}");
+            save(&store, &cfg).unwrap();
+            ids.push(cfg.id);
+        }
+        let listed = |s: &Store| load_all(s).into_iter().map(|c| c.id).collect::<Vec<_>>();
+        assert_eq!(listed(&store), ["id0", "id1", "id2"]);
+        save_order(&store, &["id2".into(), "id0".into()]).unwrap();
+        assert_eq!(listed(&store), ["id2", "id0", "id1"]);
     }
 
     #[test]
