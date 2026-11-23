@@ -495,7 +495,7 @@ pub(super) async fn run(
             }
             Err(e) => shared.set_state(index, SyncState::Failed, Some(e.to_string())),
         }
-        shared.refresh();
+        shared.signal();
         let polling = lock(&shared.sync_opts)[index].poll();
         let wait = next_wait(&shared, &account, match (&result, watch.is_some()) {
             (Ok(()), true) => POLL,

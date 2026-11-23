@@ -449,6 +449,14 @@ impl Shared {
         self.urgent.store(false, Ordering::SeqCst);
     }
 
+    pub fn signal(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.wake.notify_all();
+        if let Some(ctx) = lock(&self.ctx).as_ref() {
+            ctx.request_repaint();
+        }
+    }
+
     #[track_caller]
     pub fn refresh(&self) {
         let at = std::time::Instant::now();
@@ -869,7 +877,9 @@ impl Shared {
             let _ = store.delete(OUTBOX, k);
         }
         drop(store);
-        self.refresh();
+        if !keys.is_empty() {
+            self.refresh();
+        }
     }
 
     fn enqueue(&self, store: &Store, op: &Op) -> Result<(), StoreError> {
@@ -1397,6 +1407,11 @@ fn builder(shared: Arc<Shared>) {
         if generation == seen {
             let guard = lock(&shared.wake_lock);
             let _ = shared.wake.wait_timeout(guard, Duration::from_millis(250));
+            continue;
+        }
+        if !first && lock(&shared.pending).is_none() {
+            seen = generation;
+            shared.built.store(generation, Ordering::SeqCst);
             continue;
         }
         if !first {
