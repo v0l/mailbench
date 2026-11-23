@@ -193,6 +193,10 @@ impl FakeStore {
         if let Some(m) = self.messages.get_mut(index) {
             m.folder = Folder::Drafts;
         }
+        let live = self.messages.iter().filter(|m| m.folder != Folder::Drafts).count() as u32;
+        if let Some(head) = self.messages.last_mut() {
+            head.summary.thread = live.max(1);
+        }
         self
     }
 

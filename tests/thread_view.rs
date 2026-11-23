@@ -380,6 +380,16 @@ fn render_sent_recipient_screens() {
 }
 
 #[test]
+fn the_list_row_count_and_the_card_count_follow_the_same_rule() {
+    let store = FakeStore::conversation("Datasheet", &sent_specs()).with_draft(1);
+    let row = store.list(&Query::new(Folder::Inbox), 0, 10).items.remove(0);
+    let cards = store.thread(row.id);
+    assert_eq!(row.thread as usize, cards.iter().filter(|t| !t.draft).count());
+    assert_eq!(row.thread, 2);
+    assert_eq!(cards.iter().filter(|t| t.draft).count(), 1);
+}
+
+#[test]
 #[ignore]
 fn render_draft_card_screens() {
     for size in [egui::vec2(1280.0, 800.0), egui::vec2(392.0, 844.0)] {
