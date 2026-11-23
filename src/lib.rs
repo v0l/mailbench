@@ -26,6 +26,7 @@ pub mod real;
 pub mod runtime;
 pub mod search;
 pub mod settings;
+pub mod settings_page;
 pub mod shell;
 #[cfg(smime)]
 pub mod smime;
