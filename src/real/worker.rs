@@ -348,6 +348,7 @@ pub(super) struct FetchRequest {
     pub id: u64,
     pub folder: String,
     pub uid: u32,
+    pub queued: std::time::Instant,
 }
 
 pub(super) async fn serve_fetches(
@@ -361,10 +362,12 @@ pub(super) async fn serve_fetches(
         if shared.stop.load(Ordering::Relaxed) {
             return;
         }
+        let wait = req.queued.elapsed();
         let mut result = backend.fetch(&req.folder, req.uid).await;
         if matches!(result, Err(BackendError::Connection(_))) {
             result = backend.fetch(&req.folder, req.uid).await;
         }
+        let round_trip = req.queued.elapsed() - wait;
         let outcome = result.ok().and_then(|raw| {
             let guard = shared.lock_store();
             StoreSink::new(&guard, &account, true)
@@ -372,6 +375,9 @@ pub(super) async fn serve_fetches(
                 .ok()
                 .map(|_| super::display::has_attachments(&raw))
         });
+        if std::env::var_os("MAILBENCH_OPEN_LOG").is_some() {
+            eprintln!("fetch id={} queue_wait={:?} server_round_trip={:?} stored={:?}", req.id, wait, round_trip, req.queued.elapsed() - wait - round_trip);
+        }
         shared.finish_fetch(req.id, outcome);
     }
 }

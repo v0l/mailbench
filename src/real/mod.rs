@@ -521,7 +521,7 @@ impl Shared {
         }
         let sent = lock(&self.fetchers)
             .get(e.account)
-            .is_some_and(|tx| tx.send(worker::FetchRequest { id: e.id, folder: e.server_folder.clone(), uid: e.uid }).is_ok());
+            .is_some_and(|tx| tx.send(worker::FetchRequest { id: e.id, folder: e.server_folder.clone(), uid: e.uid, queued: std::time::Instant::now() }).is_ok());
         if sent {
             state.insert(e.id, None);
             BodyState::Loading
