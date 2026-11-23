@@ -25,9 +25,10 @@ impl App {
             self.reader_content_w = ui.available_width();
             ui.spacing_mut().item_spacing.y = self.prefs.density.reader_gap();
             subject_line(ui, &m.summary.subject);
-            if v.thread.len() > 1 {
+            let real = v.thread.iter().filter(|t| !t.draft).count();
+            if real > 1 {
                 ui.horizontal_wrapped(|ui| {
-                    Line::new().note(format!("{} messages in this conversation", v.thread.len())).size(11.5).show(ui);
+                    Line::new().note(format!("{real} messages in this conversation")).size(11.5).show(ui);
                     ui.add_space(6.0);
                     if tap_key(ui, narrow, Key::new("expand all").outline(VALUE)).clicked() {
                         actions.push(Action::ExpandAll);
@@ -73,8 +74,15 @@ impl App {
                     snippet: snip.as_deref(),
                     focused,
                     open,
+                    draft: t.draft,
                 };
                 let r = message_card_head(ui, &head, narrow);
+                if t.draft {
+                    if tap_key(ui, narrow, Key::new("continue editing").outline(WARN)).clicked() || r.toggle {
+                        actions.push(Action::EditDraft(id));
+                    }
+                    continue;
+                }
                 if r.toggle {
                     actions.push(Action::ToggleCard(id));
                 }

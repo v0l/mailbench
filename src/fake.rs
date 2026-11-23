@@ -189,6 +189,13 @@ impl FakeStore {
         }
     }
 
+    pub fn with_draft(mut self, index: usize) -> FakeStore {
+        if let Some(m) = self.messages.get_mut(index) {
+            m.folder = Folder::Drafts;
+        }
+        self
+    }
+
     pub fn set_paragraphs(&mut self, index: usize, paragraphs: Vec<String>) {
         if let Some(m) = self.messages.get_mut(index) {
             m.paragraphs = paragraphs;
@@ -392,6 +399,7 @@ impl MailStore for FakeStore {
                 from_address: m.from_address.clone(),
                 to: m.to.clone(),
                 sent: m.sent.clone(),
+                draft: m.folder == Folder::Drafts,
                 mine: m.summary.from == "me" || m.folder == Folder::Sent || self.accounts.iter().any(|a| a.address.eq_ignore_ascii_case(&m.from_address)),
             })
             .collect()

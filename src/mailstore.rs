@@ -234,6 +234,7 @@ pub struct ThreadItem {
     pub to: Vec<String>,
     pub sent: String,
     pub mine: bool,
+    pub draft: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -346,7 +347,7 @@ pub trait MailStore {
     fn get(&self, id: MessageId) -> Result<Message, StoreError>;
     fn prefetch(&self, _ids: &[MessageId]) {}
     fn thread(&self, id: MessageId) -> Vec<ThreadItem> {
-        self.get(id).map(|m| vec![ThreadItem { mine: m.folder == Folder::Sent, from_address: m.from_address, to: m.to, sent: m.sent, summary: m.summary, folder: m.folder }]).unwrap_or_default()
+        self.get(id).map(|m| vec![ThreadItem { mine: m.folder == Folder::Sent, draft: false, from_address: m.from_address, to: m.to, sent: m.sent, summary: m.summary, folder: m.folder }]).unwrap_or_default()
     }
     fn set_flags(&mut self, id: MessageId, change: FlagChange) -> Result<(), StoreError>;
     fn move_to(&mut self, id: MessageId, folder: Folder) -> Result<(), StoreError>;

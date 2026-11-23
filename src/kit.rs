@@ -508,6 +508,7 @@ pub struct CardHead<'a> {
     pub snippet: Option<&'a str>,
     pub focused: bool,
     pub open: bool,
+    pub draft: bool,
 }
 
 pub struct CardResp {
@@ -583,6 +584,11 @@ pub fn message_card_head(ui: &mut Ui, h: &CardHead, narrow: bool) -> CardResp {
         let whole = ui.painter().clone();
         whole.rect_filled(rect, 2.0, if h.open || hot { BAND } else { WELL });
         whole.rect_stroke(rect, 2.0, Stroke::new(1.0, if h.focused { READOUT } else { ETCH }), egui::StrokeKind::Inside);
+        if h.draft {
+            let r = rect.shrink(0.5);
+            let outline = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
+            whole.extend(egui::Shape::dashed_line(&outline, Stroke::new(1.0, WARN), 5.0, 3.0));
+        }
         if h.focused {
             whole.rect_filled(Rect::from_min_size(rect.left_top(), Vec2::new(3.0, rect.height())), 0.0, READOUT);
         }
@@ -609,7 +615,10 @@ pub fn message_card_head(ui: &mut Ui, h: &CardHead, narrow: bool) -> CardResp {
             p.galley(Pos2::new(x, y1 + 1.5), g.clone(), LEGEND);
             x += g.size().x + 8.0;
         }
-        if h.mine {
+        if h.draft {
+            x += badge(ui, &p, Pos2::new(x, y1 + 1.0), "draft", WARN);
+        }
+        if h.mine && !h.draft {
             x += badge(ui, &p, Pos2::new(x, y1 + 1.0), "you", READOUT);
         }
         if let Some(a) = h.account {

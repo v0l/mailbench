@@ -59,6 +59,7 @@ pub enum Action {
     ListNext,
     ListPrevious,
     FocusThread(MessageId),
+    EditDraft(MessageId),
     One(Box<Action>),
     OpenAttachment(usize),
     SaveAttachment(usize),
@@ -986,6 +987,7 @@ impl App {
                 Action::CollapseAll => self.cards.collapse_all(),
                 Action::ToggleCardQuotes(id) => self.cards.toggle_quotes(id.0),
                 Action::FocusThread(id) => self.thread_focus = Some(id),
+                Action::EditDraft(id) => self.open_draft(id),
                 Action::ListNext => {
                     if self.selected + 1 < v.total {
                         self.selected += 1;
@@ -2688,7 +2690,7 @@ fn paint_row(p: &egui::Painter, rect: egui::Rect, m: &Summary, selected: bool, p
         p.galley(Pos2::new(tail - w, cy - g.size().y / 2.0), g, TRACE);
         tail -= w + 14.0;
     }
-    marked(p, x, (tail - x).max(10.0), cy, &m.subject, body(13.0), subj_col, marks);
+    marked(p, x, (tail - x).max(10.0), cy, if m.subject.trim().is_empty() { "(no subject)" } else { &m.subject }, body(13.0), if m.subject.trim().is_empty() { LEGEND.gamma_multiply(0.6) } else { subj_col }, marks);
 }
 
 fn marked(p: &egui::Painter, x: f32, w: f32, cy: f32, text: &str, font: egui::FontId, col: egui::Color32, marks: &[String]) {

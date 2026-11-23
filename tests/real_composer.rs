@@ -397,3 +397,34 @@ fn kittest_reply_through_the_composer_reaches_the_server_quoted() {
     assert!(delivered.contains("> second line"), "{delivered}");
     until("sent copy", || !server_messages(&me, "Sent").is_empty());
 }
+
+#[test]
+fn autosaved_snapshots_leave_no_draft_behind_once_sent() {
+    let (me, peer) = users("rs");
+    let dir = tempfile::tempdir().unwrap();
+    let mut real = open(&me, &dir);
+    let mut draft = Draft::blank();
+    draft.subject = "OWON SPE6103".into();
+    draft.body = "Hello,".into();
+    for to in ["", "info@owon", "info@owon.com.cc"] {
+        draft.to = to.into();
+        let mid = real.save_draft(draft.outgoing()).unwrap();
+        draft.message_id = Some(mid);
+        until("snapshot on the server", || {
+            let all = server_messages(&me, "Drafts");
+            all.len() == 1 && text(&all[0]).contains(&format!("To: {to}")) || (to.is_empty() && all.len() == 1)
+        });
+        std::thread::sleep(Duration::from_millis(1500));
+    }
+    draft.to = format!("{peer}@localhost");
+    draft.body = "Hello, full text".into();
+    let mid = draft.message_id.clone().unwrap();
+    real.append(ms::Folder::Sent, draft.outgoing()).unwrap();
+    real.discard_draft(0, &mid);
+    until("sent copy", || server_messages(&me, "Sent").len() == 1);
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(server_messages(&me, "Drafts").is_empty());
+    assert!(server_messages(&me, "Trash").is_empty());
+    assert_eq!(server_messages(&me, "Sent").len(), 1);
+    assert_eq!(real.counts(&Query::new(ms::Folder::Drafts)).all, 0);
+}
