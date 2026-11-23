@@ -398,6 +398,124 @@ fn kittest_reply_through_the_composer_reaches_the_server_quoted() {
     until("sent copy", || !server_messages(&me, "Sent").is_empty());
 }
 
+struct BlindSearch(Box<dyn Backend>);
+
+#[async_trait::async_trait]
+impl Backend for BlindSearch {
+    fn kind(&self) -> &'static str {
+        self.0.kind()
+    }
+    fn fork(&self) -> Option<Box<dyn Backend>> {
+        Some(Box::new(BlindSearch(self.0.fork()?)))
+    }
+    async fn capabilities(&mut self) -> Result<Capabilities> {
+        self.0.capabilities().await
+    }
+    async fn list_folders(&mut self) -> Result<Vec<Folder>> {
+        self.0.list_folders().await
+    }
+    async fn create_folder(&mut self, name: &str) -> Result<()> {
+        self.0.create_folder(name).await
+    }
+    async fn open_folder(&mut self, folder: &str) -> Result<FolderState> {
+        self.0.open_folder(folder).await
+    }
+    async fn fetch_summaries(&mut self, folder: &str, uids: &[u32]) -> Result<Vec<MessageSummary>> {
+        self.0.fetch_summaries(folder, uids).await
+    }
+    async fn changed_flags(&mut self, folder: &str, below: u32, since: Option<u64>) -> Result<Vec<(u32, Flags)>> {
+        self.0.changed_flags(folder, below, since).await
+    }
+    async fn fetch(&mut self, folder: &str, uid: u32) -> Result<Vec<u8>> {
+        self.0.fetch(folder, uid).await
+    }
+    async fn set_flags(&mut self, folder: &str, uids: &[u32], update: &FlagUpdate) -> Result<()> {
+        self.0.set_flags(folder, uids, update).await
+    }
+    async fn move_messages(&mut self, folder: &str, uids: &[u32], to: &str) -> Result<()> {
+        self.0.move_messages(folder, uids, to).await
+    }
+    async fn delete_messages(&mut self, folder: &str, uids: &[u32]) -> Result<()> {
+        self.0.delete_messages(folder, uids).await
+    }
+    async fn search(&mut self, folder: &str, query: &str) -> Result<Vec<u32>> {
+        if query.contains("HEADER") {
+            return Ok(Vec::new());
+        }
+        self.0.search(folder, query).await
+    }
+    async fn append_flagged(&mut self, folder: &str, flags: &Flags, raw: &[u8]) -> Result<()> {
+        self.0.append_flagged(folder, flags, raw).await
+    }
+    async fn watch(&mut self, folder: &str) -> Result<Watch> {
+        self.0.watch(folder).await
+    }
+}
+
+fn open_blind(me: &str, dir: &tempfile::TempDir) -> RealStore {
+    let store = Store::create(&dir.path().join("mail.db"), None, Some(("pw", KdfParams::fast()))).unwrap();
+    let mut setup = account(me);
+    setup.backend = Box::new(Account { mail: Box::new(BlindSearch(Box::new(imap(me)))), outbound: Box::new(smtp(me)) });
+    let real = RealStore::open(store, vec![setup]);
+    real.set_send_hold(Duration::ZERO);
+    real
+}
+
+#[test]
+fn snapshots_are_cleaned_even_when_the_server_search_by_message_id_finds_nothing() {
+    let (me, _peer) = users("rb");
+    let dir = tempfile::tempdir().unwrap();
+    let mut real = open_blind(&me, &dir);
+    let mut draft = Draft::blank();
+    draft.subject = "OWON SPE6103".into();
+    draft.body = "Hello,".into();
+    for to in ["", "info@owon", "info@owon.com.cc"] {
+        draft.to = to.into();
+        let mid = real.save_draft(draft.outgoing()).unwrap();
+        draft.message_id = Some(mid);
+        until("draft pushed", || real.pending_ops() == 0);
+    }
+    assert_eq!(server_messages(&me, "Drafts").len(), 1, "an autosave left an older snapshot beside the new one");
+    let mid = draft.message_id.clone().unwrap();
+    real.discard_draft(0, &mid);
+    until("discard pushed", || real.pending_ops() == 0);
+    assert!(server_messages(&me, "Drafts").is_empty(), "discard left a snapshot on the server");
+}
+
+#[test]
+fn the_sent_message_is_one_conversation_with_one_card_after_autosaves_and_a_held_send() {
+    let (me, peer) = users("rh");
+    let dir = tempfile::tempdir().unwrap();
+    let mut real = open(&me, &dir);
+    real.set_send_hold(Duration::from_secs(2));
+    let mut draft = Draft::blank();
+    draft.subject = "OWON SPE6103".into();
+    draft.body = "Hello,".into();
+    for to in ["", "info@owon"] {
+        draft.to = to.into();
+        let mid = real.save_draft(draft.outgoing()).unwrap();
+        draft.message_id = Some(mid);
+        until("draft pushed", || real.pending_ops() == 0);
+    }
+    draft.to = format!("{peer}@localhost");
+    draft.body = "Hello, full text".into();
+    let mid = draft.message_id.clone().unwrap();
+    real.append(ms::Folder::Sent, draft.outgoing()).unwrap();
+    real.discard_draft(0, &mid);
+    until("sent copy on the server", || server_messages(&me, "Sent").len() == 1);
+    until("sent listed", || real.counts(&Query::new(ms::Folder::Sent)).all == 1);
+    std::thread::sleep(Duration::from_secs(3));
+    let row = real.list(&Query::new(ms::Folder::Sent), 0, 10).items.remove(0);
+    let cards = real.thread(row.id);
+    let shown: Vec<_> = cards.iter().map(|c| (c.folder.clone(), c.to.clone())).collect();
+    assert_eq!(cards.len(), 1, "{shown:?}");
+    assert_eq!(row.thread, 1);
+    assert_eq!(row.subject, "OWON SPE6103");
+    assert!(text(&server_messages(&me, "Sent")[0]).contains("Subject: OWON SPE6103"));
+    assert!(server_messages(&me, "Drafts").is_empty());
+    assert_eq!(real.counts(&Query::new(ms::Folder::Drafts)).all, 0);
+}
+
 #[test]
 fn autosaved_snapshots_leave_no_draft_behind_once_sent() {
     let (me, peer) = users("rs");

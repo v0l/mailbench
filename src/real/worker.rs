@@ -249,8 +249,22 @@ async fn push(shared: &Shared, backend: &mut dyn Backend, op: &Op, account: &str
 }
 
 async fn drafts_with(backend: &mut dyn Backend, folder: &str, message_id: &str) -> Vec<u32> {
+    let wanted = super::threads::clean(message_id);
     let query = format!("HEADER Message-ID \"{}\"", message_id.trim_matches(['<', '>']));
-    backend.search(folder, &query).await.unwrap_or_default()
+    let found = backend.search(folder, &query).await.unwrap_or_default();
+    if !found.is_empty() {
+        return found;
+    }
+    let Ok(state) = backend.open_folder(folder).await else { return Vec::new() };
+    if state.uids.is_empty() {
+        return Vec::new();
+    }
+    let Ok(summaries) = backend.fetch_summaries(folder, &state.uids).await else { return Vec::new() };
+    summaries
+        .into_iter()
+        .filter(|m| m.message_id.as_deref().is_some_and(|id| super::threads::clean(id) == wanted))
+        .map(|m| m.uid)
+        .collect()
 }
 
 async fn append_creating(backend: &mut dyn Backend, folder: &str, flags: &Flags, raw: &[u8]) -> Result<()> {
