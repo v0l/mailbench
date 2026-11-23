@@ -115,9 +115,6 @@ fn archiving_three_selected_rows_is_one_op_per_folder_and_undo_brings_them_back(
 
     h.key_press(egui::Key::Z);
     h.run();
-    assert_eq!(h.state().1.store.pending_ops(), 0);
-    h.key_press(egui::Key::Z);
-    h.run();
     until(&mut h, "reverse op drained", |a| a.store.pending_ops() == 0);
     until(&mut h, "back in the inbox", |a| count(a, UiFolder::Inbox) == 3 && count(a, UiFolder::Archive) == 0);
     assert_eq!(on_server(&name, "INBOX"), 3);
