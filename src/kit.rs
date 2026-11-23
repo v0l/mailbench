@@ -659,8 +659,67 @@ pub fn quoted_fold(ui: &mut Ui, lines: usize, open: bool) -> bool {
     resp.clicked()
 }
 
+fn format_job(text: &str, wrap: f32) -> egui::text::LayoutJob {
+    use crate::richtext::Style;
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = wrap;
+    let base = |font: FontId, color: Color32| egui::TextFormat { font_id: font, color, line_height: Some(BODY_LINE), ..Default::default() };
+    for (range, style) in crate::richtext::spans(text) {
+        let fmt = match style {
+            Style::Plain => base(body(BODY_SIZE), VALUE),
+            Style::Mark => base(body(BODY_SIZE), LEGEND.gamma_multiply(0.8)),
+            Style::Bold => base(body_strong(BODY_SIZE), VALUE),
+            Style::Italic => base(body_italic(BODY_SIZE), VALUE),
+            Style::Code => egui::TextFormat { background: BAND, ..base(egui::FontId::monospace(BODY_SIZE - 1.0), VALUE) },
+            Style::Link => egui::TextFormat { underline: Stroke::new(1.0, READOUT), ..base(body(BODY_SIZE), READOUT) },
+            Style::Quote => base(body_italic(BODY_SIZE), LEGEND),
+        };
+        job.append(&text[range], 0.0, fmt);
+    }
+    job
+}
+
+const FORMATS: [(&str, crate::richtext::Format, Option<(egui::Modifiers, egui::Key)>); 7] = [
+    ("bold", crate::richtext::Format::Bold, Some((egui::Modifiers::COMMAND, egui::Key::B))),
+    ("italic", crate::richtext::Format::Italic, Some((egui::Modifiers::COMMAND, egui::Key::I))),
+    ("link", crate::richtext::Format::Link, Some((egui::Modifiers::COMMAND, egui::Key::K))),
+    ("list", crate::richtext::Format::Bullets, None),
+    ("numbered", crate::richtext::Format::Numbers, None),
+    ("quote", crate::richtext::Format::Quote, None),
+    ("code", crate::richtext::Format::Code, None),
+];
+
 pub fn body_editor(ui: &mut Ui, text: &mut String, rows: usize) {
-    let max_h = (ui.ctx().content_rect().height() - 340.0).clamp(140.0, 520.0);
+    let max_h = (ui.ctx().content_rect().height() - 390.0).clamp(140.0, 520.0);
+    let id = egui::Id::new("compose-body");
+    let mut wanted: Option<crate::richtext::Format> = None;
+    for (_, format, key) in FORMATS {
+        if let Some((mods, k)) = key {
+            if ui.input_mut(|i| i.consume_key(mods, k)) {
+                wanted = Some(format);
+            }
+        }
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for (label, format, _) in FORMATS {
+            if ui.add(Key::new(label).outline(VALUE).min_width(44.0)).clicked() {
+                wanted = Some(format);
+            }
+        }
+    });
+    if let Some(format) = wanted {
+        let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+        let (a, b) = state.cursor.char_range().map(|r| (r.primary.index.into(), r.secondary.index.into())).unwrap_or_else(|| {
+            let n = text.chars().count();
+            (n, n)
+        });
+        let (out, (s, e)) = crate::richtext::apply(text, (a, b), format);
+        *text = out;
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(s), egui::text::CCursor::new(e))));
+        state.store(ui.ctx(), id);
+        ui.memory_mut(|m| m.request_focus(id));
+    }
     egui::Frame::NONE
         .fill(WELL)
         .stroke(Stroke::new(1.0, ETCH))
@@ -668,14 +727,19 @@ pub fn body_editor(ui: &mut Ui, text: &mut String, rows: usize) {
         .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
             egui::ScrollArea::vertical().max_height(max_h).auto_shrink([false, true]).stick_to_bottom(false).show(ui, |ui| {
+                let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
+                    let job = format_job(buf.as_str(), wrap);
+                    ui.fonts_mut(|f| f.layout_job(job))
+                };
                 let r = ui.add(
                     egui::TextEdit::multiline(text)
+                        .id(id)
                         .frame(egui::Frame::NONE)
                         .font(body(BODY_SIZE))
                         .text_color(VALUE)
                         .desired_rows(rows)
                         .desired_width(ui.available_width())
-                        .return_key(None),
+                        .layouter(&mut layouter),
                 );
                 ui.ctx().accesskit_node_builder(r.id, |node| node.set_label("message body"));
             });

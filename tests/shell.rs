@@ -875,6 +875,97 @@ fn two_nostr_accounts_added_in_the_form_get_distinct_names_and_a_profile_fills_d
     });
 }
 
+fn assert_folder_rows(h: &mut Harness<'static, State>, tag: &str, new_folder: bool) {
+    until(h, "inbox folder row", |s| s.app().is_some_and(|a| a.store.account_folders(0).iter().any(|f| f.folder == ms::Folder::Inbox)));
+    for (w, hh, prefix) in [(1280.0, 800.0, ""), (390.0, 844.0, "phone-")] {
+        h.set_size(egui::vec2(w, hh));
+        h.run();
+        h.run();
+        if w < 500.0 {
+            h.get_by_label_contains("folders").click();
+            h.run();
+            h.run();
+        }
+        let rows = h.get_all_by_label_contains("inbox").map(|n| n.rect()).collect::<Vec<_>>();
+        assert!(rows.len() >= 2, "account inbox row missing");
+        assert!(rows.iter().all(|r| r.left() >= 0.0 && r.right() <= w), "inbox rows {rows:?}");
+        assert!(h.query_by_label_contains("syncing folders").is_none());
+        if new_folder {
+            let add = h.get_by_label_contains("new folder in");
+            add.scroll_to_me();
+            h.run();
+            h.run();
+            let add = h.get_by_label_contains("new folder in").rect();
+            let rows = rows.iter().map(|r| r.bottom()).fold(0.0, f32::max);
+            assert!(add.top() >= rows - 1.0, "new folder at {add:?} above a folder row ending {rows}");
+        } else {
+            assert!(h.query_by_label_contains("new folder in").is_none());
+        }
+        let img = h.render().expect("render");
+        img.save(out_dir().join(format!("{prefix}{tag}-folders.png"))).unwrap();
+    }
+}
+
+#[test]
+fn a_new_greenmail_account_shows_its_folders_with_new_folder_last() {
+    if !common::greenmail() {
+        return;
+    }
+    let name = format!("{}f", greenmail_user());
+    common::create_greenmail_user(&name);
+    let d = dir();
+    let mut h = boot(d.path(), Rc::new(MemKeychain::default()), env(FixtureNet::default()));
+    setup_greenmail_account(&mut h, &name);
+    h.get_by_label("test connection").click();
+    until(&mut h, "both steps ok", |s| s.add_form().unwrap().test.all_ok());
+    h.get_by_label("save and sync").click();
+    h.run();
+    assert_eq!(h.state().1.screen_name(), "mail");
+    assert_folder_rows(&mut h, "greenmail", true);
+}
+
+#[test]
+fn a_new_nostr_account_shows_its_folders_without_new_folder() {
+    mailbench::runtime::block_on(async {
+        let relay = nostr_relay_builder::MockRelay::run().await.unwrap();
+        let url = relay.url().await.to_string();
+        let d = dir();
+        let mut h = boot(d.path(), Rc::new(MemKeychain::default()), env(FixtureNet::default()));
+        h.get_by_label("continue").click();
+        h.run();
+        h.run();
+        add_nostr_through_the_form(&mut h, &"07".repeat(32), &url, "dora");
+        assert_folder_rows(&mut h, "nostr", false);
+    });
+}
+
+#[test]
+fn a_new_jmap_account_shows_its_folders_with_new_folder_last() {
+    if !common::stalwart() {
+        return;
+    }
+    let name = jmap_user("fo");
+    let d = dir();
+    let mut h = boot(d.path(), Rc::new(MemKeychain::default()), env(FixtureNet::default()));
+    h.get_by_label("continue").click();
+    h.run();
+    h.run();
+    h.get_by_label_contains("JMAP account").click();
+    h.run();
+    {
+        let f = h.state_mut().1.add_form().unwrap();
+        f.email = format!("{name}@example.org");
+        f.username = name.clone();
+        f.password = "secret".into();
+        f.jmap_url = format!("http://127.0.0.1:{}", common::SW_HTTP);
+    }
+    h.get_by_label("test connection").click();
+    until(&mut h, "both steps ok", |s| s.add_form().unwrap().test.all_ok());
+    h.get_by_label("save and sync").click();
+    h.run();
+    assert_folder_rows(&mut h, "jmap", true);
+}
+
 struct ApproveAll;
 
 impl nostr_connect::prelude::NostrConnectSignerActions for ApproveAll {

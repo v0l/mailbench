@@ -360,6 +360,8 @@ pub struct Prefs {
     pub keys: Bindings,
     #[serde(default)]
     pub layout: LayoutPrefs,
+    #[serde(default)]
+    pub plain_text_only: bool,
 }
 
 pub fn load(store: &Store) -> Prefs {
@@ -379,6 +381,20 @@ pub fn save(store: &Store, prefs: &Prefs) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_text_only_defaults_off_and_survives_a_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mail.db");
+        let store = Store::create(&path, None, Some(("pw", crate::store::KdfParams::fast()))).unwrap();
+        assert!(!load(&store).plain_text_only);
+        let mut prefs = load(&store);
+        prefs.plain_text_only = true;
+        save(&store, &prefs).unwrap();
+        drop(store);
+        let reopened = Store::open(&path, &[crate::store::Unlock::Password("pw")]).unwrap();
+        assert!(load(&reopened).plain_text_only);
+    }
 
     #[test]
     fn headers_only_turns_background_body_download_off() {

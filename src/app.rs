@@ -1499,6 +1499,15 @@ impl App {
             };
             let count = self.marked.len().to_string();
             let mut items: Vec<(String, String)> = Vec::new();
+            if self.draft.is_some() {
+                let send = if cfg!(target_os = "macos") { "Cmd Enter" } else { "Ctrl Enter" };
+                items.push((send.to_string(), "send".into()));
+                items.push(("Enter".to_string(), "new line".into()));
+                items.push(("Tab".to_string(), "next field".into()));
+                let items: Vec<(&str, &str)> = items.iter().map(|(k, a)| (k.as_str(), a.as_str())).collect();
+                keycap_bar(ui, &items, Some((text, tint)));
+                return;
+            }
             if !self.marked.is_empty() {
                 items.push((count, "selected".into()));
             }
@@ -1641,7 +1650,24 @@ impl App {
             if resp.clicked() {
                 actions.push(Action::AccountOnly(Some(account)));
             }
-            for f in self.store.account_folders(account) {
+            let listed = self.store.account_folders(account);
+            let waiting = listed.is_empty() && !tree.iter().any(|n| n.account == account);
+            if waiting {
+                for f in Folder::UNIFIED {
+                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), self.row_h()), egui::Sense::hover());
+                    put(ui.painter(), rect.left() + 12.0, 120.0, rect.center().y, f.name(), body(13.0), LEGEND.gamma_multiply(0.4));
+                    ui.ctx().accesskit_node_builder(resp.id, |n| {
+                        n.set_label(format!("{} {} waiting", info.name, f.name()));
+                        n.set_disabled();
+                        n.set_bounds(egui::accesskit::Rect::new(rect.min.x as f64, rect.min.y as f64, rect.max.x as f64, rect.max.y as f64));
+                    });
+                }
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), egui::Sense::hover());
+                put(ui.painter(), rect.left() + 12.0, 160.0, rect.center().y, "syncing folders", body(12.0), LEGEND);
+                ui.ctx().accesskit_node_builder(resp.id, |n| n.set_label(format!("{} syncing folders", info.name)));
+                continue;
+            }
+            for f in listed {
                 let on = scoped && f.folder == self.folder;
                 let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), self.row_h()), egui::Sense::click());
                 let p = ui.painter();
@@ -2396,6 +2422,7 @@ impl App {
     fn send_draft(&mut self) {
         let Some(mut d) = self.draft.take() else { return };
         d.commit_inputs();
+        self.store.set_send_html(!self.prefs.plain_text_only);
         let to = d.to.clone();
         match self.store.append(Folder::Sent, d.outgoing()) {
             Ok(id) => {
@@ -2495,6 +2522,9 @@ impl App {
         let store: &dyn MailStore = self.store.as_ref();
         let Some(draft) = self.draft.as_mut() else { return };
         let (mut send, mut save, mut discard, mut attach) = (false, false, false, false);
+        if draft.has_recipient() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter)) {
+            send = true;
+        }
         let r = egui::Modal::new(egui::Id::new("compose"))
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .show(ctx, |ui| {
@@ -2550,7 +2580,7 @@ impl App {
                 });
                 form_footer(ui, |ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        send = ui.add(Key::new("send").solid(READOUT).min_width(100.0).enabled(draft.has_recipient())).clicked();
+                        send |= ui.add(Key::new("send").solid(READOUT).min_width(100.0).enabled(draft.has_recipient())).clicked();
                         save = ui.add(Key::new("save draft").outline(VALUE).min_width(100.0)).clicked();
                         discard = ui.add(Key::new("discard").outline(FAULT).min_width(90.0)).clicked();
                     });

@@ -278,6 +278,76 @@ fn addresses_seen_in_synced_mail_and_sent_to_are_suggested() {
 }
 
 #[test]
+fn kittest_formatted_message_reaches_the_server_with_both_parts() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+    let (me, peer) = users("fm");
+    seed(&me, &peer);
+    let dir = tempfile::tempdir().unwrap();
+    let real = open(&me, &dir);
+    let app = mailbench::app::App::with_store(Box::new(real));
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).with_pixels_per_point(1.0).build_ui_state(
+        |ui, (ready, app): &mut (bool, mailbench::app::App)| {
+            if !*ready {
+                mailbench::kit::setup(ui.ctx());
+                *ready = true;
+                ui.ctx().request_repaint();
+                return;
+            }
+            app.show(ui);
+        },
+        (false, app),
+    );
+    h.run();
+    h.run();
+    h.key_press(egui::Key::C);
+    h.run();
+    h.run();
+    h.state_mut().1.draft.as_mut().unwrap().to = format!("{peer}@localhost");
+    h.state_mut().1.draft.as_mut().unwrap().subject = "formatted".into();
+    h.run();
+    h.get_by_label("message body").click();
+    h.run();
+    let body = h.get_by_label("message body");
+    body.type_text("first");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.get_by_label("message body").type_text("second");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.get_by_label("message body").type_text("third word");
+    h.run();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::B);
+    h.run();
+    h.get_by_label("message body").type_text("bold");
+    h.run();
+    h.state_mut().1.draft.as_mut().unwrap().body = "first\nsecond\nthird **word**\n\nsee [docs](https://example.test/docs)\n\n- one\n- two".into();
+    h.run();
+    h.run();
+    let img = h.render().ok();
+    if let Some(img) = img {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/shots");
+        std::fs::create_dir_all(&dir).unwrap();
+        img.save(dir.join("formatted-composer.png")).unwrap();
+    }
+    h.get_by_label("send").click();
+    h.run();
+    h.run();
+    until("delivered", || !server_messages(&peer, "INBOX").is_empty());
+    let raw = server_messages(&peer, "INBOX").remove(0);
+    let parsed = mail_parser::MessageParser::default().parse(&raw).unwrap();
+    let plain = parsed.body_text(0).unwrap().replace("\r\n", "\n");
+    assert_eq!(plain.trim_end(), "first\nsecond\nthird **word**\n\nsee [docs](https://example.test/docs)\n\n- one\n- two");
+    let html = parsed.body_html(0).unwrap().replace("\r\n", "\n");
+    assert!(html.contains("<strong>word</strong>"), "{html}");
+    assert!(html.contains("<a href=\"https://example.test/docs\">docs</a>"), "{html}");
+    assert!(html.contains("<ul><li>one</li><li>two</li></ul>"), "{html}");
+    assert!(html.contains("first<br>\nsecond<br>\nthird"), "{html}");
+}
+
+#[test]
 fn kittest_reply_through_the_composer_reaches_the_server_quoted() {
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;

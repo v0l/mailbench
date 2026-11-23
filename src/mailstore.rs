@@ -457,6 +457,8 @@ pub trait MailStore {
     fn send_hold(&self) -> std::time::Duration {
         std::time::Duration::from_secs(SEND_HOLD_SECS)
     }
+
+    fn set_send_html(&self, _on: bool) {}
 }
 
 pub fn human_size(bytes: usize) -> String {
