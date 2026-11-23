@@ -279,6 +279,7 @@ pub struct TestRun {
     rx: Option<Receiver<(Step, Result<(), String>)>>,
     pub for_key: String,
     pub inbox_missing: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub profile: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
 }
 
 impl TestRun {
@@ -291,6 +292,8 @@ impl TestRun {
         let ctx = ctx.clone();
         let missing = self.inbox_missing.clone();
         missing.store(false, std::sync::atomic::Ordering::SeqCst);
+        let profile = self.profile.clone();
+        *profile.lock().unwrap() = None;
         std::thread::spawn(move || {
             let mut ok = true;
             accounts::run_checks(&cfg, |step, result| {
@@ -300,6 +303,9 @@ impl TestRun {
             });
             if ok && matches!(cfg.credential, Credential::Nostr { .. } | Credential::NostrBunker { .. }) && accounts::nostr_lacks_inbox_list(&cfg) {
                 missing.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            if ok && matches!(cfg.credential, Credential::Nostr { .. } | Credential::NostrBunker { .. }) {
+                *profile.lock().unwrap() = accounts::nostr_profile(&cfg);
             }
             ctx.request_repaint();
         });
@@ -378,6 +384,7 @@ pub struct AddForm {
     pub jmap_url: String,
     pub publish_inbox: Option<bool>,
     pub relays: String,
+    pub name: String,
     app_key: String,
     bunker_user: Option<(String, String)>,
     bunker_rx: Option<Receiver<(String, Result<String, String>)>>,
@@ -430,6 +437,7 @@ impl AddForm {
             jmap_url: String::new(),
             publish_inbox: None,
             relays: String::new(),
+            name: String::new(),
             app_key: crate::backend::new_app_key(),
             bunker_user: None,
             bunker_rx: None,
@@ -464,6 +472,19 @@ impl AddForm {
         });
     }
 
+    fn apply_identity(&self, cfg: &mut AccountConfig) {
+        let profile = self.test.profile.lock().ok().and_then(|p| p.clone());
+        if let Some((handle, shown)) = profile {
+            cfg.display_name = shown;
+            if !handle.is_empty() {
+                cfg.name = handle;
+            }
+        }
+        if !self.name.trim().is_empty() {
+            cfg.name = self.name.trim().to_string();
+        }
+    }
+
     fn email(&self) -> String {
         self.email.trim().to_string()
     }
@@ -485,6 +506,7 @@ impl AddForm {
                     *publish_inbox = self.publish_inbox == Some(true);
                 }
                 cfg.id = self.id.clone();
+                self.apply_identity(&mut cfg);
                 return Ok(cfg);
             }
             let mut cfg = accounts::nostr_config(&self.password, relays).map_err(|_| "That is not a valid nsec".to_string())?;
@@ -492,6 +514,7 @@ impl AddForm {
                 *publish_inbox = self.publish_inbox == Some(true);
             }
             cfg.id = self.id.clone();
+            self.apply_identity(&mut cfg);
             return Ok(cfg);
         }
         let email = self.email();
@@ -708,6 +731,9 @@ impl AddForm {
                             }
                         }
                     }
+                    row(ui, "name", |ui| {
+                        field(ui, &mut self.name, "profile name, or a short npub");
+                    });
                     row(ui, "relays", |ui| {
                         field(ui, &mut self.relays, "wss://relay.example");
                     });
@@ -1196,6 +1222,12 @@ impl SettingsForm {
         }
         if apply {
             let mut changed = false;
+            for i in 0..self.drafts.len() {
+                if self.drafts[i].is_nostr() {
+                    let unique = accounts::unique_name(&self.drafts[i].name, &self.drafts[i].id, &self.drafts);
+                    self.drafts[i].name = unique;
+                }
+            }
             for draft in &self.drafts {
                 if self.original.iter().find(|o| o.id == draft.id) != Some(draft) {
                     if accounts::save(store, draft).is_ok() {
@@ -1541,8 +1573,11 @@ impl Shell {
         }
     }
 
-    fn save_account(&mut self, cfg: AccountConfig) {
+    fn save_account(&mut self, mut cfg: AccountConfig) {
         let Some(store) = &self.store else { return };
+        if cfg.is_nostr() {
+            cfg.name = accounts::unique_name(&cfg.name, &cfg.id, &accounts::load_all(store));
+        }
         match accounts::save(store, &cfg) {
             Ok(()) => self.build_main(),
             Err(e) => {

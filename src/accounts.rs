@@ -315,7 +315,7 @@ pub fn nostr_bunker_account(url: &str, app_key: &str, user_hex: &str, relays: Ve
     let none = ServerSettings::new("", 0, Security::Plain);
     Ok(AccountConfig {
         id: new_id(),
-        name: "nostr".into(),
+        name: short_npub(&address),
         display_name: String::new(),
         signature: String::new(),
         username: address.clone(),
@@ -329,13 +329,38 @@ pub fn nostr_bunker_account(url: &str, app_key: &str, user_hex: &str, relays: Ve
     })
 }
 
+pub fn short_npub(address: &str) -> String {
+    let npub = address.split('@').next().unwrap_or(address);
+    let chars: Vec<char> = npub.chars().collect();
+    if chars.len() <= 16 {
+        return npub.to_string();
+    }
+    let head: String = chars[..8].iter().collect();
+    let tail: String = chars[chars.len() - 4..].iter().collect();
+    format!("{head}...{tail}")
+}
+
+pub fn unique_name(wanted: &str, id: &str, existing: &[AccountConfig]) -> String {
+    let taken = |n: &str| existing.iter().any(|c| c.id != id && c.name.trim().eq_ignore_ascii_case(n));
+    let base = wanted.trim();
+    if !taken(base) {
+        return base.to_string();
+    }
+    (2..).map(|i| format!("{base} {i}")).find(|n| !taken(n)).unwrap_or_default()
+}
+
+pub fn nostr_profile(cfg: &AccountConfig) -> Option<(String, String)> {
+    let mut backend = nostr_backend(cfg).ok()?;
+    crate::runtime::block_on(backend.own_profile()).ok().flatten()
+}
+
 pub fn nostr_config(secret: &str, relays: Vec<String>) -> Result<AccountConfig> {
     let backend = NostrBackend::new(NostrConfig::new(secret, relays.clone()))?;
     let address = backend.address();
     let none = ServerSettings::new("", 0, Security::Plain);
     Ok(AccountConfig {
         id: new_id(),
-        name: "nostr".into(),
+        name: short_npub(&address),
         display_name: String::new(),
         signature: String::new(),
         username: address.clone(),
@@ -540,5 +565,26 @@ mod tests {
         assert_eq!(back, cfg);
         assert_eq!(nostr_backend(&back).unwrap().address(), cfg.address);
         assert!(nostr_config("not a key", vec![]).is_err());
+    }
+
+    #[test]
+    fn new_nostr_accounts_are_named_by_short_npub_and_made_distinct() {
+        let a = nostr_config(&"0a".repeat(32), vec![]).unwrap();
+        let b = nostr_config(&"0b".repeat(32), vec![]).unwrap();
+        assert_ne!(a.name, "nostr");
+        assert!(a.name.starts_with("npub1") && a.name.contains("..."), "{}", a.name);
+        assert_ne!(a.name, b.name);
+        let twin = AccountConfig { id: "other".into(), ..a.clone() };
+        assert_eq!(unique_name(&twin.name, &twin.id, &[a.clone()]), format!("{} 2", a.name));
+        assert_eq!(unique_name(&a.name, &a.id, &[a.clone()]), a.name);
+    }
+
+    #[test]
+    fn old_nostr_configs_named_nostr_load_unchanged() {
+        let mut v = serde_json::to_value(nostr_config(&"0a".repeat(32), vec![]).unwrap()).unwrap();
+        v["name"] = "nostr".into();
+        let back: AccountConfig = serde_json::from_value(v).unwrap();
+        assert_eq!(back.name, "nostr");
+        assert_eq!(unique_name(&back.name, &back.id, &[back.clone()]), "nostr");
     }
 }

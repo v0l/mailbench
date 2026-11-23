@@ -777,6 +777,76 @@ fn a_nostr_account_without_a_relay_list_is_asked_to_publish_one() {
     });
 }
 
+fn add_nostr_through_the_form(h: &mut Harness<'static, State>, secret: &str, relay: &str, name: &str) {
+    h.run();
+    {
+        let f = h.state_mut().1.add_form().unwrap();
+        f.nostr = true;
+        f.password = secret.into();
+        f.relays = relay.into();
+        f.name = name.into();
+    }
+    h.run();
+    h.get_by_label("test connection").click();
+    until(h, "tested", |s| !s.add_form().unwrap().test.running() && s.add_form().unwrap().test.all_ok());
+    h.run();
+    if h.query_by_label("not now").is_some() {
+        h.get_by_label("not now").click();
+        h.run();
+    }
+    h.get_by_label("save and sync").click();
+    h.run();
+}
+
+#[test]
+fn two_nostr_accounts_added_in_the_form_get_distinct_names_and_a_profile_fills_display_name() {
+    mailbench::runtime::block_on(async {
+        let relay = nostr_relay_builder::MockRelay::run().await.unwrap();
+        let url = relay.url().await.to_string();
+        let carol = nostr_sdk::Keys::parse(&"05".repeat(32)).unwrap();
+        let client = nostr_sdk::Client::new(carol.clone());
+        client.add_relay(url.as_str()).await.unwrap();
+        client.connect().await;
+        let meta = nostr_sdk::Metadata::new().name("carol").display_name("Carol B");
+        client.send_event_builder(nostr_sdk::EventBuilder::metadata(&meta)).await.unwrap();
+        let d = dir();
+        let kc: Rc<dyn Keychain> = Rc::new(MemKeychain::default());
+        let mut h = boot(d.path(), kc.clone(), env(FixtureNet::default()));
+        h.get_by_label("continue").click();
+        h.run();
+        h.run();
+        add_nostr_through_the_form(&mut h, &"05".repeat(32), &url, "");
+        h.state_mut().1.open_settings();
+        h.run();
+        h.run();
+        h.run();
+        h.run();
+        {
+            let f = h.state_mut().1.settings_form().unwrap();
+            assert_eq!(f.drafts.len(), 1);
+            assert_eq!(f.drafts[0].name, "carol");
+            assert_eq!(f.drafts[0].display_name, "Carol B");
+        }
+        h.get_by_label("add account").hover();
+        h.run();
+        h.get_by_label("add account").click();
+        h.run();
+        h.run();
+        h.run();
+        assert_eq!(h.state().1.screen_name(), "add account");
+        add_nostr_through_the_form(&mut h, &"06".repeat(32), &url, "carol");
+        h.state_mut().1.open_settings();
+        h.run();
+        h.run();
+        let f = h.state_mut().1.settings_form().unwrap();
+        let mut names: Vec<String> = f.drafts.iter().map(|d| d.name.clone()).collect();
+        names.sort();
+        assert_eq!(names.len(), 2);
+        assert_ne!(names[0], names[1]);
+        assert!(names.iter().all(|n| n != "nostr"), "{names:?}");
+    });
+}
+
 struct ApproveAll;
 
 impl nostr_connect::prelude::NostrConnectSignerActions for ApproveAll {

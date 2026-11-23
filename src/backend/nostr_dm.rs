@@ -538,6 +538,23 @@ impl NostrBackend {
         Ok(self.relays.clone())
     }
 
+    pub async fn own_profile(&mut self) -> Result<Option<(String, String)>> {
+        let client = self.client().await?;
+        let filter = Filter::new().author(self.public_key()).kind(Kind::Metadata).limit(1);
+        let events = client.fetch_events_from(self.relays.clone(), filter, FETCH_TIMEOUT).await.map_err(conn)?;
+        let Some(ev) = events.iter().max_by_key(|e| e.created_at) else { return Ok(None) };
+        let Ok(meta) = Metadata::from_json(&ev.content) else { return Ok(None) };
+        let clean = |s: Option<String>| s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let display = clean(meta.display_name);
+        let name = clean(meta.name);
+        let shown = display.clone().or(name.clone()).unwrap_or_default();
+        let handle = name.or(display).unwrap_or_default();
+        if shown.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some((handle, shown)))
+    }
+
     async fn refresh_names(&mut self, client: &Client, keys: Vec<PublicKey>) {
         let stale: Vec<PublicKey> = keys.into_iter().filter(|k| self.names.get(k).is_none()).collect();
         if stale.is_empty() {

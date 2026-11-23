@@ -92,11 +92,16 @@ struct Rig {
 }
 
 fn boot() -> Rig {
+    boot_with(|_| {})
+}
+
+fn boot_with(extra: impl FnOnce(&Store)) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let kc: Rc<dyn Keychain> = Rc::new(MemKeychain::default());
     {
         let store = Store::create(&dir.path().join("mail.db"), Some(&*kc), None).unwrap();
         seed(&store);
+        extra(&store);
     }
     let env = Env { net: Arc::new(NoNet), opener: Arc::new(|_| {}) };
     let shell = Shell::new(dir.path().to_path_buf(), kc.clone(), env, Some(KdfParams::fast()));
@@ -250,6 +255,27 @@ fn theme_and_density_persist_and_apply() {
     assert_eq!((saved.theme, saved.density), (prefs::Theme::Light, prefs::Density::Compact));
     assert_eq!(rig.h.state().1.app().unwrap().prefs.density.row_height(), 21.0);
     assert_eq!(rig.h.ctx.options(|o| o.theme_preference), egui::ThemePreference::Light);
+}
+
+#[test]
+fn renaming_a_nostr_account_in_settings_shows_everywhere_and_survives_a_restart() {
+    let mut old = accounts::nostr_config(&"0a".repeat(32), vec!["ws://127.0.0.1:1".into()]).unwrap();
+    old.name = "nostr".into();
+    let id = old.id.clone();
+    let mut rig = boot_with(|s| accounts::save(s, &old).unwrap());
+    {
+        let f = rig.h.state_mut().1.settings_form().unwrap();
+        let d = f.drafts.iter_mut().find(|d| d.id == id).unwrap();
+        assert_eq!(d.name, "nostr");
+        d.name = "alice".into();
+    }
+    rig.settle();
+    rig.click("apply");
+    let saved = accounts::load_all(&rig.store());
+    assert_eq!(saved.iter().find(|a| a.id == id).unwrap().name, "alice");
+    let app = rig.h.state().1.app().unwrap();
+    assert!(app.store.accounts().iter().any(|a| a.name == "alice"));
+    assert!(!app.store.accounts().iter().any(|a| a.name == "nostr"));
 }
 
 #[test]
