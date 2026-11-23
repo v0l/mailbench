@@ -361,6 +361,9 @@ impl SettingsForm {
         let _ = security;
         let options = || [Security::Tls, Security::StartTls, Security::Plain].map(|s| (s.clone(), sec_label(&s)));
         match &mut d.credential {
+            Credential::Chat { backend } => {
+                hint(ui, &format!("Chat backend: {backend}. It has no servers to configure."));
+            }
             Credential::Jmap { url, password } => {
                 row(ui, "jmap url", |ui| {
                     field(ui, url, "https://mail.example.com/jmap/session");

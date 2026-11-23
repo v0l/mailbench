@@ -31,6 +31,9 @@ pub enum Credential {
         #[serde(default)]
         publish_inbox: bool,
     },
+    Chat {
+        backend: String,
+    },
 }
 
 pub const DEFAULT_POLL_SECONDS: u32 = 60;
@@ -99,6 +102,42 @@ impl AccountConfig {
     pub fn is_jmap(&self) -> bool {
         matches!(self.credential, Credential::Jmap { .. })
     }
+
+    pub fn is_chat(&self) -> bool {
+        matches!(self.credential, Credential::Chat { .. })
+    }
+}
+
+pub fn chat_config(backend: &str) -> Result<AccountConfig> {
+    if backend != "fake" {
+        return Err(BackendError::Protocol(format!("no chat backend called {backend}")));
+    }
+    let none = ServerSettings::new("", 0, Security::Plain);
+    Ok(AccountConfig {
+        id: new_id(),
+        name: "Chats (fake)".into(),
+        display_name: String::new(),
+        signature: String::new(),
+        address: String::new(),
+        username: String::new(),
+        imap: none.clone(),
+        smtp: none,
+        credential: Credential::Chat { backend: backend.into() },
+        backfill: Default::default(),
+        notify: Default::default(),
+        sync: Default::default(),
+    })
+}
+
+pub fn chat_backend(cfg: &AccountConfig) -> Result<Box<dyn crate::chat::ChatBackend>> {
+    match &cfg.credential {
+        Credential::Chat { backend } if backend == "fake" => {
+            let (chat, handle) = crate::chat::FakeChat::demo();
+            handle.set_auto_reply(true);
+            Ok(Box::new(chat))
+        }
+        _ => Err(BackendError::Auth("not a chat account".into())),
+    }
 }
 
 pub fn jmap_backend(cfg: &AccountConfig) -> Result<JmapBackend> {
@@ -137,6 +176,23 @@ fn now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+pub fn mail_accounts(store: &Store) -> Vec<AccountConfig> {
+    load_all(store).into_iter().filter(|c| !c.is_chat()).collect()
+}
+
+pub fn chat_account(store: &Store) -> Option<AccountConfig> {
+    load_all(store).into_iter().find(|c| c.is_chat())
+}
+
+pub fn ensure_chat_account(store: &Store) -> Result<AccountConfig> {
+    if let Some(existing) = chat_account(store) {
+        return Ok(existing);
+    }
+    let cfg = chat_config("fake")?;
+    save(store, &cfg)?;
+    Ok(cfg)
 }
 
 pub fn load_all(store: &Store) -> Vec<AccountConfig> {
@@ -192,6 +248,7 @@ pub fn auth_of(cfg: &AccountConfig) -> Auth {
         Credential::Jmap { password, .. } => Auth::Password { user: cfg.username.clone(), password: password.clone() },
         Credential::Nostr { secret, .. } => Auth::Password { user: cfg.username.clone(), password: secret.clone() },
         Credential::NostrBunker { app_key, .. } => Auth::Password { user: cfg.username.clone(), password: app_key.clone() },
+        Credential::Chat { .. } => Auth::Password { user: String::new(), password: String::new() },
     }
 }
 
@@ -406,6 +463,7 @@ pub fn setup_for(cfg: &AccountConfig, store: &Store) -> Result<AccountSetup> {
         Credential::Nostr { .. } | Credential::NostrBunker { .. } => Box::new(nostr_backend(cfg)?),
         Credential::Jmap { .. } => Box::new(jmap_backend(cfg)?),
         Credential::Password(_) => Box::new(build_account(cfg)),
+        Credential::Chat { .. } => return Err(BackendError::Auth("chat accounts have no mail backend".into())),
         Credential::OAuth { .. } => Box::new(Fresh { cfg: cfg.clone(), store_path: Some(store.try_clone()?), inner: None }),
     };
     Ok(AccountSetup {

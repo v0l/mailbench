@@ -476,6 +476,7 @@ fn the_setting_off_hides_all_chat_ui_and_the_key() {
 fn the_sidebar_lists_chats_with_the_unread_count_when_the_setting_is_on() {
     let mut app = App::with_store(Box::new(FakeStore::concept()));
     app.prefs.developer_chat = true;
+    app.chat_opener = Some(Box::new(|| Some(ChatView::demo())));
     let mut h = Harness::builder().with_size(wide()).build_ui_state(
         |ui, (ready, app): &mut (bool, App)| {
             if !*ready {
@@ -510,6 +511,84 @@ fn notifications_fire_for_unmuted_rooms_that_are_not_open() {
     r.handle.say(&r.crew, "ann", "pong");
     settle(&mut r.h);
     assert!(view(&mut r).ctrl.notices.is_empty());
+}
+
+#[test]
+fn the_sidebar_chats_entry_opens_chats_at_phone_width_and_back_returns_to_mail() {
+    let mut app = App::with_store(Box::new(FakeStore::concept()));
+    app.prefs.developer_chat = true;
+    app.chat_opener = Some(Box::new(|| Some(ChatView::demo())));
+    app.folders_open = true;
+    let mut h = Harness::builder().with_size(phone()).build_ui_state(
+        |ui, (ready, app): &mut (bool, App)| {
+            if !*ready {
+                mailbench::kit::setup(ui.ctx());
+                *ready = true;
+                ui.ctx().request_repaint();
+                return;
+            }
+            app.show(ui);
+        },
+        (false, app),
+    );
+    h.run_steps(4);
+    let entry = h.get_by_label("open chats").rect();
+    assert!(entry.height() >= 44.0, "{entry:?}");
+    h.get_by_label("open chats").click();
+    settle(&mut h);
+    assert!(h.state().1.chats_open);
+    h.get_by_label_contains("room Field crew").click();
+    settle(&mut h);
+    h.get_by_label("message");
+    h.get_by_label("back").click();
+    settle(&mut h);
+    h.get_by_label_contains("room Field crew");
+    h.get_by_label("mail").click();
+    settle(&mut h);
+    assert!(!h.state().1.chats_open);
+}
+
+#[test]
+fn the_replying_to_preview_shows_in_a_picture_at_both_widths() {
+    for (size, name) in [(wide(), "chat-reply.png"), (phone(), "chat-reply-phone.png")] {
+        let mut r = rig_with(size, None, seed_basic);
+        if size.x < 700.0 {
+            r.h.get_by_label_contains("room Field crew").click();
+        } else {
+            open_crew(&mut r);
+        }
+        settle(&mut r.h);
+        view(&mut r).reply = Some(MessageId::new("m1"));
+        view(&mut r).draft = "Count me in".into();
+        settle(&mut r.h);
+        assert!(r.h.query_all_by_label_contains("Replying to Ann Byrne").count() > 0);
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/screens");
+        r.h.render().expect("render").save(dir.join(name)).unwrap();
+    }
+}
+
+#[test]
+fn own_messages_sit_on_the_right_and_others_on_the_left() {
+    let mut r = rig_with(wide(), None, |h, crew| {
+        h.say(crew, "ann", "from ann");
+        h.say(crew, "me", "from me");
+    });
+    open_crew(&mut r);
+    settle(&mut r.h);
+    let ann = r.h.get_by_label_contains("actions for message from Ann Byrne").rect();
+    let me = r.h.get_by_label_contains("actions for message from you").rect();
+    assert!(me.right() > ann.right() + 100.0, "{me:?} {ann:?}");
+    assert!(me.left() > ann.left() + 100.0);
+}
+
+#[test]
+fn messages_do_not_carry_a_loose_button_each() {
+    let mut r = rig_with(wide(), None, seed_basic);
+    open_crew(&mut r);
+    settle(&mut r.h);
+    let a = r.h.get_by_label_contains("actions for message from Ann Byrne").rect();
+    let b = r.h.get_by_label_contains("actions for message from Bo Lind").rect();
+    assert!(b.top() - a.bottom() < 40.0, "{a:?} {b:?}");
 }
 
 fn shots(size: egui::Vec2, name: &str) {

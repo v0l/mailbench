@@ -700,116 +700,119 @@ impl ChatView {
     #[allow(clippy::too_many_arguments)]
     fn message(&self, ui: &mut Ui, room: &Room, m: &ChatMessage, list: &[ChatMessage], grouped: bool, own: bool, narrow: bool, caps: &Capabilities, act: &mut dyn FnMut(Act)) {
         let name = self.ctrl.state.name_of(&room.id, &m.sender);
-        let layout = Layout::top_down(if own { Align::Max } else { Align::Min });
-        let avatar_w = if own { 0.0 } else { 38.0 };
-        ui.with_layout(layout, |ui| {
-            ui.horizontal_top(|ui| {
-                if !own {
-                    if grouped {
-                        ui.add_space(avatar_w);
-                    } else {
-                        avatar(ui, m.sender.as_str(), &name, 32.0);
-                        ui.add_space(6.0);
-                    }
+        let content = |ui: &mut Ui, act: &mut dyn FnMut(Act)| {
+            if !grouped {
+                let shown = if own { "you".to_string() } else { name.clone() };
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(shown).font(body_strong(12.5)).color(if own { READOUT } else { palette(m.sender.as_str()) }));
+                    text_line(ui, hour_minute(m.sent_at), 11.0, false);
+                });
+            }
+            let fill = if own { Color32::from_rgb(0x3A, 0x2D, 0x1A) } else { BAND };
+            let max_w = (ui.available_width() - 8.0).min(if narrow { 280.0 } else { 520.0 });
+            let failed = matches!(m.delivery, Delivery::Failed(_));
+            let bubble = egui::Frame::NONE.fill(fill).corner_radius(6).inner_margin(Margin::symmetric(10, 6)).show(ui, |ui| {
+                ui.set_max_width(max_w);
+                if let Some(q) = m.reply_to.as_ref().and_then(|id| list.iter().find(|x| &x.id == id)) {
+                    let who = self.ctrl.state.name_of(&room.id, &q.sender);
+                    text_line(ui, format!("{who}: {}", snippet_of(q)), 11.0, false);
                 }
-                ui.vertical(|ui| {
-                    if !grouped {
-                        let shown = if own { "you".to_string() } else { name.clone() };
-                        ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(shown).font(body_strong(12.5)).color(if own { READOUT } else { palette(m.sender.as_str()) }));
-                            text_line(ui, hour_minute(m.sent_at), 11.0, false);
-                        });
+                if m.deleted {
+                    ui.label(egui::RichText::new("message deleted").font(body_italic(13.0)).color(LEGEND));
+                } else if !m.body.is_empty() {
+                    ui.add(egui::Label::new(egui::RichText::new(&m.body).font(body(13.5)).color(VALUE)).wrap());
+                }
+                for a in &m.attachments {
+                    text_line(ui, format!("file: {} ({})", a.name, size_text(a.size)), 12.0, false);
+                }
+                ui.horizontal(|ui| {
+                    if m.edited && !m.deleted {
+                        text_line(ui, "edited", 10.5, false);
                     }
-                    let fill = if own { Color32::from_rgb(0x3A, 0x2D, 0x1A) } else { BAND };
-                    let max_w = (ui.available_width() - 8.0).min(if narrow { 300.0 } else { 520.0 });
-                    egui::Frame::NONE.fill(fill).corner_radius(6).inner_margin(Margin::symmetric(10, 6)).show(ui, |ui| {
-                        ui.set_max_width(max_w);
-                        if let Some(q) = m.reply_to.as_ref().and_then(|id| list.iter().find(|x| &x.id == id)) {
-                            let who = self.ctrl.state.name_of(&room.id, &q.sender);
-                            text_line(ui, format!("{who}: {}", snippet_of(q)), 11.0, false);
-                        }
-                        if m.deleted {
-                            ui.label(egui::RichText::new("message deleted").font(body_italic(13.0)).color(LEGEND));
-                        } else if !m.body.is_empty() {
-                            ui.add(egui::Label::new(egui::RichText::new(&m.body).font(body(13.5)).color(VALUE)).wrap());
-                        }
-                        for a in &m.attachments {
-                            text_line(ui, format!("file: {} ({})", a.name, size_text(a.size)), 12.0, false);
-                        }
-                        ui.horizontal(|ui| {
-                            if m.edited && !m.deleted {
-                                text_line(ui, "edited", 10.5, false);
-                            }
-                            if own {
-                                match &m.delivery {
-                                    Delivery::Sending => text_line(ui, "sending", 10.5, false),
-                                    Delivery::Sent => text_line(ui, "\u{2713} sent", 10.5, false),
-                                    Delivery::Delivered => text_line(ui, "\u{2713}\u{2713} delivered", 10.5, false),
-                                    Delivery::Failed(why) => text_line(ui, format!("failed: {why}"), 10.5, true),
-                                };
-                            }
-                            if grouped {
-                                text_line(ui, hour_minute(m.sent_at), 10.5, false);
-                            }
-                        });
-                        if let Delivery::Failed(_) = &m.delivery {
-                            ui.horizontal(|ui| {
-                                if tap_key(ui, narrow, Key::new("retry").solid(READOUT).id_salt(("retry", m.id.as_str()))).clicked() {
-                                    act(Act::Retry(m.id.clone()));
-                                }
-                                if tap_key(ui, narrow, Key::new("delete").outline(FAULT).id_salt(("discard", m.id.as_str()))).clicked() {
-                                    act(Act::Discard(m.id.clone()));
-                                }
-                            });
-                        }
-                    });
-                    if !m.reactions.is_empty() {
-                        ui.horizontal_wrapped(|ui| {
-                            for r in &m.reactions {
-                                let mine = r.members.iter().any(|x| x == self.ctrl.me());
-                                let text = format!("{} {}", r.emoji, r.members.len());
-                                let resp = reaction_chip(ui, &text, mine);
-                                if resp.clicked() && caps.reactions {
-                                    act(Act::React(m.id.clone(), r.emoji.clone()));
-                                }
-                            }
-                        });
+                    if own {
+                        match &m.delivery {
+                            Delivery::Sending => text_line(ui, "sending", 10.5, false),
+                            Delivery::Sent => text_line(ui, "\u{2713} sent", 10.5, false),
+                            Delivery::Delivered => text_line(ui, "\u{2713}\u{2713} delivered", 10.5, false),
+                            Delivery::Failed(why) => text_line(ui, format!("failed: {why}"), 10.5, true),
+                        };
                     }
-                    if !m.deleted && !m.is_local() {
-                        let more = tap_key(ui, narrow, Key::more().id_salt(("more", m.id.as_str())));
-                        more.widget_info({
-                            let l = format!("actions for message from {name}");
-                            move || egui::WidgetInfo::labeled(egui::WidgetType::Button, true, l.clone())
-                        });
-                        egui::Popup::menu(&more).show(|ui| {
-                            ui.set_min_width(150.0);
-                            if tap_key(ui, narrow, Key::new("reply").outline(VALUE).id_salt(("reply", m.id.as_str()))).clicked() {
-                                act(Act::Reply(m.id.clone()));
-                                ui.close();
-                            }
-                            if caps.reactions {
-                                ui.horizontal_wrapped(|ui| {
-                                    for e in REACTIONS {
-                                        if tap_key(ui, narrow, Key::new(e).outline(VALUE).id_salt(("react", m.id.as_str(), e))).clicked() {
-                                            act(Act::React(m.id.clone(), e.to_string()));
-                                            ui.close();
-                                        }
-                                    }
-                                });
-                            }
-                            if own && caps.edit && tap_key(ui, narrow, Key::new("edit").outline(VALUE).id_salt(("edit", m.id.as_str()))).clicked() {
-                                act(Act::Edit(m.id.clone(), m.body.clone()));
-                                ui.close();
-                            }
-                            if own && caps.delete && tap_key(ui, narrow, Key::new("delete message").outline(FAULT).id_salt(("del", m.id.as_str()))).clicked() {
-                                act(Act::Delete(m.id.clone()));
-                                ui.close();
-                            }
-                        });
+                    if grouped {
+                        text_line(ui, hour_minute(m.sent_at), 10.5, false);
                     }
                 });
+                if failed {
+                    ui.horizontal(|ui| {
+                        if tap_key(ui, narrow, Key::new("retry").solid(READOUT).id_salt(("retry", m.id.as_str()))).clicked() {
+                            act(Act::Retry(m.id.clone()));
+                        }
+                        if tap_key(ui, narrow, Key::new("delete").outline(FAULT).id_salt(("discard", m.id.as_str()))).clicked() {
+                            act(Act::Discard(m.id.clone()));
+                        }
+                    });
+                }
             });
-        });
+            if !m.reactions.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    for r in &m.reactions {
+                        let mine = r.members.iter().any(|x| x == self.ctrl.me());
+                        let text = format!("{} {}", r.emoji, r.members.len());
+                        let resp = reaction_chip(ui, &text, mine);
+                        if resp.clicked() && caps.reactions {
+                            act(Act::React(m.id.clone(), r.emoji.clone()));
+                        }
+                    }
+                });
+            }
+            if !m.deleted && !m.is_local() && !failed {
+                let more = ui.interact(bubble.response.rect, ui.id().with(("bubble", m.id.as_str())), Sense::click());
+                if more.hovered() {
+                    ui.painter().rect_stroke(bubble.response.rect, 6.0, Stroke::new(1.0, LEGEND), egui::StrokeKind::Outside);
+                }
+                more.widget_info({
+                    let l = format!("actions for message from {name}");
+                    move || egui::WidgetInfo::labeled(egui::WidgetType::Button, true, l.clone())
+                });
+                egui::Popup::menu(&more).show(|ui| {
+                    ui.set_min_width(150.0);
+                    if tap_key(ui, narrow, Key::new("reply").outline(VALUE).id_salt(("reply", m.id.as_str()))).clicked() {
+                        act(Act::Reply(m.id.clone()));
+                        ui.close();
+                    }
+                    if caps.reactions {
+                        ui.horizontal_wrapped(|ui| {
+                            for e in REACTIONS {
+                                if tap_key(ui, narrow, Key::new(e).outline(VALUE).id_salt(("react", m.id.as_str(), e))).clicked() {
+                                    act(Act::React(m.id.clone(), e.to_string()));
+                                    ui.close();
+                                }
+                            }
+                        });
+                    }
+                    if own && caps.edit && tap_key(ui, narrow, Key::new("edit").outline(VALUE).id_salt(("edit", m.id.as_str()))).clicked() {
+                        act(Act::Edit(m.id.clone(), m.body.clone()));
+                        ui.close();
+                    }
+                    if own && caps.delete && tap_key(ui, narrow, Key::new("delete message").outline(FAULT).id_salt(("del", m.id.as_str()))).clicked() {
+                        act(Act::Delete(m.id.clone()));
+                        ui.close();
+                    }
+                });
+            }
+        };
+        if own {
+            ui.with_layout(Layout::top_down(Align::Max), |ui| content(ui, act));
+        } else {
+            ui.horizontal_top(|ui| {
+                if grouped {
+                    ui.add_space(38.0);
+                } else {
+                    avatar(ui, m.sender.as_str(), &name, 32.0);
+                    ui.add_space(6.0);
+                }
+                ui.vertical(|ui| content(ui, act));
+            });
+        }
     }
 
     fn composer(&mut self, ui: &mut Ui, room: &Room) {

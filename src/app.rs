@@ -567,6 +567,7 @@ pub struct App {
     list_epoch: u32,
     link_warning: Option<(String, String, String)>,
     pub chats: Option<crate::chat::ChatView>,
+    pub chat_opener: Option<Box<dyn FnMut() -> Option<crate::chat::ChatView>>>,
     pub chats_open: bool,
 }
 
@@ -580,7 +581,9 @@ struct DividerOutcome {
 impl App {
     pub fn new(ctx: &egui::Context) -> App {
         crate::kit::setup(ctx);
-        App::with_store(Box::new(FakeStore::concept()))
+        let mut app = App::with_store(Box::new(FakeStore::concept()));
+        app.chat_opener = Some(Box::new(|| Some(crate::chat::ChatView::demo())));
+        app
     }
 
     pub fn with_store(store: Box<dyn MailStore>) -> App {
@@ -647,6 +650,7 @@ impl App {
             list_epoch: 0,
             link_warning: None,
             chats: None,
+            chat_opener: None,
             chats_open: false,
         }
     }
@@ -1403,9 +1407,9 @@ impl App {
             return;
         }
         if self.chats.is_none() {
-            self.chats = Some(crate::chat::ChatView::demo());
+            self.chats = self.chat_opener.as_mut().and_then(|open| open());
         }
-        self.chats_open = true;
+        self.chats_open = self.chats.is_some();
     }
 
     pub fn show(&mut self, ui: &mut Ui) {

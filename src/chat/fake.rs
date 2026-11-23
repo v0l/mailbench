@@ -6,8 +6,6 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-pub const FAKE_START: i64 = 1_700_000_000;
-
 struct World {
     me: Member,
     contacts: Vec<Member>,
@@ -31,6 +29,11 @@ impl World {
 
     fn stamp(&mut self) -> i64 {
         self.clock += 30;
+        self.clock
+    }
+
+    fn stamp_live(&mut self) -> i64 {
+        self.clock = (self.clock + 1).max(super::controller::now_secs());
         self.clock
     }
 
@@ -93,7 +96,7 @@ impl FakeChat {
             lag: Duration::ZERO,
             fail_sends: 0,
             auto_reply: false,
-            clock: FAKE_START,
+            clock: super::controller::now_secs() - 600,
             next: 0,
             sends: 0,
         }));
@@ -200,7 +203,7 @@ impl FakeHandle {
         let mut batch = Vec::new();
         for i in 0..count {
             let id = w.fresh_id("old");
-            batch.push(ChatMessage::new(&id, room, &MemberId::new(from), FAKE_START - 86_400 + i as i64 * 20, &format!("older message {i}")));
+            batch.push(ChatMessage::new(&id, room, &MemberId::new(from), super::controller::now_secs() - 600 - 86_400 + i as i64 * 20, &format!("older message {i}")));
         }
         let log = w.log.entry(room.clone()).or_default();
         batch.append(log);
@@ -345,7 +348,7 @@ impl ChatBackend for FakeChat {
         }
         let mut w = lock(&self.world);
         w.guard()?;
-        let at = w.stamp();
+        let at = w.stamp_live();
         let id = w.fresh_id("m");
         let mut m = ChatMessage::new(&id, room, &w.me.id.clone(), at, &draft.body);
         m.reply_to = draft.reply_to.clone();
@@ -355,7 +358,7 @@ impl ChatBackend for FakeChat {
             let other = w.rooms.iter().find(|r| &r.id == room).and_then(|r| r.members.iter().find(|x| x.id != w.me.id)).cloned();
             if let Some(other) = other {
                 w.emit(ChatEvent::Typing { room: room.clone(), member: other.id.clone(), on: true });
-                let at = w.stamp();
+                let at = w.stamp_live();
                 let rid = w.fresh_id("m");
                 let first = draft.body.split_whitespace().next().unwrap_or("that");
                 let text = format!("Got it, {first} noted.");

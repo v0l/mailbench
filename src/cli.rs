@@ -181,7 +181,7 @@ fn open_store() -> Res<Store> {
 }
 
 fn chosen(store: &Store, wanted: &Option<String>) -> Res<Vec<AccountConfig>> {
-    let all = accounts::load_all(store);
+    let all = accounts::mail_accounts(store);
     if all.is_empty() {
         return Err("no accounts; add one in the app".into());
     }

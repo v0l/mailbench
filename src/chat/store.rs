@@ -37,7 +37,7 @@ impl ChatStore {
     }
 
     fn message_key(&self, m: &ChatMessage) -> String {
-        self.key(&format!("{}/{:020}-{}", m.room, m.sent_at.max(0), m.id))
+        self.key(&format!("{}/{}", m.room, m.id))
     }
 
     fn scan<T: serde::de::DeserializeOwned>(&self, kind: &str, prefix: &str) -> Vec<T> {
@@ -76,7 +76,9 @@ impl ChatStore {
     }
 
     pub fn load_messages(&self, room: &RoomId) -> Vec<ChatMessage> {
-        self.scan(MESSAGES, &self.key(&format!("{room}/")))
+        let mut all: Vec<ChatMessage> = self.scan(MESSAGES, &self.key(&format!("{room}/")));
+        all.sort_by(|a, b| a.sent_at.cmp(&b.sent_at).then(a.id.cmp(&b.id)));
+        all
     }
 
     pub fn drop_room(&self, room: &RoomId) {
