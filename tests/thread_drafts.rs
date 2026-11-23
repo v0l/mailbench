@@ -1,3 +1,5 @@
+use egui_kittest::Harness;
+use mailbench::app::App;
 use mailbench::backend::*;
 use mailbench::mailstore::{self as ms, MailStore, Query, ThreadItem};
 use mailbench::real::{AccountSetup, RealStore};
@@ -140,6 +142,54 @@ fn drafts_without_a_subject_do_not_join_an_unrelated_sent_mail() {
     ]);
     let (_, items) = thread_of(&real, ms::Folder::Sent);
     assert_eq!(items.len(), 1);
+}
+
+#[test]
+#[ignore]
+fn render_real_draft_screens() {
+    let sent = mail(3, "<m@x>", &[], "", "info@owon.com.cc");
+    let leftovers = vec![mail(1, "<m@x>", &[], "", ""), mail(2, "<m@x>", &[], "", "info@owon")];
+    let reply = mail(4, "<r@x>", &["<m@x>"], "", "info@owon.com.cc");
+    for (tag, drafts) in [("nodraft", leftovers.clone()), ("draft", [leftovers, vec![reply]].concat())] {
+        for (size, suffix) in [(egui::vec2(1280.0, 800.0), ""), (egui::vec2(392.0, 844.0), "-phone")] {
+            let (real, _dir) = open(vec![("Sent", FolderRole::Sent, vec![sent.clone()]), ("Drafts", FolderRole::Drafts, drafts.clone())]);
+            first(&real, ms::Folder::Sent);
+            let mut app = App::with_store(Box::new(real));
+            app.selected = 0;
+            app.folder = ms::Folder::Sent;
+            let mut h = Harness::builder().with_size(size).with_pixels_per_point(1.0).build_ui_state(
+                |ui, (ready, app): &mut (bool, App)| {
+                    if !*ready {
+                        mailbench::kit::setup(ui.ctx());
+                        *ready = true;
+                        ui.ctx().request_repaint();
+                        return;
+                    }
+                    app.show(ui);
+                },
+                (false, app),
+            );
+            for _ in 0..4 {
+                h.run();
+            }
+            for _ in 0..12 {
+                h.run();
+            }
+            h.key_press(egui::Key::Enter);
+            for _ in 0..12 {
+                h.run();
+            }
+            if size.x < 800.0 {
+                h.state_mut().1.reader_focus = true;
+            }
+            for _ in 0..12 {
+                h.run();
+            }
+            let img = h.render().expect("render");
+            let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/screens");
+            img.save(dir.join(format!("thread-real-{tag}{suffix}.png"))).unwrap();
+        }
+    }
 }
 
 #[test]
