@@ -1505,6 +1505,21 @@ impl App {
         ui.spacing_mut().item_spacing.y = 2.0;
         heading(ui, "accounts");
         ui.add_space(4.0);
+        {
+            let on = self.account.is_none();
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), if self.narrow { 44.0 } else { 26.0 }), egui::Sense::click());
+            let p = ui.painter();
+            if on {
+                selection(p, rect);
+            } else if resp.hovered() {
+                p.rect_filled(rect, 2.0, BAND);
+            }
+            put(p, rect.left() + 12.0, 160.0, rect.center().y, "all accounts", body(13.0), if on { VALUE } else { LEGEND });
+            ui.ctx().accesskit_node_builder(resp.id, |n| n.set_label("all accounts"));
+            if resp.clicked() {
+                actions.push(Action::ClearAccount);
+            }
+        }
         for (i, a) in accounts.iter().enumerate() {
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), if self.narrow { 44.0 } else { 38.0 }), egui::Sense::click());
             ui.ctx().accesskit_node_builder(resp.id, |n| n.set_label(format!("account {}", a.name)));
@@ -1512,7 +1527,9 @@ impl App {
                 actions.push(Action::AccountOnly(Some(i)));
             }
             let p = ui.painter();
-            if resp.hovered() {
+            if self.account == Some(i) {
+                selection(p, rect);
+            } else if resp.hovered() {
                 p.rect_filled(rect, 2.0, BAND);
             }
             let tint = match a.sync {

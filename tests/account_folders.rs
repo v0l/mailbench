@@ -194,6 +194,21 @@ fn the_sidebar_action_isolates_one_account_and_the_chip_clears_it() {
 }
 
 #[test]
+fn clicking_an_account_filters_to_it_and_all_accounts_clears_it() {
+    let (mut h, _d) = open();
+    h.get_by_label("account dms").click();
+    h.run();
+    h.run();
+    assert_eq!(h.state().1.account, Some(1));
+    assert_eq!(rows(&h.state().1, &h.state().1.query()), 3);
+    h.get_by_label("all accounts").click();
+    h.run();
+    h.run();
+    assert_eq!(h.state().1.account, None);
+    assert_eq!(rows(&h.state().1, &h.state().1.query()), 5);
+}
+
+#[test]
 fn the_phone_layout_reaches_account_folders_with_44px_targets() {
     let (mut h, _d) = open();
     h.set_size(egui::vec2(390.0, 844.0));
