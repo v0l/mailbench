@@ -546,7 +546,7 @@ pub fn message_card_head(ui: &mut Ui, h: &CardHead, narrow: bool) -> CardResp {
         if h.mine { " (you)" } else { "" },
         if h.unread { ", unread" } else { "" },
         h.when,
-        if h.open { "" } else { h.snippet.unwrap_or_default() }
+        if h.open || h.focused { "" } else { h.snippet.unwrap_or_default() }
     );
     let label = if h.attach { format!("{label}, has attachment") } else { label };
     resp.widget_info(move || egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label.clone()));
