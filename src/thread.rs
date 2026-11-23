@@ -9,7 +9,23 @@ fn is_quote_line(line: &str) -> bool {
 
 fn is_attribution(line: &str) -> bool {
     let t = line.trim();
-    (t.starts_with("On ") && t.ends_with("wrote:")) || (t.starts_with("-----Original Message") || t.starts_with("From:") && t.len() < 4)
+    (t.starts_with("On ") && t.ends_with("wrote:")) || t.starts_with("-----Original Message")
+}
+
+fn is_attribution_block(p: &str) -> bool {
+    let flat = normal_text(p);
+    (flat.starts_with("On ") && flat.ends_with("wrote:")) || flat.starts_with("-----Original Message") || flat.starts_with("---------- Forwarded")
+}
+
+fn is_header_block(p: &str) -> bool {
+    let mut lines = p.lines().map(str::trim);
+    let first = lines.next().unwrap_or_default();
+    let rest: Vec<&str> = lines.collect();
+    first.starts_with("From:") && rest.iter().any(|l| l.starts_with("Sent:") || l.starts_with("Date:")) && rest.iter().any(|l| l.starts_with("Subject:") || l.starts_with("To:"))
+}
+
+fn normal_text(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn is_signature_marker(line: &str) -> bool {
@@ -56,22 +72,33 @@ fn normal(s: &str) -> String {
 pub fn without_parent_text(paragraphs: &[String], parent: &[String]) -> Vec<String> {
     let parent_paras: HashSet<String> = new_text(parent).iter().map(|p| normal(p)).filter(|p| !p.is_empty()).collect();
     let parent_lines: HashSet<String> = parent.iter().flat_map(|p| p.lines()).map(normal).filter(|l| !l.is_empty()).collect();
-    paragraphs
-        .iter()
-        .filter(|p| {
-            let n = normal(p);
-            if n.is_empty() {
-                return false;
-            }
-            if n.chars().count() >= MIN_REPEAT_CHARS && parent_paras.contains(&n) {
-                return false;
-            }
-            let lines: Vec<String> = p.lines().map(|l| normal(l.trim_start_matches(|c: char| c == '>' || c.is_whitespace()))).filter(|l| !l.is_empty()).collect();
-            let all_parent = !lines.is_empty() && lines.iter().all(|l| parent_lines.contains(l));
-            !(all_parent && p.lines().all(|l| is_quote_line(l) || l.trim().is_empty() || is_attribution(l)))
-        })
-        .cloned()
-        .collect()
+    let all_parent = |p: &str| {
+        let lines: Vec<String> = p.lines().map(normal).filter(|l| !l.is_empty()).collect();
+        !lines.is_empty() && lines.iter().all(|l| parent_lines.contains(l))
+    };
+    let mut out = Vec::new();
+    let mut in_quote_block = false;
+    for p in paragraphs {
+        if is_attribution_block(p) || is_header_block(p) {
+            in_quote_block = true;
+            continue;
+        }
+        if in_quote_block && all_parent(p) {
+            continue;
+        }
+        let n = normal(p);
+        if n.is_empty() || (n.chars().count() >= MIN_REPEAT_CHARS && parent_paras.contains(&n)) {
+            continue;
+        }
+        let kept: Vec<&str> = p
+            .lines()
+            .filter(|l| !(is_attribution(l) || (is_quote_line(l) && (normal(l).is_empty() || parent_lines.contains(&normal(l))))))
+            .collect();
+        if kept.iter().any(|l| !l.trim().is_empty()) {
+            out.push(kept.join("\n"));
+        }
+    }
+    out
 }
 
 pub fn without_parent_quote(quoted: &[String], parent: &[String]) -> Vec<String> {

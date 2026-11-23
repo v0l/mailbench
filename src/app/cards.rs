@@ -218,13 +218,10 @@ impl App {
             }
         }
         if m.html.is_empty() {
-            let mut paras = match parent {
+            let paras = match parent {
                 Some(p) => without_parent_text(&m.paragraphs, &p.paragraphs),
                 None => m.paragraphs.clone(),
             };
-            if paras.is_empty() {
-                paras = m.paragraphs.clone();
-            }
             let quoted = match parent {
                 Some(p) => without_parent_quote(&m.quoted, &p.paragraphs),
                 None => m.quoted.clone(),
