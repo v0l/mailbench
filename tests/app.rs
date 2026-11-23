@@ -129,6 +129,26 @@ fn focus_body(h: &mut Harness<'static, (bool, App)>) {
 }
 
 #[test]
+fn formatted_composer_renders_at_desktop_and_phone_width() {
+    for (size, name) in [(egui::vec2(1280.0, 800.0), "composer-formatted"), (egui::vec2(390.0, 844.0), "phone-composer-formatted")] {
+        let mut h = harness_sized(FakeStore::concept(), size);
+        open_blank_composer(&mut h);
+        {
+            let d = h.state_mut().1.draft.as_mut().unwrap();
+            d.to = "Tomás Rivera <tomás.rivera@example.test>".into();
+            d.subject = "Rev C".into();
+            d.body = "Hi Tomás,\nthe **Rev C** files are ready.\nSee [the zip](https://example.test/revc.zip)\n\n- gerbers\n- paste layer\n- drill file".into();
+        }
+        h.run();
+        h.run();
+        let send = h.get_by_label("send").rect();
+        assert!(send.right() <= size.x && send.bottom() <= size.y, "send at {send:?}");
+        let img = h.render().expect("render");
+        img.save(out_dir().join(format!("{name}.png"))).unwrap();
+    }
+}
+
+#[test]
 fn enter_in_the_body_inserts_a_newline() {
     let mut h = harness(FakeStore::concept());
     open_blank_composer(&mut h);

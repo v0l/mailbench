@@ -75,6 +75,29 @@ async fn open() -> (Harness<'static, State>, tempfile::TempDir, MockRelay) {
 }
 
 #[test]
+fn a_formatted_message_goes_over_nostr_as_exactly_the_typed_text() {
+    mailbench::runtime::block_on(async {
+        let relay = MockRelay::run().await.unwrap();
+        let url = relay.url().await.to_string();
+        let mut alice = nostr(1, &url);
+        let mut bob = nostr(2, &url);
+        let typed = "hello **bold** and [a link](https://example.test)\n- one\n- two";
+        let mut m = dm(&alice, &bob, "fmt");
+        m.body = typed.into();
+        m.html_alternative = true;
+        alice.send(&m).await.unwrap();
+        let delta = bob.sync_folder("Inbox", None).await.unwrap();
+        assert_eq!(delta.added.len(), 1);
+        let raw = bob.fetch("Inbox", delta.added[0].uid).await.unwrap();
+        let parsed = mail_parser::MessageParser::default().parse(&raw).unwrap();
+        assert_eq!(parsed.body_text(0).unwrap().trim_end(), typed);
+        assert!(!String::from_utf8_lossy(&raw).to_lowercase().contains("text/html"));
+        assert!(!String::from_utf8_lossy(&raw).contains("multipart"));
+        assert!(!String::from_utf8_lossy(&raw).contains("<strong>"));
+    });
+}
+
+#[test]
 fn a_nostr_account_reports_no_server_features() {
     mailbench::runtime::block_on(async {
         let (h, _d, _r) = open().await;
