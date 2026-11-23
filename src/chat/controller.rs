@@ -298,6 +298,10 @@ impl ChatController {
                 if let Some(store) = &self.store {
                     store.save_rooms(&self.state.rooms);
                 }
+                let empty: Vec<RoomId> = self.state.rooms.iter().filter(|r| self.state.thread(&r.id).is_empty() && r.last_message.is_some()).map(|r| r.id.clone()).collect();
+                for room in empty {
+                    self.load_history(&room);
+                }
             }
             Update::Contacts(c) => self.contacts = c,
             Update::History { room, older, was_before } => {

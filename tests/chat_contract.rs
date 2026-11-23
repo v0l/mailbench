@@ -67,12 +67,12 @@ pub async fn contract(b: &mut dyn ChatBackend) {
     }
 
     if caps.reactions {
-        b.react(&room.id, &second.id, "\u{1F44D}", true).await.unwrap();
+        b.react(&room.id, &second.id, "+1", true).await.unwrap();
         let ev = next_event(&mut rx, |e| matches!(e, ChatEvent::Reaction { .. })).await;
         assert!(matches!(ev, ChatEvent::Reaction { added: true, .. }));
         let h = b.history(&room.id, None, 10).await.unwrap();
-        assert!(h.iter().find(|m| m.id == second.id).unwrap().reacted("\u{1F44D}", &me.id));
-        b.react(&room.id, &second.id, "\u{1F44D}", false).await.unwrap();
+        assert!(h.iter().find(|m| m.id == second.id).unwrap().reacted("+1", &me.id));
+        b.react(&room.id, &second.id, "+1", false).await.unwrap();
         let h = b.history(&room.id, None, 10).await.unwrap();
         assert!(h.iter().find(|m| m.id == second.id).unwrap().reactions.is_empty());
     } else {

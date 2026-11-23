@@ -266,9 +266,9 @@ impl FakeHandle {
         let mut with_file = ChatMessage::new("", &crew, &MemberId::new("cy"), 0, "Route for today attached.");
         with_file.attachments.push(ChatAttachment { name: "route.pdf".into(), size: 48_200, mime: "application/pdf".into() });
         self.say_message(with_file);
-        self.react_as(&crew, &first, "bo", "\u{1F44D}", true);
-        self.react_as(&crew, &first, "cy", "\u{1F44D}", true);
-        self.react_as(&crew, &second, "me", "\u{2705}", true);
+        self.react_as(&crew, &first, "bo", "+1", true);
+        self.react_as(&crew, &first, "cy", "+1", true);
+        self.react_as(&crew, &second, "me", "\u{2713}", true);
         let typo = self.say(&crew, "cy", "Weather looks fine tomorow.");
         self.edit_as(&crew, &typo, "Weather looks fine tomorrow.");
         let gone = self.say(&crew, "ann", "Wrong chat, sorry.");

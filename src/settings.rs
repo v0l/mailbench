@@ -135,6 +135,8 @@ impl Panels {
         ui.add_space(8.0);
         self.writing(ui);
         ui.add_space(8.0);
+        self.developer(ui);
+        ui.add_space(8.0);
         self.bodies(ui, store, accounts);
         ui.add_space(8.0);
         self.store_panel(ui, store, accounts);
@@ -366,6 +368,13 @@ impl Panels {
                 }
             });
             hint(ui, "Trusted senders and domains are chosen from the banner on a message and apply when this is set to ask or trusted.");
+        });
+    }
+
+    fn developer(&mut self, ui: &mut Ui) {
+        section(ui, "developer", "unfinished features", |ui| {
+            ui.checkbox(&mut self.prefs.developer_chat, "Developer: chat scaffold");
+            hint(ui, "Shows a Chats section backed by an in-memory fake backend, press t to open it. No real chat backend exists yet.");
         });
     }
 
