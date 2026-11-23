@@ -876,6 +876,7 @@ impl Shared {
             references: msg.references,
             message_id: msg.message_id,
             html_alternative: self.send_html.load(Ordering::Relaxed),
+            agent: msg.agent && msg.folder == ms::Folder::Drafts.name(),
             attachments,
             ..Default::default()
         })

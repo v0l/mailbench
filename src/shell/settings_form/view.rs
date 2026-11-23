@@ -108,6 +108,11 @@ impl SettingsForm {
                 Section::General => self.panels.general(ui),
                 Section::Security => self.security(ui, store),
                 Section::MailHandling => self.mail_handling(ui, store),
+                Section::Agents => {
+                    let accounts = self.drafts.clone();
+                    let narrow = self.page.narrow;
+                    self.agents.show(ui, store, &accounts, narrow);
+                }
                 Section::Updates => self.updates(ui),
                 Section::About => self.about(ui),
                 Section::Accounts => {}

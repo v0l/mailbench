@@ -4,6 +4,7 @@ pub mod http;
 pub mod mail;
 pub mod prefs;
 pub mod rpc;
+pub mod runner;
 pub mod sanitize;
 pub mod token;
 pub mod tools;

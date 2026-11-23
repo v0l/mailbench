@@ -939,6 +939,8 @@ pub struct Shell {
     settings: Option<SettingsForm>,
     open_dir: PathBuf,
     return_to_settings: bool,
+    agent_server: Option<crate::mcp::runner::Running>,
+    agent_error: Option<String>,
 }
 
 pub const UPDATE_REPO: &str = "v0l/mailbench";
@@ -975,6 +977,8 @@ impl Shell {
             settings: None,
             open_dir: crate::attach::default_open_dir(),
             return_to_settings: false,
+            agent_server: None,
+            agent_error: None,
         };
         crate::attach::wipe_open_dir(&shell.open_dir);
         shell.start();
@@ -987,6 +991,31 @@ impl Shell {
         shell.open_dir = open_dir;
         shell.apply_open_settings();
         shell
+    }
+
+    fn sync_agent_server(&mut self) {
+        let Some(store) = &self.store else { return };
+        let prefs = crate::mcp::prefs::load(store);
+        let wanted = prefs.enabled && matches!(self.screen, Screen::Main(_));
+        let running_port = self.agent_server.as_ref().map(|r| r.port);
+        if !wanted || running_port.is_some_and(|p| p != prefs.port) {
+            self.agent_server = None;
+            self.agent_error = None;
+        }
+        if wanted && self.agent_server.is_none() {
+            match crate::mcp::runner::start(store, &self.dir, Some(prefs.port), false) {
+                Ok(r) => self.agent_server = Some(r),
+                Err(e) => self.agent_error = Some(e),
+            }
+        }
+        let state = match (&self.agent_server, &self.agent_error) {
+            (Some(r), _) => Some(Ok(r.port)),
+            (None, Some(e)) => Some(Err(e.clone())),
+            _ => None,
+        };
+        if let Some(form) = &mut self.settings {
+            form.agents.running = state;
+        }
     }
 
     fn apply_prefs(&mut self) {
@@ -1106,6 +1135,7 @@ impl Shell {
         self.screen = Screen::Main(Box::new(Main { app }));
         self.apply_open_settings();
         self.attach();
+        self.sync_agent_server();
     }
 
     fn attach(&mut self) {
@@ -1329,6 +1359,7 @@ impl Shell {
             SettingsEvent::None => {}
             SettingsEvent::Close => self.settings = None,
             SettingsEvent::AllowOpen => self.apply_open_settings(),
+            SettingsEvent::Agents => self.sync_agent_server(),
             SettingsEvent::Prefs => self.apply_prefs(),
             SettingsEvent::Rebuild => {
                 self.build_main();

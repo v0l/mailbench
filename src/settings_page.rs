@@ -4,13 +4,21 @@ pub enum Section {
     Accounts,
     Security,
     MailHandling,
+    Agents,
     Updates,
     About,
 }
 
 impl Section {
-    pub const ALL: [Section; 6] =
-        [Section::General, Section::Accounts, Section::Security, Section::MailHandling, Section::Updates, Section::About];
+    pub const ALL: [Section; 7] = [
+        Section::General,
+        Section::Accounts,
+        Section::Security,
+        Section::MailHandling,
+        Section::Agents,
+        Section::Updates,
+        Section::About,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -18,6 +26,7 @@ impl Section {
             Section::Accounts => "accounts",
             Section::Security => "security",
             Section::MailHandling => "mail handling",
+            Section::Agents => "agents",
             Section::Updates => "updates",
             Section::About => "about",
         }
@@ -192,7 +201,7 @@ mod tests {
         let mut s = wide();
         s.press(Nav::Up);
         assert_eq!(s.section, Section::General);
-        for want in [Section::Accounts, Section::Security, Section::MailHandling, Section::Updates, Section::About, Section::About] {
+        for want in [Section::Accounts, Section::Security, Section::MailHandling, Section::Agents, Section::Updates, Section::About, Section::About] {
             s.press(Nav::Down);
             assert_eq!(s.section, want);
         }

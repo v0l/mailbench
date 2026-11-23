@@ -44,12 +44,24 @@ pub enum Command {
     VerifySmime(VerifyArgs),
     #[command(subcommand)]
     Mcp(McpCmd),
+    Drafts(JsonFlag),
 }
 
 #[derive(Subcommand, Debug)]
 pub enum McpCmd {
     Serve(ServeArgs),
     Token(TokenArgs),
+    Allow(AllowArgs),
+    Status,
+}
+
+#[derive(Args, Debug)]
+pub struct AllowArgs {
+    pub account: String,
+    #[arg(long, help = "Also let agents send from this account without asking")]
+    pub send: bool,
+    #[arg(long, help = "Stop agents seeing this account")]
+    pub off: bool,
 }
 
 #[derive(Args, Debug)]
@@ -569,18 +581,74 @@ fn mcp_token_cmd(a: &TokenArgs) -> Res<()> {
 fn mcp_serve_cmd(a: &ServeArgs) -> Res<()> {
     crate::mcp::ensure_loopback(&a.bind)?;
     let store = open_store()?;
+    let dir = default_data_dir();
     let (token, fresh) = crate::mcp::token::load_or_create(&store)?;
     if fresh {
         eprintln!("new access token: {token}");
     }
-    let tools: std::sync::Arc<dyn crate::mcp::tools::Tools> = std::sync::Arc::new(crate::mcp::tools::Unimplemented);
-    let server = crate::mcp::Server::start(crate::mcp::ServerConfig { token, port: a.port, tools })?;
-    for addr in &server.addrs {
+    let port = if a.port == crate::mcp::DEFAULT_PORT { None } else { Some(a.port) };
+    let running = crate::mcp::runner::start(&store, &dir, port, true)?;
+    for addr in &running.server.addrs {
         eprintln!("listening on http://{addr}/mcp");
+    }
+    let prefs = crate::mcp::prefs::load(&store);
+    if prefs.allowed.is_empty() {
+        eprintln!("no accounts are allowed for agents yet: tick them in Settings > agents");
     }
     loop {
         std::thread::sleep(Duration::from_secs(3600));
     }
+}
+
+fn mcp_allow_cmd(cli: &Cli, a: &AllowArgs) -> Res<()> {
+    let store = open_store()?;
+    let wanted = Some(a.account.clone());
+    let configs = chosen(&store, &wanted.or_else(|| cli.account.clone()))?;
+    let mut prefs = crate::mcp::prefs::load(&store);
+    for c in &configs {
+        prefs.set_allowed(&c.id, !a.off);
+        if !a.off {
+            prefs.set_send(&c.id, a.send);
+        }
+    }
+    crate::mcp::prefs::save(&store, &prefs)?;
+    mcp_status_cmd()
+}
+
+fn mcp_status_cmd() -> Res<()> {
+    let store = open_store()?;
+    let prefs = crate::mcp::prefs::load(&store);
+    println!("port {}", prefs.port);
+    for c in accounts::load_all(&store) {
+        println!("{}\t{}\tagents {}\tsend {}", c.id, c.address, if prefs.allows(&c.id) { "allowed" } else { "not allowed" }, if prefs.may_send(&c.id, c.is_nostr()) { "without asking" } else { "asks first" });
+    }
+    Ok(())
+}
+
+fn drafts_cmd(cli: &Cli, json: bool) -> Res<()> {
+    let s = session(cli)?;
+    let q = Query::new(Folder::Drafts);
+    let page = s.real.list(&q, 0, 200);
+    if json {
+        let items: Vec<Value> = page
+            .items
+            .iter()
+            .map(|i| {
+                let agent = s.real.get(i.id).map(|m| crate::mailstore::is_agent_draft(&m.headers)).unwrap_or(false);
+                let mut v = summary_json(i);
+                v["agent"] = json!(agent);
+                v
+            })
+            .collect();
+        print_json(&Value::Array(items));
+        return Ok(());
+    }
+    for i in &page.items {
+        let agent = s.real.get(i.id).map(|m| crate::mailstore::is_agent_draft(&m.headers)).unwrap_or(false);
+        let note = if agent { crate::mailstore::AGENT_BANNER } else { "" };
+        println!("{}\t{}\t{}\t{}", id_text(i.id), i.when, i.subject, note);
+    }
+    Ok(())
 }
 
 pub fn run(cli: &Cli) -> Res<()> {
@@ -591,6 +659,9 @@ pub fn run(cli: &Cli) -> Res<()> {
         Command::VerifySmime(a) => verify_cmd(a),
         Command::Mcp(McpCmd::Serve(a)) => mcp_serve_cmd(a),
         Command::Mcp(McpCmd::Token(a)) => mcp_token_cmd(a),
+        Command::Mcp(McpCmd::Allow(a)) => mcp_allow_cmd(cli, a),
+        Command::Mcp(McpCmd::Status) => mcp_status_cmd(),
+        Command::Drafts(f) => drafts_cmd(cli, f.json),
         Command::Accounts(f) => accounts_cmd(cli, f.json),
         Command::Folders(f) => folders_cmd(cli, f.json),
         Command::List(a) => list_cmd(cli, a),
