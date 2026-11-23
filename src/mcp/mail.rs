@@ -16,6 +16,7 @@ const BODY_WAIT: Duration = Duration::from_secs(15);
 const SEARCH_WAIT: Duration = Duration::from_secs(20);
 const THREAD_MAX: usize = 50;
 const SNIPPET_CHARS: usize = 120;
+const SNIPPET_WAIT: Duration = Duration::from_secs(4);
 
 fn flag_words(unread: &Value, flagged: &Value, attachments: &Value) -> String {
     let mut words = Vec::new();
@@ -31,7 +32,7 @@ fn flag_words(unread: &Value, flagged: &Value, attachments: &Value) -> String {
 
 fn listing_line(m: &Value) -> String {
     let field = |k: &str, max: usize| sanitize::cell(m[k].as_str().unwrap_or_default(), max);
-    format!(
+    let line = format!(
         "{} | {} | {} | {} | {} | {} | {}",
         field("id", 40),
         m["date"].as_str().unwrap_or("no date"),
@@ -40,7 +41,8 @@ fn listing_line(m: &Value) -> String {
         field("folder", 60),
         flag_words(&m["unread"], &m["flagged"], &m["has_attachments"]),
         field("snippet", SNIPPET_CHARS),
-    )
+    );
+    line.trim_end_matches([' ', '|']).to_string()
 }
 
 pub struct AccountRef {
@@ -295,6 +297,8 @@ impl MailTools {
                 }
             }
         }
+        let wanted: Vec<MessageId> = all.iter().skip(offset).take(limit).map(|s| s.id).collect();
+        until(SNIPPET_WAIT, || wanted.iter().all(|id| store.get(*id).map(|m| m.body_state != crate::mailstore::BodyState::Loading).unwrap_or(true)));
         let total = all.len();
         let page: Vec<Value> = all
             .iter()

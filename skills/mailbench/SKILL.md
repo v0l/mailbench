@@ -74,6 +74,8 @@ When the user runs the agent server (`mailbench mcp serve`, or Settings, agents)
 
 Tools: `list_accounts`, `list_folders {account}`, `search_messages {query, account?, folder?, unread?, from?, since?, limit<=50, cursor?}`, `get_message {id, include_html?, include_junk?}`, `get_thread {id}`, `get_attachment {id, attachment_id}`, `mark_read {ids, read}`, `flag {ids, flagged}`, `move_messages {ids, folder}`, `create_draft {account, to, cc?, bcc?, subject, body, reply_to_id?, attachments?}`, `send_message {draft_id}`. Resources: `mailbench://message/{id}`, `mailbench://thread/{id}`. Page through search with `nextCursor`.
 
+The text block carries the data: a one line summary, a blank line, then one line per item with the id as the first token (`id | date | from | subject | folder | flags | snippet`). You do not need `structuredContent`. If the text ends with a line about omitted items, pass the `cursor` it names.
+
 Rules:
 
 - Only accounts the user ticked are visible. `not allowed` means ask the user, do not look for a way around it.

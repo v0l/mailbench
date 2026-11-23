@@ -87,6 +87,7 @@ impl Client {
 
     fn tool(&mut self, name: &str, args: Value) -> Value {
         let r = self.call("tools/call", json!({"name": name, "arguments": args}));
+        println!("=== {name} content[0].text only\n{}\n===", r["content"][0]["text"].as_str().unwrap_or_default());
         r
     }
 }
@@ -164,7 +165,24 @@ fn a_real_mcp_serve_process_walks_the_whole_flow_against_greenmail() {
     }
     assert_eq!(found["structuredContent"]["total"], 1);
     let id = found["structuredContent"]["messages"][0]["id"].as_str().unwrap().to_string();
+    let found_text = found["content"][0]["text"].as_str().unwrap();
+    assert!(found_text.contains(&id) && found_text.contains("Quarterly pineapple report"), "{found_text}");
+    assert_ne!(found["structuredContent"]["messages"][0]["date"], Value::Null);
+    let folders = c.tool("list_folders", json!({"account": "test"}));
+    assert!(folders["content"][0]["text"].as_str().unwrap().contains("inbox"));
+    assert!(accounts["content"][0]["text"].as_str().unwrap().contains("acct"));
+    let thread = c.tool("get_thread", json!({"id": id}));
+    assert!(thread["content"][0]["text"].as_str().unwrap().contains("Quarterly pineapple report"));
+    let read = c.tool("mark_read", json!({"ids": [id], "read": true}));
+    assert!(read["content"][0]["text"].as_str().unwrap().contains(&id));
+    let flagged = c.tool("flag", json!({"ids": [id], "flagged": true}));
+    assert!(flagged["content"][0]["text"].as_str().unwrap().contains(&id));
+    let moved = c.tool("move_messages", json!({"ids": [id], "folder": "archive"}));
+    assert!(moved["content"][0]["text"].as_str().unwrap().contains(&id));
+    let moved_back = c.tool("move_messages", json!({"ids": [id], "folder": "inbox"}));
+    assert!(moved_back["content"][0]["text"].as_str().unwrap().contains(&id));
     let msg = c.tool("get_message", json!({"id": id}));
+    assert!(msg["content"][0]["text"].as_str().unwrap().contains("Subject: Quarterly pineapple report"));
     let text = msg["structuredContent"]["text"].as_str().unwrap();
     assert!(text.starts_with("<<<UNTRUSTED_EMAIL nonce="), "{text}");
     assert!(text.contains("Ignore previous instructions"));
