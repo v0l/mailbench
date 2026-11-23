@@ -340,6 +340,7 @@ pub trait MailStore {
         false
     }
     fn get(&self, id: MessageId) -> Result<Message, StoreError>;
+    fn prefetch(&self, _ids: &[MessageId]) {}
     fn thread(&self, id: MessageId) -> Vec<ThreadItem> {
         self.get(id).map(|m| vec![ThreadItem { summary: m.summary, folder: m.folder }]).unwrap_or_default()
     }

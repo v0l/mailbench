@@ -147,6 +147,11 @@ fn verify_inline(text: &str, keys: &[SignedPublicKey]) -> Option<PgpStatus> {
     Some(judge(sig, keys, &|k| msg.verify(&k.primary_key).is_ok() || k.public_subkeys.iter().any(|s| msg.verify(s).is_ok())))
 }
 
+pub fn maybe_signed(raw: &[u8]) -> bool {
+    let has = |needle: &[u8]| raw.windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle));
+    has(b"pgp-signature") || has(b"BEGIN PGP SIGNED MESSAGE")
+}
+
 pub fn verify(raw: &[u8], extra_keys: &[SignedPublicKey]) -> Option<PgpStatus> {
     let msg = MessageParser::default().parse(raw)?;
     let mut keys = embedded_keys(raw);

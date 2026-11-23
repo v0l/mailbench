@@ -178,44 +178,52 @@ pub struct Familiarity {
     addresses: std::collections::HashSet<String>,
     domains: std::collections::HashSet<String>,
     earliest: std::collections::HashMap<String, i64>,
+    opened: std::collections::HashMap<String, u32>,
 }
 
 impl Familiarity {
     pub fn build(items: &[HistoryItem], contacts: &[String]) -> Familiarity {
         let mut f = Familiarity::default();
-        let mut opened: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
         for c in contacts {
-            f.addresses.insert(c.trim().to_lowercase());
+            f.add_contact(c);
         }
         for item in items {
-            let from = item.from.trim().to_lowercase();
-            if from.is_empty() {
-                continue;
-            }
-            if item.written_by_user {
-                for t in &item.to {
-                    let t = t.trim().to_lowercase();
-                    if let Some(d) = domain_of(&t) {
-                        f.domains.insert(d);
-                    }
-                    f.addresses.insert(t);
-                }
-                continue;
-            }
-            let e = f.earliest.entry(from.clone()).or_insert(item.date);
-            *e = (*e).min(item.date);
-            if item.flagged {
-                f.addresses.insert(from.clone());
-            }
-            if item.opened {
-                let n = opened.entry(from.clone()).or_default();
-                *n += 1;
-                if *n >= OPENED_MESSAGES_TO_KNOW {
-                    f.addresses.insert(from);
-                }
-            }
+            f.add(item);
         }
         f
+    }
+
+    pub fn add_contact(&mut self, address: &str) {
+        self.addresses.insert(address.trim().to_lowercase());
+    }
+
+    pub fn add(&mut self, item: &HistoryItem) {
+        let from = item.from.trim().to_lowercase();
+        if from.is_empty() {
+            return;
+        }
+        if item.written_by_user {
+            for t in &item.to {
+                let t = t.trim().to_lowercase();
+                if let Some(d) = domain_of(&t) {
+                    self.domains.insert(d);
+                }
+                self.addresses.insert(t);
+            }
+            return;
+        }
+        let e = self.earliest.entry(from.clone()).or_insert(item.date);
+        *e = (*e).min(item.date);
+        if item.flagged {
+            self.addresses.insert(from.clone());
+        }
+        if item.opened {
+            let n = self.opened.entry(from.clone()).or_default();
+            *n += 1;
+            if *n >= OPENED_MESSAGES_TO_KNOW {
+                self.addresses.insert(from);
+            }
+        }
     }
 
     pub fn knows(&self, address: &str, received: i64) -> bool {

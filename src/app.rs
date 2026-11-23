@@ -523,6 +523,7 @@ pub struct App {
     scroll_to_selected: bool,
     go_pending: bool,
     last_shown: Option<MessageId>,
+    last_prefetched: Option<MessageId>,
     dwell: Option<(MessageId, Instant)>,
     dwell_done: bool,
     mark_now: bool,
@@ -597,6 +598,7 @@ impl App {
             scroll_to_selected: false,
             go_pending: false,
             last_shown: None,
+            last_prefetched: None,
             dwell: None,
             dwell_done: false,
             mark_now: false,
@@ -658,6 +660,15 @@ impl App {
             .or_else(|| thread.last().map(|t| t.summary.id))
             .or(head_id);
         let current = shown.and_then(|id| self.store.get(id).ok());
+        if head_id != self.last_prefetched {
+            self.last_prefetched = head_id;
+            let around: Vec<MessageId> = [self.selected.checked_sub(1), Some(self.selected + 1).filter(|n| *n < total)]
+                .into_iter()
+                .flatten()
+                .filter_map(|n| self.store.list(&query, n, 1).items.first().map(|s| s.id))
+                .collect();
+            self.store.prefetch(&around);
+        }
         let id = current.as_ref().map(|m| m.summary.id);
         if id != self.last_shown {
             self.quotes_open = false;

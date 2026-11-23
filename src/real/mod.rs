@@ -23,6 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const OUTBOX: &str = "outbox";
 const QUICK_PAGE: usize = 500;
+const BUILD_PAGE: usize = 200;
 const FETCH_RETRY: Duration = Duration::from_secs(5);
 const LOCAL: &str = "local";
 const ATTACH: &str = "attach";
@@ -159,6 +160,18 @@ struct Cache {
     shape: Vec<TreeFolder>,
     validity: HashMap<(usize, String), u32>,
     seen: HashMap<String, SeenAddress>,
+    familiar: Arc<crate::spoof::Familiarity>,
+}
+
+fn history_item<'a>(e: &'a Entry, own: &[String]) -> crate::spoof::HistoryItem<'a> {
+    crate::spoof::HistoryItem {
+        from: &e.from_address,
+        to: e.to_key.split_whitespace().map(|t| t.trim_matches(|c: char| matches!(c, '<' | '>' | ',' | ';' | '(' | ')' | '"'))).filter(|t| t.contains('@')).collect(),
+        written_by_user: e.folder == ms::Folder::Sent || own.contains(&e.from_address.trim().to_lowercase()),
+        opened: !e.unread,
+        flagged: e.flagged,
+        date: e.date,
+    }
 }
 
 #[derive(Clone)]
@@ -411,10 +424,19 @@ impl Shared {
     }
 
     fn patch(&self, id: u64, f: impl FnOnce(&mut Entry)) {
+        let own = self.own_addresses();
         let mut guard = lock(&self.cache);
         let cache = Arc::make_mut(&mut guard);
         if let Some(i) = cache.by_id.get(&id).copied() {
+            let (was_unread, was_flagged) = (cache.entries[i].unread, cache.entries[i].flagged);
             f(&mut cache.entries[i]);
+            let e = &cache.entries[i];
+            if (was_unread && !e.unread) || (!was_flagged && e.flagged) {
+                let mut item = history_item(e, &own);
+                item.opened = was_unread && !e.unread;
+                item.flagged = !was_flagged && e.flagged;
+                Arc::make_mut(&mut cache.familiar).add(&item);
+            }
             let thread = cache.entries[i].thread;
             cache.reindex(thread);
             cache.index_folders();
@@ -480,8 +502,10 @@ impl Shared {
     }
 
     fn insert(&self, entry: Entry) {
+        let own = self.own_addresses();
         let mut guard = lock(&self.cache);
         let cache = Arc::make_mut(&mut guard);
+        Arc::make_mut(&mut cache.familiar).add(&history_item(&entry, &own));
         let at = cache.entries.partition_point(|x| (x.date, x.id) > (entry.date, entry.id));
         cache.entries.insert(at, entry);
         cache.index();
@@ -537,21 +561,17 @@ impl Shared {
         self.repaint();
     }
 
-    fn familiarity(&self) -> crate::spoof::Familiarity {
-        let cache = lock(&self.cache).clone();
-        let own: Vec<String> = self.accounts.iter().map(|a| a.address.trim().to_lowercase()).collect();
-        let items: Vec<crate::spoof::HistoryItem> = cache
-            .entries
-            .iter()
-            .map(|e| crate::spoof::HistoryItem {
-                from: &e.from_address,
-                to: e.to_key.split_whitespace().map(|t| t.trim_matches(|c: char| matches!(c, '<' | '>' | ',' | ';' | '(' | ')' | '"'))).filter(|t| t.contains('@')).collect(),
-                written_by_user: e.folder == ms::Folder::Sent || own.contains(&e.from_address.trim().to_lowercase()),
-                opened: !e.unread,
-                flagged: e.flagged,
-                date: e.date,
-            })
-            .collect();
+    fn familiarity(&self) -> Arc<crate::spoof::Familiarity> {
+        lock(&self.cache).familiar.clone()
+    }
+
+    fn own_addresses(&self) -> Vec<String> {
+        self.accounts.iter().map(|a| a.address.trim().to_lowercase()).collect()
+    }
+
+    fn build_familiarity(&self, entries: &[Entry]) -> crate::spoof::Familiarity {
+        let own = self.own_addresses();
+        let items: Vec<crate::spoof::HistoryItem> = entries.iter().map(|e| history_item(e, &own)).collect();
         let contacts: Vec<String> = lock(&self.contacts).values().map(|c| c.address.clone()).collect();
         crate::spoof::Familiarity::build(&items, &contacts)
     }
@@ -597,6 +617,7 @@ impl Shared {
     }
 
     fn parse_one(&self, e: &Entry) {
+        let started = std::time::Instant::now();
         let raw = {
             let store = self.lock_store();
             StoreSink::new(&store, &self.accounts[e.account].id, true).body(&e.server_folder, e.uid).ok().flatten()
@@ -608,14 +629,29 @@ impl Shared {
             self.repaint();
             return;
         };
+        let read = started.elapsed();
         let (body, smime, decrypt_note) = self.open_body(&raw);
+        let parsed = started.elapsed();
         let mut headers = headers::parse_headers(&raw);
         headers.smime = smime;
         headers.decrypt_note = decrypt_note;
         let known: Vec<String> = lock(&self.contacts).values().map(|c| c.address.clone()).collect();
         let familiar = self.familiarity();
-        headers.spoof = crate::spoof::assess_with(&headers::from_name(&headers.all), &e.from_address, &known, Some(&familiar), e.date);
-        headers.pgp = crate::openpgp::verify(&raw, &[]);
+        headers.spoof = crate::spoof::assess_with(&headers::from_name(&headers.all), &e.from_address, &known, Some(&*familiar), e.date);
+        let spoofed = started.elapsed();
+        headers.pgp = if crate::openpgp::maybe_signed(&raw) { crate::openpgp::verify(&raw, &[]) } else { None };
+        if std::env::var_os("MAILBENCH_OPEN_LOG").is_some() {
+            let end = started.elapsed();
+            eprintln!(
+                "open id={} store_read={:?} open_body={:?} headers_spoof={:?} pgp={:?} total={:?}",
+                e.id,
+                read,
+                parsed - read,
+                spoofed - parsed,
+                end - spoofed,
+                end
+            );
+        }
         let envelope = display::envelope(&raw);
         let message = Message {
             summary: summary(e, now()),
@@ -1026,6 +1062,7 @@ impl Shared {
         if let Ok(raw) = serde_json::to_vec(&record) {
             let _ = self.lock_store().put(CONTACT, &key, &raw);
         }
+        Arc::make_mut(&mut Arc::make_mut(&mut lock(&self.cache)).familiar).add_contact(&key);
     }
 
     pub fn drafts_folder(&self, account: &str) -> String {
@@ -1127,7 +1164,7 @@ impl Shared {
                 let page = {
                     let store = self.lock_store();
                     let sink = StoreSink::new(&store, &account.id, true);
-                    if quick { sink.newest_page(stored_name, None, QUICK_PAGE) } else { sink.messages_page(stored_name, after.as_deref(), 2000) }.unwrap_or_default()
+                    if quick { sink.newest_page(stored_name, None, QUICK_PAGE) } else { sink.messages_page(stored_name, after.as_deref(), BUILD_PAGE) }.unwrap_or_default()
                 };
                 let Some((last, _)) = page.last() else { break };
                 after = if quick { None } else { Some(last.clone()) };
@@ -1259,6 +1296,7 @@ impl Shared {
             let _ = key;
         }
         cache.entries.sort_by(|a, b| b.date.cmp(&a.date).then(b.id.cmp(&a.id)));
+        cache.familiar = Arc::new(self.build_familiarity(&cache.entries));
         cache.index();
         cache
     }
@@ -1413,11 +1451,15 @@ impl RealStore {
         *lock(&shared.parser) = Some(parse_tx);
         let parsing = shared.clone();
         threads.push(std::thread::spawn(move || {
-            for e in parse_rx {
-                if parsing.stop.load(Ordering::Relaxed) {
-                    break;
+            while let Ok(first) = parse_rx.recv() {
+                let mut batch = vec![first];
+                batch.extend(parse_rx.try_iter());
+                for e in batch.into_iter().rev() {
+                    if parsing.stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    parsing.parse_one(&e);
                 }
-                parsing.parse_one(&e);
             }
         }));
         let (job_tx, job_rx) = channel();
@@ -1655,6 +1697,22 @@ impl MailStore for RealStore {
 
     fn searching(&self, query: &Query) -> bool {
         self.shared.searching(query)
+    }
+
+    fn prefetch(&self, ids: &[MessageId]) {
+        for id in ids {
+            let Ok(e) = self.entry(*id) else { continue };
+            if e.local.is_some() {
+                continue;
+            }
+            let stored = {
+                let store = self.shared.lock_store();
+                StoreSink::new(&store, &self.shared.accounts[e.account].id, true).body_size(&e.server_folder, e.uid).unwrap_or(0) > 0
+            };
+            if !stored {
+                self.shared.request_body(&e);
+            }
+        }
     }
 
     fn get(&self, id: MessageId) -> Result<Message, StoreError> {
