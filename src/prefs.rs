@@ -209,9 +209,52 @@ pub const COMMANDS: [Command; 15] = [
     Command { id: "account_only", label: "this account only", default: egui::Key::V, hint: true },
 ];
 
+pub const SETTINGS_KEY: egui::Key = egui::Key::Comma;
+pub const EXPAND_ALL_KEY: egui::Key = egui::Key::CloseBracket;
+pub const COLLAPSE_ALL_KEY: egui::Key = egui::Key::OpenBracket;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    Everywhere,
+    List,
+    Reader,
+}
+
+impl Scope {
+    pub fn overlaps(self, other: Scope) -> bool {
+        self == Scope::Everywhere || other == Scope::Everywhere || self == other
+    }
+}
+
+pub const FIXED_KEYS: [(Scope, egui::Key, &str); 9] = [
+    (Scope::Everywhere, SETTINGS_KEY, "settings"),
+    (Scope::Everywhere, egui::Key::Escape, "back"),
+    (Scope::Everywhere, egui::Key::G, "go to"),
+    (Scope::Everywhere, egui::Key::O, "open file"),
+    (Scope::Everywhere, egui::Key::Num3, "move to trash"),
+    (Scope::Reader, egui::Key::N, "next conversation"),
+    (Scope::Reader, egui::Key::P, "previous conversation"),
+    (Scope::Reader, EXPAND_ALL_KEY, "expand all"),
+    (Scope::Reader, COLLAPSE_ALL_KEY, "collapse all"),
+];
+
+pub fn key_clashes() -> Vec<String> {
+    let mut all: Vec<(Scope, egui::Key, String)> = COMMANDS.iter().map(|c| (Scope::Everywhere, c.default, c.label.to_string())).collect();
+    all.extend(FIXED_KEYS.iter().map(|(s, k, l)| (*s, *k, l.to_string())));
+    let mut out = Vec::new();
+    for (i, (sa, ka, la)) in all.iter().enumerate() {
+        for (sb, kb, lb) in &all[i + 1..] {
+            if ka == kb && sa.overlaps(*sb) {
+                out.push(format!("{} is used for both {la} and {lb}", key_label(*ka)));
+            }
+        }
+    }
+    out
+}
+
 pub const FIXED: [(&str, &str, bool); 9] = [
     ("n p", "next or previous conversation", false),
-    (". ,", "expand or collapse all", false),
+    ("] [", "expand or collapse all", false),
     ("Enter", "open or fold a message card", false),
     ("g i", "go to inbox", false),
     ("g a", "go to archive", false),
@@ -221,12 +264,13 @@ pub const FIXED: [(&str, &str, bool); 9] = [
     ("Esc", "back", true),
 ];
 
-const RESERVED: [egui::Key; 10] = [
+const RESERVED: [egui::Key; 11] = [
     egui::Key::G,
     egui::Key::O,
     egui::Key::N,
     egui::Key::P,
-    egui::Key::Period,
+    egui::Key::CloseBracket,
+    egui::Key::OpenBracket,
     egui::Key::Comma,
     egui::Key::Escape,
     egui::Key::Num3,
@@ -394,6 +438,20 @@ pub fn save(store: &Store, prefs: &Prefs) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_two_commands_share_a_key_in_the_same_context() {
+        let clashes = key_clashes();
+        assert!(clashes.is_empty(), "{clashes:?}");
+    }
+
+    #[test]
+    fn the_legend_names_the_keys_the_table_binds() {
+        let legend: Vec<&str> = FIXED.iter().map(|(k, _, _)| *k).collect();
+        assert!(legend.contains(&"] ["), "{legend:?}");
+        assert_eq!(key_label(EXPAND_ALL_KEY), "]");
+        assert_eq!(key_label(COLLAPSE_ALL_KEY), "[");
+    }
 
     #[test]
     fn plain_text_only_defaults_off_and_survives_a_reopen() {

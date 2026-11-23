@@ -191,11 +191,11 @@ fn expand_all_and_collapse_all_buttons_and_keys() {
     h.run();
     h.run();
     assert!(h.state().1.cards.open.is_empty());
-    h.key_press(egui::Key::Period);
+    h.key_press(egui::Key::CloseBracket);
     h.run();
     h.run();
     assert_eq!(h.state().1.cards.open.len(), 5);
-    h.key_press(egui::Key::Comma);
+    h.key_press(egui::Key::OpenBracket);
     h.run();
     h.run();
     assert!(h.state().1.cards.open.is_empty());

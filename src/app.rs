@@ -721,7 +721,7 @@ impl App {
         if ctx.egui_wants_keyboard_input() && !ctx.memory(|m| m.focused()).is_some_and(|f| f == egui::Id::new(PLAIN_BODY)) {
             return Vec::new();
         }
-        if Self::pressed(ctx, K::Comma) {
+        if Self::pressed(ctx, crate::prefs::SETTINGS_KEY) {
             self.settings_requested = true;
             return Vec::new();
         }
@@ -817,10 +817,10 @@ impl App {
             if Self::pressed(ctx, K::P) {
                 out.push(Action::ListPrevious);
             }
-            if Self::pressed(ctx, K::Period) {
+            if Self::pressed(ctx, crate::prefs::EXPAND_ALL_KEY) {
                 out.push(Action::ExpandAll);
             }
-            if Self::pressed(ctx, K::Comma) {
+            if Self::pressed(ctx, crate::prefs::COLLAPSE_ALL_KEY) {
                 out.push(Action::CollapseAll);
             }
         }
