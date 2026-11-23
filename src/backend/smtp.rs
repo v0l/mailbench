@@ -119,10 +119,17 @@ fn build(m: &OutgoingMessage, keep_bcc: bool) -> Result<Message> {
             .map_err(|e| BackendError::Protocol(format!("bad address {}: {e}", m.from.address)))?;
         b = b.envelope(lettre::address::Envelope::new(Some(from.clone()), vec![from]).map_err(|e| BackendError::Protocol(e.to_string()))?);
     }
+    let body_part = body_part(m);
     let built = if m.attachments.is_empty() {
-        b.singlepart(plain_part(&m.body))
+        match body_part {
+            BodyPart::Single(s) => b.singlepart(s),
+            BodyPart::Alternative(a) => b.multipart(a),
+        }
     } else {
-        let mut mixed = MultiPart::mixed().singlepart(plain_part(&m.body));
+        let mut mixed = match body_part {
+            BodyPart::Single(s) => MultiPart::mixed().singlepart(s),
+            BodyPart::Alternative(a) => MultiPart::mixed().multipart(a),
+        };
         for a in &m.attachments {
             let mime = ContentType::parse(&a.mime).unwrap_or_else(|_| ContentType::parse("application/octet-stream").expect("valid"));
             mixed = mixed.singlepart(MimeAttachment::new(a.name.clone()).body(a.data.clone(), mime));
@@ -130,6 +137,23 @@ fn build(m: &OutgoingMessage, keep_bcc: bool) -> Result<Message> {
         b.multipart(mixed)
     };
     built.map_err(|e| BackendError::Protocol(e.to_string()))
+}
+
+enum BodyPart {
+    Single(SinglePart),
+    Alternative(MultiPart),
+}
+
+fn body_part(m: &OutgoingMessage) -> BodyPart {
+    let plain = plain_part(&m.body);
+    if !m.html_alternative {
+        return BodyPart::Single(plain);
+    }
+    let (html, marked) = crate::richtext::render(&m.body);
+    if !marked {
+        return BodyPart::Single(plain);
+    }
+    BodyPart::Alternative(MultiPart::alternative().singlepart(plain).singlepart(SinglePart::html(html)))
 }
 
 fn plain_part(body: &str) -> SinglePart {

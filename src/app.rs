@@ -2394,6 +2394,7 @@ impl App {
     fn send_draft(&mut self) {
         let Some(mut d) = self.draft.take() else { return };
         d.commit_inputs();
+        self.store.set_send_html(!self.prefs.plain_text_only);
         let to = d.to.clone();
         match self.store.append(Folder::Sent, d.outgoing()) {
             Ok(id) => {

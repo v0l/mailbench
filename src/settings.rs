@@ -353,6 +353,10 @@ impl Panels {
             });
             ui.checkbox(&mut reading.dark_html, "dark reading for HTML");
         });
+        section(ui, "writing", "how messages are sent", |ui| {
+            ui.checkbox(&mut self.prefs.plain_text_only, "send as plain text only");
+            hint(ui, "Off: messages with bold, links, lists, quotes or code also carry an HTML copy. On: only the text you typed is sent.");
+        });
     }
 
     fn keyboard(&mut self, ui: &mut Ui) {

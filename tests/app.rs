@@ -184,6 +184,34 @@ fn tab_in_the_body_does_not_insert_a_tab() {
     assert_eq!(h.state().1.draft.as_ref().unwrap().body, "x");
 }
 
+#[test]
+fn ctrl_b_wraps_the_typed_word_in_bold_marks() {
+    let mut h = harness(FakeStore::concept());
+    open_blank_composer(&mut h);
+    focus_body(&mut h);
+    h.get_by_label("message body").type_text("word");
+    h.run();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::B);
+    h.run();
+    h.run();
+    assert_eq!(h.state().1.draft.as_ref().unwrap().body, "**word**");
+}
+
+#[test]
+fn the_list_button_prefixes_the_line() {
+    let mut h = harness(FakeStore::concept());
+    open_blank_composer(&mut h);
+    focus_body(&mut h);
+    h.get_by_label("message body").type_text("item");
+    h.run();
+    h.get_by_label("list").click();
+    h.run();
+    h.run();
+    assert_eq!(h.state().1.draft.as_ref().unwrap().body, "- item");
+}
+
 fn inbox_ids(app: &App) -> Vec<MessageId> {
     app.store.list(&Query::new(Folder::Inbox), 0, 100_000).items.iter().map(|s| s.id).collect()
 }

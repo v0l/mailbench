@@ -21,6 +21,7 @@ pub mod mailstore;
 pub mod notify;
 pub mod oauth;
 pub mod prefs;
+pub mod richtext;
 pub mod real;
 pub mod runtime;
 pub mod search;

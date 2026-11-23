@@ -296,6 +296,7 @@ pub(crate) struct Shared {
     index_epoch: AtomicU64,
     policies: Mutex<Vec<crate::search::BackfillPolicy>>,
     body_policy: Mutex<crate::prefs::BodyPolicy>,
+    send_html: std::sync::atomic::AtomicBool,
     sync_opts: Mutex<Vec<crate::accounts::SyncOptions>>,
     progress: Mutex<Vec<Option<(usize, usize)>>>,
     backfill_wake: Mutex<Vec<Arc<tokio::sync::Notify>>>,
@@ -837,6 +838,7 @@ impl Shared {
             in_reply_to: msg.in_reply_to,
             references: msg.references,
             message_id: msg.message_id,
+            html_alternative: self.send_html.load(Ordering::Relaxed),
             attachments,
             ..Default::default()
         })
@@ -1382,6 +1384,7 @@ impl RealStore {
             index_epoch: AtomicU64::new(0),
             policies: Mutex::new(vec![Default::default(); accounts.len()]),
             body_policy: Mutex::new(Default::default()),
+            send_html: std::sync::atomic::AtomicBool::new(true),
             sync_opts: Mutex::new(vec![Default::default(); accounts.len()]),
             progress: Mutex::new(vec![None; accounts.len()]),
             backfill_wake: Mutex::new(Vec::new()),
@@ -2233,6 +2236,10 @@ impl MailStore for RealStore {
 
     fn send_hold(&self) -> Duration {
         *lock(&self.shared.hold)
+    }
+
+    fn set_send_html(&self, on: bool) {
+        self.shared.send_html.store(on, Ordering::Relaxed);
     }
 }
 

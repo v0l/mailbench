@@ -360,6 +360,8 @@ pub struct Prefs {
     pub keys: Bindings,
     #[serde(default)]
     pub layout: LayoutPrefs,
+    #[serde(default)]
+    pub plain_text_only: bool,
 }
 
 pub fn load(store: &Store) -> Prefs {
