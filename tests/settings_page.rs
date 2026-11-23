@@ -128,7 +128,7 @@ fn boot() -> Rig {
 impl Rig {
     fn settle(&mut self) {
         for _ in 0..6 {
-            self.h.run();
+            let _ = self.h.try_run();
         }
     }
 
