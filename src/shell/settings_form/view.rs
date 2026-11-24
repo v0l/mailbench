@@ -236,6 +236,19 @@ impl SettingsForm {
         if let Some((ok, text)) = &self.message {
             status(ui, *ok, text);
         }
+        let offers = self.rename_offers.clone();
+        for offer in offers {
+            note(ui, &format!("Rename \"{OLD_DEFAULT_NAME}\" to \"{}\"", offer.name), READOUT);
+            ui.horizontal_wrapped(|ui| {
+                if ui.add(Key::new(format!("rename to {}", offer.name)).solid(READOUT)).clicked() {
+                    self.acts.accept_rename = Some(offer.id.clone());
+                }
+                if ui.add(Key::new(format!("dismiss rename {}", offer.name)).outline(VALUE)).clicked() {
+                    self.acts.dismiss_rename = Some(offer.id.clone());
+                }
+            });
+            ui.add_space(6.0);
+        }
         if self.drafts.is_empty() {
             hint(ui, "No accounts yet.");
         }

@@ -49,6 +49,28 @@ pub struct SettingsForm {
     acts: Acts,
     confirmed_leave: Option<Leave>,
     removed: bool,
+    pub rename_offers: Vec<RenameOffer>,
+    offer_rx: Option<Receiver<RenameOffer>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenameOffer {
+    pub id: String,
+    pub name: String,
+}
+
+pub const OLD_DEFAULT_NAME: &str = "nostr";
+const RENAME_DISMISSED_PREFIX: &str = "nostr-rename-dismissed.";
+
+fn rename_dismissed(store: &Store, id: &str) -> bool {
+    store.get(SETTINGS_KIND, &format!("{RENAME_DISMISSED_PREFIX}{id}")).ok().flatten().is_some()
+}
+
+fn offered_name(profile: Option<(String, String)>) -> Option<String> {
+    let (handle, shown) = profile?;
+    let name = if handle.is_empty() { shown } else { handle };
+    let name = name.trim().to_string();
+    (!name.is_empty() && name != OLD_DEFAULT_NAME).then_some(name)
 }
 
 struct Signing {
@@ -81,6 +103,8 @@ struct Acts {
     drop_password: bool,
     set_password: bool,
     allow_open_changed: bool,
+    accept_rename: Option<String>,
+    dismiss_rename: Option<String>,
 }
 
 pub enum SettingsEvent {
@@ -189,7 +213,7 @@ fn list_row(ui: &mut Ui, h: f32, on: bool, label: &str) -> (Rect, egui::Response
 impl SettingsForm {
     pub fn new(store: &Store, dir: &std::path::Path) -> Self {
         let drafts = accounts::mail_accounts(store);
-        SettingsForm {
+        let mut form = SettingsForm {
             panels: crate::settings::Panels::new(store, &drafts, crate::settings::default_backup_path(dir)),
             agents: agents::AgentsPanel::new(store),
             original: drafts.clone(),
@@ -216,7 +240,78 @@ impl SettingsForm {
             acts: Acts::default(),
             confirmed_leave: None,
             removed: false,
+            rename_offers: Vec::new(),
+            offer_rx: None,
+        };
+        form.look_for_renames(store);
+        form
+    }
+
+    fn look_for_renames(&mut self, store: &Store) {
+        let pending: Vec<AccountConfig> = self
+            .drafts
+            .iter()
+            .filter(|d| d.is_nostr() && d.name == OLD_DEFAULT_NAME && !rename_dismissed(store, &d.id))
+            .cloned()
+            .collect();
+        if pending.is_empty() {
+            return;
         }
+        let (tx, rx) = channel();
+        self.offer_rx = Some(rx);
+        std::thread::spawn(move || {
+            for cfg in pending {
+                if let Some(name) = offered_name(accounts::nostr_profile(&cfg)) {
+                    let _ = tx.send(RenameOffer { id: cfg.id.clone(), name });
+                }
+            }
+        });
+    }
+
+    fn poll_offers(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.offer_rx else { return };
+        loop {
+            match rx.try_recv() {
+                Ok(offer) => {
+                    if self.drafts.iter().any(|d| d.id == offer.id && d.name == OLD_DEFAULT_NAME) {
+                        self.rename_offers.retain(|o| o.id != offer.id);
+                        self.rename_offers.push(offer);
+                    }
+                }
+                Err(TryRecvError::Empty) => {
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                    return;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.offer_rx = None;
+                    return;
+                }
+            }
+        }
+    }
+
+    fn accept_rename(&mut self, store: &Store, id: &str) -> bool {
+        let Some(pos) = self.rename_offers.iter().position(|o| o.id == id) else { return false };
+        let offer = self.rename_offers.remove(pos);
+        let Some(i) = self.drafts.iter().position(|d| d.id == id && d.name == OLD_DEFAULT_NAME) else { return false };
+        let name = accounts::unique_name(&offer.name, id, &self.drafts);
+        let mut renamed = self.drafts[i].clone();
+        renamed.name = name.clone();
+        if accounts::save(store, &renamed).is_err() {
+            self.message = Some((false, "Could not rename the account".into()));
+            return false;
+        }
+        self.drafts[i].name = name.clone();
+        if let Some(o) = self.original.iter_mut().find(|o| o.id == id) {
+            o.name = name.clone();
+        }
+        self.message = Some((true, format!("Renamed to {name}")));
+        true
+    }
+
+    fn dismiss_rename(&mut self, store: &Store, id: &str) {
+        self.rename_offers.retain(|o| o.id != id);
+        let _ = store.put(SETTINGS_KIND, &format!("{RENAME_DISMISSED_PREFIX}{id}"), b"1");
     }
 
     pub fn focus_account(&mut self, id: &str) {
@@ -344,6 +439,7 @@ impl SettingsForm {
             run.poll(&ctx);
         }
         self.poll_sign_in(&ctx);
+        self.poll_offers(&ctx);
         self.infos = infos.to_vec();
         self.page.narrow = ui.available_width() < NARROW_BELOW;
         self.page.accounts = self.drafts.len();
@@ -366,6 +462,14 @@ impl SettingsForm {
         let acts = std::mem::take(&mut self.acts);
         if let Some(i) = acts.remove {
             self.removing = Some(i);
+        }
+        if let Some(id) = acts.accept_rename {
+            if self.accept_rename(store, &id) {
+                event = SettingsEvent::Rebuild;
+            }
+        }
+        if let Some(id) = acts.dismiss_rename {
+            self.dismiss_rename(store, &id);
         }
         if let Some(i) = acts.clear {
             self.clearing = Some(i);

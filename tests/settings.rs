@@ -289,6 +289,97 @@ fn renaming_a_nostr_account_in_settings_shows_everywhere_and_survives_a_restart(
     assert!(!app.store.accounts().iter().any(|a| a.name == "nostr"));
 }
 
+fn relay_with_profile(secret: &str, name: &str) -> String {
+    mailbench::runtime::block_on(async {
+        let relay = nostr_relay_builder::MockRelay::run().await.unwrap();
+        let url = relay.url().await.to_string();
+        let keys = nostr_sdk::Keys::parse(secret).unwrap();
+        let client = nostr_sdk::Client::new(keys);
+        client.add_relay(url.as_str()).await.unwrap();
+        client.connect().await;
+        let meta = nostr_sdk::Metadata::new().name(name);
+        client.send_event_builder(nostr_sdk::EventBuilder::metadata(&meta)).await.unwrap();
+        std::mem::forget(relay);
+        url
+    })
+}
+
+fn old_nostr(secret: &str, url: &str, name: &str) -> AccountConfig {
+    let mut c = accounts::nostr_config(secret, vec![url.to_string()]).unwrap();
+    c.name = name.into();
+    c
+}
+
+fn wait_for_offers(rig: &mut Rig, want: usize) {
+    for _ in 0..100 {
+        rig.settle();
+        if rig.h.state_mut().1.settings_form().unwrap().rename_offers.len() >= want {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn a_nostr_account_still_named_nostr_is_offered_its_profile_name() {
+    let secret = "0a".repeat(32);
+    let url = relay_with_profile(&secret, "alice");
+    let old = old_nostr(&secret, &url, "nostr");
+    let mut rig = boot_with(|s| accounts::save(s, &old).unwrap());
+    rig.go(Section::Accounts, None);
+    wait_for_offers(&mut rig, 1);
+    rig.h.get_by_label_contains("Rename \"nostr\" to \"alice\"");
+    assert_eq!(accounts::load_all(&rig.store()).iter().find(|a| a.id == old.id).unwrap().name, "nostr");
+}
+
+#[test]
+fn accepting_the_offered_rename_changes_the_name_everywhere_and_persists() {
+    let secret = "0a".repeat(32);
+    let url = relay_with_profile(&secret, "alice");
+    let old = old_nostr(&secret, &url, "nostr");
+    let mut rig = boot_with(|s| accounts::save(s, &old).unwrap());
+    rig.go(Section::Accounts, None);
+    wait_for_offers(&mut rig, 1);
+    rig.click("rename to alice");
+    assert_eq!(accounts::load_all(&rig.store()).iter().find(|a| a.id == old.id).unwrap().name, "alice");
+    let app = rig.h.state().1.app().unwrap();
+    assert!(app.store.accounts().iter().any(|a| a.name == "alice"));
+    assert!(!app.store.accounts().iter().any(|a| a.name == "nostr"));
+    assert!(rig.h.state_mut().1.settings_form().unwrap().rename_offers.is_empty());
+    assert!(!rig.h.state_mut().1.settings_form().unwrap().dirty());
+}
+
+#[test]
+fn dismissing_the_offered_rename_is_remembered_across_restarts() {
+    let secret = "0a".repeat(32);
+    let url = relay_with_profile(&secret, "alice");
+    let old = old_nostr(&secret, &url, "nostr");
+    let mut rig = boot_with(|s| accounts::save(s, &old).unwrap());
+    rig.go(Section::Accounts, None);
+    wait_for_offers(&mut rig, 1);
+    rig.click("dismiss rename alice");
+    assert!(rig.h.state_mut().1.settings_form().unwrap().rename_offers.is_empty());
+    assert_eq!(accounts::load_all(&rig.store()).iter().find(|a| a.id == old.id).unwrap().name, "nostr");
+    rig.h.state_mut().1.open_settings();
+    rig.go(Section::Accounts, None);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    rig.settle();
+    assert!(rig.h.state_mut().1.settings_form().unwrap().rename_offers.is_empty());
+}
+
+#[test]
+fn a_manually_renamed_nostr_account_is_never_offered_a_rename() {
+    let secret = "0a".repeat(32);
+    let url = relay_with_profile(&secret, "alice");
+    let old = old_nostr(&secret, &url, "work dm");
+    let mut rig = boot_with(|s| accounts::save(s, &old).unwrap());
+    rig.go(Section::Accounts, None);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    rig.settle();
+    assert!(rig.h.state_mut().1.settings_form().unwrap().rename_offers.is_empty());
+    assert_eq!(accounts::load_all(&rig.store()).iter().find(|a| a.id == old.id).unwrap().name, "work dm");
+}
+
 #[test]
 fn nostr_accounts_are_recognised_so_server_sync_options_are_hidden() {
     let mut nostr = account();
