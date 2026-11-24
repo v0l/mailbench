@@ -915,7 +915,7 @@ impl AddForm {
 }
 
 mod settings_form;
-pub use settings_form::{SettingsEvent, SettingsForm};
+pub use settings_form::{RenameOffer, SettingsEvent, SettingsForm};
 
 pub struct Main {
     pub app: App,

@@ -933,6 +933,47 @@ fn a_new_greenmail_account_shows_its_folders_with_new_folder_last() {
 }
 
 #[test]
+fn nostr_account_name_persists_across_restart_and_renders_at_both_sizes() {
+    mailbench::runtime::block_on(async {
+        let relay = nostr_relay_builder::MockRelay::run().await.unwrap();
+        let url = relay.url().await.to_string();
+        let d = dir();
+        let kc: Rc<dyn Keychain> = Rc::new(MemKeychain::default());
+        let mut h = boot(d.path(), kc.clone(), env(FixtureNet::default()));
+        h.get_by_label("continue").click();
+        h.run();
+        h.run();
+        add_nostr_through_the_form(&mut h, &"08".repeat(32), &url, "erin");
+        drop(h);
+        for (w, h_px, file) in [(1280.0, 800.0, "nostr-named-settings.png"), (390.0, 844.0, "phone-nostr-named-settings.png")] {
+            let mut h = harness_sized(
+                Shell::new(d.path().to_path_buf(), kc.clone(), env(FixtureNet::default()), Some(KdfParams::fast())),
+                egui::vec2(w, h_px),
+            );
+            h.run();
+            h.run();
+            assert_ne!(h.state().1.screen_name(), "unlock");
+            h.state_mut().1.open_settings();
+            h.run();
+            h.state_mut().1.settings_form().unwrap().page.open_section(mailbench::settings_page::Section::Accounts);
+            h.run();
+            h.run();
+            assert_eq!(h.state_mut().1.settings_form().unwrap().drafts[0].name, "erin");
+            h.get_by_label_contains("account erin");
+            let img = h.render().expect("render");
+            img.save(out_dir().join(file)).unwrap();
+            let id = h.state_mut().1.settings_form().unwrap().drafts[0].id.clone();
+            h.state_mut().1.settings_form().unwrap().rename_offers.push(mailbench::shell::RenameOffer { id, name: "erin".into() });
+            h.run();
+            h.run();
+            h.get_by_label("rename to erin");
+            let img = h.render().expect("render");
+            img.save(out_dir().join(format!("banner-{file}"))).unwrap();
+        }
+    });
+}
+
+#[test]
 fn a_new_nostr_account_shows_its_folders_without_new_folder() {
     mailbench::runtime::block_on(async {
         let relay = nostr_relay_builder::MockRelay::run().await.unwrap();
